@@ -38,8 +38,8 @@ CI matrix not yet run (no remote configured).
 
 | Task | Goal | Status | Notes |
 |---|---|---|---|
-| T2.1 | ID minting + checksum + validation (`ids.py`) | TODO | |
-| T2.2 | Text + JSON canonicalization (`canonical.py`) | TODO | |
+| T2.1 | ID minting + checksum + validation (`ids.py`) | DONE | Sonnet worker recovered after initial orchestration halt; 14 tests passing (includes 5 known checksum vectors, validation, minting, anchors). Confirmed via `make check`: ruff/pyright clean, 41 total tests pass. |
+| T2.2 | Text + JSON canonicalization (`canonical.py`) | DONE | Sonnet worker created both canonical.py and test_canonical.py; 14 tests passing (CRLF/LF, NFC, fence detection, tabs, JSON hashing). Confirmed via `make check`: ruff/pyright clean, 41 total tests pass. |
 | T2.3 | Canonicalization idempotence (property test) | TODO | |
 | T2.4 | Golden serialization corpus (≥15 cases) | TODO | |
 
