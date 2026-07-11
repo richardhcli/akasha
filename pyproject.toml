@@ -1,0 +1,45 @@
+[project]
+name = "akasha"
+version = "0.1.0"
+description = "Personal Truth Maintenance System (pTMS) daemon"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "pydantic",
+    "typer",
+    "watchdog",
+    "httpx",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "hypothesis",
+    "ruff",
+    "pyright",
+]
+
+[project.scripts]
+akasha = "akasha.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/akasha"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+# S102: exec; S301/S302/S307: pickle/marshal/eval — banned everywhere (build-plan rule 0.5)
+extend-select = ["S102", "S301", "S302", "S307"]
+
+[tool.pyright]
+include = ["src"]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"

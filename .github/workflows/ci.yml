@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run ruff check src tests
+      - run: uv run pyright src
+      - run: uv run pytest tests/unit tests/property
+
+  windows-gate:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "windows-latest leg of 'check' is the release gate (spec §3, §6.3)"
+
+  # Reserved for later milestones:
+  # - nightly-battery: `make battery` on a schedule trigger (wired at M5+)
+  # - nightly-soak: long-running soak test (wired at M5+)
+  # - openapi-snapshot: diff docs/api-snapshot/openapi.json against the live app,
+  #   fail on unreviewed drift (wired at M4, spec §7.12)

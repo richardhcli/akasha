@@ -1,0 +1,126 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read(/home/richardhcli/personal-projects/akasha/**)",
+      "Edit(/home/richardhcli/personal-projects/akasha/**)",
+      "Write(/home/richardhcli/personal-projects/akasha/**)",
+      "Bash(git *)",
+      "Bash(git -C /home/richardhcli/personal-projects/akasha *)",
+      "Bash(npm *)",
+      "Bash(npm run *)",
+      "Bash(npm test)",
+      "Bash(npm install)",
+      "Bash(uv *)",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(find /home/richardhcli/personal-projects/akasha *)",
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(head *)",
+      "Bash(tail *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(git push --force *)",
+      "Bash(sudo *)",
+      "Bash(rm /home/richardhcli/personal-projects/akasha/.env*)",
+      "Write(/home/richardhcli/personal-projects/akasha/.env*)",
+      "Write(/home/richardhcli/personal-projects/akasha/.git/**)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "network": {
+      "allowedDomains": [
+        "github.com",
+        "*.github.com",
+        "api.github.com",
+        "npm.js.org",
+        "npmjs.org",
+        "*.npmjs.org",
+        "registry.npmjs.org",
+        "*.npmjs.com",
+        "pypi.org",
+        "*.pypi.org",
+        "*.python.org",
+        "github.io",
+        "*.github.io",
+        "localhost",
+        "127.0.0.1"
+      ],
+      "allowLocalBinding": true
+    },
+    "filesystem": {
+      "allowWrite": [
+        "/home/richardhcli/personal-projects/akasha",
+        "/tmp"
+      ],
+      "denyRead": [
+        "/home/richardhcli/.ssh",
+        "/home/richardhcli/.aws",
+        "/home/richardhcli/.kube",
+        "/home/richardhcli/.config/gcloud",
+        "/etc/passwd",
+        "/etc/shadow"
+      ]
+    },
+    "credentials": {
+      "files": [
+        {
+          "path": "~/.ssh",
+          "mode": "deny"
+        },
+        {
+          "path": "~/.aws",
+          "mode": "deny"
+        },
+        {
+          "path": ".env",
+          "mode": "deny"
+        },
+        {
+          "path": ".env.local",
+          "mode": "deny"
+        }
+      ],
+      "envVars": [
+        {
+          "name": "GITHUB_TOKEN",
+          "mode": "mask",
+          "injectHosts": ["github.com", "api.github.com"]
+        },
+        {
+          "name": "NPM_TOKEN",
+          "mode": "mask",
+          "injectHosts": ["registry.npmjs.org", "npm.js.org"]
+        },
+        {
+          "name": "AWS_ACCESS_KEY_ID",
+          "mode": "deny"
+        },
+        {
+          "name": "AWS_SECRET_ACCESS_KEY",
+          "mode": "deny"
+        }
+      ]
+    }
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_response.filePath' | { read -r f; if [[ \"$f\" == *.py ]]; then python -m py_compile \"$f\" 2>&1 || true; fi; } 2>/dev/null || true",
+            "statusMessage": "Checking syntax..."
+          }
+        ]
+      }
+    ]
+  },
+  "alwaysThinkingEnabled": true,
+  "effortLevel": "high"
+}

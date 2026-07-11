@@ -1,0 +1,325 @@
+# Product Requirements Document — Personal Truth Maintenance System (pTMS)
+
+**Name:** akasha (public name at launch; rebrand-friendly by design — name kept out of all on-disk formats; trademark clearance due before Phase 4)
+**Status:** Draft v1.6 — final language strategy: Python for development speed through the phase gates, staged Rust migration at maturity (strangler-fig via PyO3, governed by §7.12); supersedes v1.5
+**Scope basis:** Full specification dialogue, July 2026 (Xanadu analysis → attack → concept restriction → TMS pivot → refinements → prior-art and viability review)
+**Document owner:** Founder
+**One-line definition:** A local-first, human-in-the-loop belief-revision system: a personal Wikipedia of atomic, versioned, provenance-carrying claims, kept internally consistent by machine-proposed structure and human review, and exposed as verified memory to AI agents.
+
+---
+
+## 1. Executive Summary
+
+pTMS is not a note-taking app. It is a **personal epistemology ledger**: a store of atomic propositions ("modular units with formal state") organized as a reified hypergraph, versioned with Git's data model inside a single store, and maintained by a truth-maintenance loop — when a claim changes in a way that breaks its contract, everything that depends on it is flagged stale for human review, never silently rewritten.
+
+The product stands on three pillars, each derived from a falsified alternative:
+
+1. **Concepts only, prose excluded.** General-prose transclusion failed everywhere it was tried because prose is not modular. pTMS stores only atomic claims, definitions, relations, proofs, and evidence — the content classes where transclusion empirically works (the same reason task-sync works in NotePlan and templates work in Wikipedia/DITA).
+2. **Human-first structure; machine as accelerator.** For simple formal domains (tasks, quick definitions), a terse deterministic syntax compiles to nodes with zero ambiguity and no LLM — the primary, always-available path. For rich propositional prose, where the Freebase/Cyc lesson applies (human-entered structured knowledge dies of friction), an LLM decomposer proposes structure and the human approves in ≤3 seconds. All machine output is proposal-status; the human is the only writer of truth.
+3. **Staleness is managed, never denied and never unbounded — and the trigger is mechanical.** Definitions expose named, versioned *facets*; relations bind to the narrowest relevant facet. Staleness = **interface break** (a subscribed facet changed or vanished), in both layers; precision edits within a facet are patch-class by construction and propagate as rendering only. Wikidata's constraint-violation backlogs prove unbounded queues get abandoned; pTMS bounds inflow structurally, with lazy view-time badges plus a capped Anki-style daily sweep.
+
+Sync doctrine: per spoke, a formally defined **sync contract** — a well-formed sublanguage of the spoke's format — within which hub↔spoke is a true bijection (deterministic, no heuristics); out-of-contract edits are flagged by a linter and repaired, never guessed at. Architecturally, the product is a **resident local daemon** (Syncthing-model): always on in the background, watching vault files, serving one localhost API that every surface — built-in web UI, Obsidian plugin, future MCP facade — consumes as a client.
+
+The commercial thesis: the willingness-to-pay attaches not to note-taking (a proven graveyard) but to **verified memory for AI** — a curated, versioned, provenance-carrying fact store that a user's agents query instead of hallucinating, delivered as an MCP server, with the hub-and-spoke sync architecture doubling as the integration surface.
+
+---
+
+## 2. Vision
+
+**Five-year picture.** Every knowledge worker runs a personal truth base the way developers run a dotfiles repo: a few thousand vetted claims about their domain, their projects, their life — each claim atomic, sourced, versioned, and consistent with the rest of the graph or explicitly flagged as under review. Their AI assistants read from it (grounded answers, zero hallucinated "memories") and write *proposals* into it (never facts — everything machine-generated passes human review before becoming truth). The store is the user's; spokes (Obsidian, editors, agents) are lossy projections. A federation layer lets users publish read-only subgraphs — the "personal Wikipedia" made literal — without ever attempting cross-user merge.
+
+**What pTMS is:** a truth-maintenance system in Doyle's sense (honestly, a *belief*-maintenance system — "in your point of view" is the spec), a versioned claim store, an AI memory backend, a review discipline.
+
+**What pTMS is not (permanently):** a universal note format, a free-prose editor, a collaborative wiki with merge semantics, a replacement for Obsidian/Notion, an autonomous truth engine. The system never decides truth; it makes the human's truth-keeping cheap.
+
+**North-star experience.** The user types: *"caffeine impairs sleep because its half-life is ~5h."* Within one second the system shows: three proposed nodes — `impairs(caffeine, sleep)`, `half-life(caffeine, ~5h)`, `because(№1, №2)` — with `caffeine` and `sleep` auto-linked to existing atoms, a prompt for evidence, and a warning: *"№2 may conflict with claim #4821 ('caffeine half-life ranges 1.5–9h by phenotype'), added 2026-03-02, source attached."* One tap approves; one tap opens the conflict for adjudication. That interaction — capture at the speed of typing, contradiction surfaced with provenance — is the entire product. Everything else is plumbing for it.
+
+---
+
+## 3. Intellectual Lineage and Why Now
+
+The design is the surviving intersection of four traditions, each of which failed alone:
+
+**Xanadu (1960–)** contributed the substrate: permanent content addresses over an append-only store ("freezing content addresses into permanent universal IDs" — Nelson's stated core secret), versions as views over immutable atoms, bidirectional link indexing. It failed on scope (global publishing network before a working kernel) and on the false premise that prose is modular. pTMS keeps the kernel, discards the docuverse.
+
+**Truth Maintenance Systems (Doyle 1979; de Kleer's ATMS 1986)** contributed the loop: justification edges, in/out labeling as support changes, assumption/derivation distinction (= the definitions/proofs layer split). They stayed in AI labs because their propositions were formal and edges came free from an inference engine; over natural language, edge authorship was unaffordable. The LLM changes that constant.
+
+**Wikidata (2012–)** is the architecture running in production at planetary scale: reified statements, stable IDs with redirects, statements-about-statements, per-claim references, rank labels. Its three documented failure modes — contribution friction, unbounded review backlogs, ontology sprawl — are pTMS's three top design constraints (§5, §9, §7.1).
+
+**Local-first / CRDT engineering (2019–)** contributed the storage answer: content-addressed immutable snapshots plus a change DAG in a single store (Automerge, Loro; Datomic's EAVT model; Dolt/Irmin for Git-semantics databases), replacing the falsified 10k-literal-repos design.
+
+**Why now, specifically:** (a) LLM decomposition and edge-proposal makes single-predicate entry feel like typing rather than ontology engineering — the resource Nelson, Doyle, and Freebase all lacked; (b) the agent ecosystem has created acute demand for auditable memory (RAG over messy notes retrieves confidently wrong context; model memory is unauditable); (c) MCP provides a standard delivery mechanism for exactly this component.
+
+---
+
+## 4. Users and Positioning
+
+**Primary persona (dogfood → early adopter):** a technically fluent truth-seeker — researcher, engineer, analyst, serious autodidact — who already runs Obsidian/Logseq/Zettelkasten, already feels the pain of stale and contradictory notes, and runs AI assistants daily. Market honesty: this segment alone is a few tens of thousands of people who tend to build their own tools; it is the beachhead, not the business.
+
+**Commercial persona (Phase 4+):** any heavy agent user whose assistant needs ground truth about their world — preferences, project facts, domain claims, decisions and their reasons — and who has been burned by hallucinated memory. pTMS is sold to them as *the memory their AI checks before speaking*, not as a place to take notes.
+
+**Deferred persona (Phase 5):** teams in staleness-priced verticals — regulatory compliance, legal positions, clinical protocols, intelligence analysis — whose literal daily problem is "a source changed; which downstream conclusions are now invalid?" The invalidation walk is the product; the fine or lawsuit is the pricing anchor.
+
+**Positioning sentence:** *"Your AI's memory, verified by you."* Not "a better second brain."
+
+---
+
+## 5. Falsified Approaches — Confirmed Will-Not-Work List
+
+Each entry below was examined in the specification dialogue and rejected with cause. This list is normative: reintroducing any item requires overturning its stated reason.
+
+| # | Rejected approach | Reason (evidence) |
+|---|---|---|
+| F1 | Universal bidirectional sync with all apps | Coordination-free systems structurally outcompete coordinating ones (why the web beat Xanadu); N×M adapter decay; vendor incentives are defection (closed APIs, ToS). Hub-and-spoke with *lossy* spokes is the ceiling. |
+| F2 | Transclusion of free prose | Prose is not modular; meaning is context-constituted; DRY has no compiler in natural language. Field evidence: transclusion collapses everywhere to tasks/templates/boilerplate (NotePlan consensus, Wikipedia noinclude apparatus, tools-for-thought wave outcomes). Prose is out of scope. |
+| F3 | Silent global propagation of edits | Text propagation ≠ validity propagation. A parent asserts something *about* its children; substitution engines cannot re-derive its truth. Silent rewrite = retroactive falsification of the user's own record. Propagate *invalidation flags*, never conclusions. |
+| F4 | Live-truth references only (no pinning) | De dicto vs de re reference is per-usage intent; both modes are legitimate. Submodule pointers proved pin-vs-track is per-edge and mechanical. Resolution adopted: auto-track + view-time "may be out of date" badge; pinned refs supported for historical documents. |
+| F5 | Literal Git repo per concept, submodules for children | Submodule pointer-bump storms across DAG paths; per-repo overhead; file-granularity diffs wrong for statement atoms. Adopted instead: Git's *data model* (content-addressed snapshots + commit DAG) inside one store. |
+| F6 | Retrieval returns broadest ancestor | In a DAG there are many maximal ancestors; height = compositional baggage, not conceptual generality. Adopted: return the atom + 1-hop neighborhood ranked (§7.5); broadest-first is a *reading* rendering, not search semantics. |
+| F7 | Hand-authored structured entry at scale **for rich propositional content** | The Cyc trap; Wikidata contribution friction; Freebase's death and replacement by machine-extraction + human curation. Scope corrected in v1.1: simple formal domains (tasks, quick definitions) are *manual-first* via terse deterministic syntax — decomposition cost is near zero there; the prohibition applies to prose-shaped knowledge, where LLM proposes and human approves. |
+| F8 | "Staleness will not occur given good semantics" | Category error (text vs validity, F3); a TMS without staleness labeling is a contradiction in terms — the labeling *is* Doyle's algorithm; the design's own stale-badge concedes the phenomenon. Adopted: staleness exists, bounded (§9). |
+| F9 | Unbounded push-based review queue | Wikidata backlog death; failing-CI-dashboard dynamics. Inflow must be ≤ review capacity by construction. |
+| F10 | Multi-user write/merge, 1M-repo shared DB (now) | Resurrects everything personal scoping killed: whose truth wins, contested definitions, coordination asymmetry. Deferred to Phase 5 as read-only federation only. |
+| F11 | Competing as a note-taking app | Proven graveyard (Roam trajectory; segment size); LLMs dissolve the retrieval rationale of manual note-graphs. Position as AI memory / truth maintenance instead. |
+| F12 | Rigid definition/proof wall; "existence needs no proof" as structural law | Conflates stipulation with assertion; empirical claims are warranted by *evidence*, not proof; analytic/synthetic boundary drifts (Quine; water=H₂O). Layer label is mutable metadata; Evidence is a first-class node type. |
+| F13 | Heuristic re-anchoring as the primary sync mechanism | Superseded in v1.1 by the **sync contract**: within-contract edits round-trip bijectively (deterministic parsing, zero heuristics); out-of-contract edits are contract *violations* — detected by a linter, surfaced with repair suggestions, never silently guessed. Heuristic anchoring is demoted to an optional recovery assist; unrepairable violations become orphans. The clipboard-ID plugin remains a convenience that keeps common operations in-contract, not a correctness mechanism. |
+
+---
+
+## 6. Core Concepts and Glossary
+
+**Atom / node.** A modular unit with formal state. Types: Entity, Definition, Claim, Relation, Proof, Evidence, Task (§7.1). The unit of identity, versioning, and transclusion.
+
+**Single-predicate rule.** Decompose until each node asserts exactly one predicate. "Caffeine impairs sleep because its half-life is ~5h" = three nodes: `impairs(caffeine, sleep)`, `half-life(caffeine, ~5h)`, `because(№1, №2)`.
+
+**Reified relation.** A relation is a *node* (not an edge) whose children are the atoms it involves; relations can therefore participate in higher relations (statements about statements — the RDF-star pattern). "Any relation is a parent of all involved concepts."
+
+**Composition edge (parent→child).** "Involves / is-built-from." Defines the ancestry DAG. Placement rule for new information: attach at the most specific node whose *every* child the change applies to; since knowledge is a DAG (multiple parents), a claim has one canonical home plus mount points, and "smallest matching parent" is a tiebreaker, not an algorithm — most additions create a *new* relation node.
+
+**Justification edge (typed).** `supports`, `contradicts`, `depends-on`, `derived-from`, `cites`. Distinct from composition; this is what the invalidation walk traverses. Machine-proposed, human-confirmed.
+
+**Definition layer vs proof layer.** Definitions specify existence/meaning (dictionary/textbook layer); Proof nodes justify a definition or (more commonly) a relation between definitions. Evidence nodes carry empirical warrant (source, observation, measurement). The definition/claim distinction is a mutable label, not a wall (F12).
+
+**Facet.** A named, independently versioned sub-part of a definition's interface (e.g., `caffeine.half-life`, `caffeine.mechanism`). Facets are the unit of dependency: relations bind to facets, not whole nodes, and must declare their bindings at creation (schema-enforced). This is what makes change classification mechanical.
+
+**Change classes (semver for claims, mechanized).** *Patch* — precision/wording change within a facet: no invalidation (subscribers see updated rendering only). *Minor* — facet added: no invalidation, optional notice. *Major / interface break* — a facet with subscribers is changed in kind, split, retyped, or removed: invalidation walk runs. The class is largely *computed* (did the edit touch a subscribed facet's interface?); the user can override edge cases.
+
+**Sync contract.** Per spoke, a formally defined well-formed sublanguage of the spoke's format (ID encoding, link syntax, structure conventions) such that `parse(render(G)) = G` and `render(parse(D)) = D` for all conforming documents `D` — a true bijection, conditional on the user keeping documents in-contract (the Jupytext model). Enforced by a **contract linter** that flags violations with repair suggestions. The contract grammar is versioned in file front-matter, because vaults outlive software versions.
+
+**Maturity ladder.** Nodes are born maximally lightweight and accrue permanence *continuously as infrastructure accrues* — uniform substrate, graduated guarantees. Every node flows through one append-only kernel path (no dual storage regimes); the ladder governs which guarantees and machinery are active. Stages: **S0 ephemeral** — bare text + ID; freely deletable, GC-eligible (default retention configurable). **S1 referenced** — first inbound edge exists; deletion now requires tombstone/redirect (the dangling-reference invariant attaches mechanically, not by user choice). **S2 structured** — type + facets declared; interface-break machinery active. **S3 warranted** — evidence/proof attached; full TMS participation. **S4 vetted** — explicit human vetting; exported as verified memory, prioritized in review. S1–S3 transitions are automatic consequences of added infrastructure; only S4 is a user act. This reconciles "easy create, easy delete" with "never retroactively falsified": the strong invariants protect exactly the nodes that have earned them.
+
+**Trigger (declarative).** A reactive rule attached to a node: `on(condition) → flag-for-review(target, reason)`. v1 condition vocabulary is fixed and small: `all-subtasks-closed` (the supertask flag), `subscribed-facet-interface-changed` (staleness itself is a built-in trigger — one mechanism, not two), `evidence-retracted`, `recheck-after(date)` (periodic re-verification). Governing invariant: **triggers may only enqueue review items and proposals; they never mutate truth, close tasks, or edit nodes.** Arbitrary user scripts ("script notes" as code) are deferred pending a sandboxing decision (§15).
+
+**Stale badge.** A dependent of a major change displays "⚠ support changed on {date} — review" wherever it renders (hub editor, spokes that can show it, MCP responses as metadata). Resolutions: *still holds* / *revise* / *retract* — resolution may itself be a major change and propagate further.
+
+**Redirect / tombstone.** First-class result of split/merge refactors. Refactor = duplicate-and-trim (content) + tombstone old ID → successor set + per-inbound-reference one-click re-adjudication queue (references). No refactor leaves dangling IDs.
+
+**Pin vs track.** Every reference carries a mode: `track` (default; renders head + stale badge when applicable) or `pin@version` (historical documents, quotes of past belief-state).
+
+**Hub / spoke / projection / orphan.** Hub = the truth store (single writer of record). Spoke = any external surface (Obsidian, editors, agents). Spokes are lossy projections with best-effort writeback; an external edit that cannot be confidently re-anchored produces an *orphan* (surfaced, never silently dropped or guessed).
+
+**Review economy.** The budget identity the product lives or dies by: staleness inflow ≤ user review capacity. Enforced by major-only invalidation, lazy view-time review, and a capped daily sweep.
+
+---
+
+## 7. System Architecture
+
+### 7.1 Node types (schema frozen for v1 — additions are guilty until proven necessary)
+
+| Type | Asserts | Warrant | Example |
+|---|---|---|---|
+| Entity | A referent exists as a subject of claims | none needed | `caffeine` |
+| Definition | Meaning/identity of an entity or term | none (stipulative) or Evidence (discovered identities) | "caffeine: a methylxanthine CNS stimulant" |
+| Claim | One predicate held true (founder's "true statement of the world, in your view") | Evidence and/or Proof | `half-life(caffeine, ~5h)` |
+| Relation | A predicate over other nodes (reified; may nest) | Evidence/Proof | `because(№1, №2)` |
+| Proof | Derivation: why a claim/relation follows from others | its premises (depends-on edges) | "follows from adenosine-receptor antagonism + …" |
+| Evidence | External warrant: source, citation, observation | provenance fields (URL/DOI/date/quote-span) | "Institute of Medicine 2001, p. 33" |
+| Task | Imperative with formal state (not truth-apt; grandfathered per spec: singular, modular, transcludable) | n/a | `☐ re-verify №4821` |
+
+Edge types: `composes` (parent→child), `supports`, `contradicts`, `depends-on`, `derived-from`, `cites`, `redirects-to`. Every justification edge carries a **mandatory facet binding** to the narrowest relevant facet of its target (declared at creation, schema-enforced — bindings cannot be reconstructed after the fact); composition edges may bind facets where the parent composes only part of a child. Every node carries a **maturity stage** (S0–S4, §6) and may carry declarative **triggers**; every edge stores creation provenance (human / LLM-proposed-human-approved / imported) and pin/track mode where applicable. Definitions carry a structured interface block enumerating their facets; the linter nudges coherence claims hiding inside compositional definitions ("A and B, *which are compatible*") out into explicit relations.
+
+### 7.2 Storage kernel
+
+Git's data model in one store (per F5): an **append-only, content-addressed object log** (every node version is an immutable snapshot keyed by hash) plus a **commit DAG** per node (branches = competing hypotheses, first-class and philosophically intended: parallel live branches are the honest representation of "I hold two candidate models"). Stable node IDs are minted at creation and never reused; edits create new versions under the same ID; history is queryable as-of any time (Datomic's EAVT discipline is the reference design). Deletion is `retracted` status — visible in history, excluded from head — never destruction (append-only stores cannot hard-delete without breaking inbound references; local-only data makes this an acceptable trade for v1, revisit before any hosted offering). **Maturity exception:** S0 nodes are exempt — genuinely deletable and periodically garbage-collected; GC is blocked the instant a node reaches S1 (any inbound edge), at which point deletion routes through tombstone/redirect like any referenced node. The substrate stays uniform: S0 nodes live in the same append-only log and are simply GC-eligible, so promotion up the ladder costs zero migration. **ID design (day-one commitment):** IDs are minted at creation, human-manageable — short (6–8 chars), lowercase base-32 alphabet, trailing checksum character to catch hand-typing errors — with defined escaping rules for user text that syntactically resembles an ID, Unicode NFC normalization at every boundary (macOS NFD filenames are a known trap), and LF-normalized line endings in canonical serialization. Data shapes are kept CRDT-compatible from day one (content addressing, per-device actor IDs, no global sequence counters) so Automerge/Loro adoption later is a feature, not a migration.
+
+**Concrete v1 substrate (velocity-optimal):** SQLite in WAL mode — tables `objects` (hash-addressed immutable versions), `nodes` (ID → head pointer, status), `commits` (DAG), `edges`, `redirects`, `orphans` — wrapped behind a storage interface. **Multi-device path:** swap/augment with Automerge or Loro documents per node when sync ships (Phase 3+); their native change history matches the commit DAG one-to-one. Dolt and Irmin remain fallback references if branch/merge-heavy workloads outgrow SQLite. Rationale: a solo developer ships a correct SQLite event store in days; CRDT integration is deferred until it pays for itself.
+
+### 7.3 Invalidation walk (the TMS loop) — the interface-break rule
+
+**One rule, both layers: staleness is triggered by interface breaks only.** An edit that stays within a facet (precision, wording, refinement) propagates automatically as rendering — supernotes' composed definitions update "by definition," relations display current content — with no review required. An edit that breaks a facet's interface (change in kind, split, retype, removal, node retraction) invalidates exactly the **subscribers of that facet**: (a) justification edges bound to it — `depends-on`, `derived-from`, `supports`/`contradicts`, and `cites` when the changed node is Evidence (source retraction is a first-class trigger); and (b) composition parents whose definition composes that facet, since a parent defined over a facet that no longer exists is ill-formed — this is the correction to "no staleness in the definition layer": the definition layer is not exempt, it merely has **near-zero inflow in practice** because almost all definition edits are precision edits.
+
+Mechanics: mark each subscriber `stale(N@version, facet, reason)`; do **not** recurse past an unreviewed stale node (staleness is not transitive until a human confirms the dependent actually breaks — the primary inflow damper, now compounded by facet narrowing). Resolutions: *still holds* (clears flag, records adjudication), *revise* (opens editor; the revision is itself classified), *retract*. Because relations bind the narrowest facet, false invalidation approaches zero and classification is computable rather than judged.
+
+### 7.4 Refactor operations
+
+`split(N → N₁, N₂)`: duplicate-and-trim content; tombstone N with `redirects-to {N₁, N₂}`; enqueue every inbound edge and every spoke transclusion of N for one-click reassignment. `merge(N₁, N₂ → N)`: inverse, with union review. Both are atomic kernel operations with full history; per F-list, no refactor path may leave a dangling reference.
+
+### 7.5 Retrieval semantics
+
+Query resolves to: the matching atom(s) + immediate composition parents and justification neighbors (1-hop), ranked by relevance, recency, and adjudication status; expandable hop-by-hop. Broadest-ancestor rendering is available as an explicit *reading view* ("show me the biggest picture containing this"), never the default (F6). Search index: FTS5 over node text + embedding index over nodes for the decomposer's entity-linking and contradiction-candidate generation.
+
+### 7.6 Capture (the product's survival condition) — two front ends, one budget
+
+**Front end A — deterministic syntax (primary; MVP; no LLM).** A terse, human-writable markup that compiles to nodes with zero ambiguity, offline: footnote-style ID references for linkage (`[^x7k2q]`), indentation for composition (supertask→subtask nesting compiles to `composes` edges), inline quick-definition creation (scratch tier by default), checkbox syntax for task state. This is the pure-human-editor guarantee: the full system is operable forever without any model in the loop, and for the launch domains (universal concepts, task management) it is expected to carry most volume. Parser errors are contract-linter messages, not silent failures.
+
+**Front end B — LLM decomposer (Phase 3 feature; optional accelerator).** For prose-shaped input: user types a sentence → decomposer returns, within ~1s, proposed single-predicate nodes, entity links (embedding + exact match), proposed justification edges *with facet bindings*, contradiction candidates with provenance, and an evidence prompt → user approves/edits/rejects. All machine output is proposal-status until approved — hallucinated edges must be structurally incapable of entering the graph. Edge-proposal precision is tracked with a kill threshold (§11). Provider access is fully abstract: base URL + API key + model name, with the OpenAI-compatible chat-completions shape as the wire default (covers Ollama, vLLM, OpenRouter, and hosted providers alike — local vs server is the user's business) plus adapters for other wire formats, configured per capability (decomposition vs embeddings); structured output via schema-prompted JSON with robust parsing, never provider-specific features; prompt+schema versioned in-repo.
+
+**Shared hard budget: ≤3 seconds of user attention over plain typing** for the common path in either front end (Wikidata Failure 1 is the death this budget prevents).
+
+### 7.7 The review economy
+
+Lazy-first: stale badges render wherever the node renders; adjudication is one interaction in place. Active sweep: an Anki-style daily queue, hard-capped (default 10 items), prioritized by (a) age of staleness, (b) centrality (inbound-edge count), (c) user-flagged importance — because a node silently stale for a year in an unvisited subtree is exactly the "confident but wrong" failure a truth system must not permit. Weekly digest summarizes debt. Dashboard shows inflow vs resolution rate; if inflow exceeds capacity persistently, the *product* is failing, not the user (§14).
+
+### 7.8 Hub-and-spoke sync under the contract doctrine
+
+Hub is the single writer of record. Per spoke, the synced subset is governed by its **sync contract** (§6): within contract, hub↔spoke is a bijection — deterministic parse/render, no heuristics, provably lossless (property-tested: fuzz corpus asserting `render∘parse = id` and `parse∘render = id`); outside contract, the **linter** flags the violation with location and repair suggestion — auto-repair offered where unambiguous (e.g., re-inserting a dropped ID from base-snapshot diff), orphan state for the unrepairable remainder. The UI presents this honestly: "losslessly synced *if kept in-contract*; violations are always surfaced, never guessed."
+
+**Offline divergence (day-one design, unretrofittable):** the vault is edited while the app is closed, so the sync engine keeps a **base snapshot** of every projected file (the Git-index pattern) and reconciles on startup via three-way diff (base vs vault vs hub), with origin tagging on every applied change to suppress echo loops. In-contract concurrent edits merge deterministically at node granularity; genuine conflicts (same node edited both sides) surface as a conflict queue, hub history preserving both versions as branches.
+
+Spoke #0: the built-in Markdown editor — trivially in-contract, ships as the demo per spec. Spoke #1 (MVP): **Obsidian** — contract v1 encodes node references as footnote-style IDs and/or native block IDs (`^id`), both of which survive plain-text copy-paste ("proper copy-paste" is precisely the user obligation the contract names); the **clipboard plugin** is a convenience that keeps move/copy operations in-contract automatically, not a correctness mechanism. Spoke #2 (Phase 4): the MCP server — read tools (`lookup`, `neighborhood`, `as_of`, `contradictions`; provenance-carrying responses with stale-badge metadata) and a write tool that files *proposals* only. Adapters remain a permanent maintenance tax; each new spoke requires a written contract grammar before code.
+
+### 7.9 Process architecture — the resident daemon
+
+The product runs as an **always-on local service** (the Syncthing model), because bidirectional file sync is only trustworthy when the watcher is actually watching. Design: one Python daemon per user (FastAPI + uvicorn over asyncio; pydantic models as the schema source of truth, pyright-strict enforced; watchdog for file events), single-instance-locked per vault, autostarted per OS (launchd / systemd user unit / Windows startup); debounced file-watching over registered vaults; one localhost HTTP/WS API, bound to 127.0.0.1 and authenticated with a per-install token (a local API without auth is readable by any local process — non-negotiable). **Every surface is a client of this API:** the built-in editor ships as a local web UI served by the daemon (no Electron/Tauri anywhere in the plan — lighter, and the "default bidirectional markdown editor" demo becomes a browser tab), the Obsidian plugin, and the Phase-4 MCP server, which reduces to a thin facade over the same endpoints. Crash-safety: SQLite WAL plus journaled sync state, with startup running the same idempotent three-way reconciliation as any offline-divergence window — a crash is just a short offline period, one code path, not two. Resource posture per spec: **functionality first, lightweight as a tracked budget** — idle CPU ≈ 0% (event-driven, no polling), RSS target <150 MB for the MVP; the maturity path is the **staged Rust migration** (§7.12), which also inherits the lightweight targets (static binary, 30–60 MB RSS) when triggered.
+
+**Platform order — Windows first.** Distribution: `pipx` / `uv tool install` for the technical early audience (clean, antivirus-friendly), packaged single executable (PyInstaller/Nuitka) as a later polish step with its known Windows costs (AV false positives, bundle size) accepted deliberately — and noting the Rust migration (§7.12) permanently solves packaging when it lands (static binary); tray presence; autostart via Task Scheduler or an NSSM-wrapped Windows service. Windows-specific battery items: CRLF (neutralized by the contract's LF canonicalization), strict file locking (Obsidian holds handles — writeback retries on busy), antivirus-generated spurious watch events (absorbed by debounce), and **cloud-synced vaults** (a large share of Windows Obsidian vaults live inside OneDrive/Dropbox folders, whose placeholder files and sync tunneling fight file watchers — the daemon detects cloud-managed paths, warns the user, and switches to conservative retry/debounce profiles rather than pretending the always-watching guarantee holds unmodified). **Docker is a supported *secondary* target, never the primary Windows distribution:** on Windows, containers run inside a WSL2 VM, and file-change notifications do not propagate reliably across the host→VM mount boundary — a containerized daemon watching a `C:\` vault degrades to polling, breaking both the idle budget and the always-watching guarantee. The Dockerfile exists for headless deployments (NAS/home server) where the vault lives on the container's native filesystem, e.g., a Syncthing-replicated copy; that topology reintroduces divergence windows and is documented as such.
+
+### 7.10 Triggers — the reactive layer
+
+Triggers (§6) are how nodes "act": a small, declarative, fixed v1 vocabulary of conditions, each terminating in the single permitted action — enqueue a review item with a reason. The supertask rule is the canonical example: `on(all-subtasks-closed) → flag-for-review(supertask)` — the supertask is never auto-closed; the human closes it, consistent with invariant 3. The unification to preserve in implementation: staleness badging, evidence-retraction flags, periodic re-verification, and domain triggers like the supertask rule are all *one mechanism* with one queue, one audit log, and one invariant. **Executable script notes (post-MVP, now specified):** the sandbox boundary is **WASM** — deterministic, memory-capped, interruptible (the Figma-plugin architecture), hosted via **wasmtime** (Python bindings now; native wasmtime post-migration — the boundary survives the language transition untouched); the *blessed script runtime* is an open choice (§15): QuickJS/JS (lightest, matches the Obsidian-plugin-author audience) vs. Pyodide/Python (heavier). The full-language/enqueue-only tension resolves by separating capability from authority: scripts have unrestricted computational power and (curated) package access, but their only handle on the truth store is a **capability token granting reads and proposal/enqueue writes** — arbitrary code, zero direct truth-mutation authority, so invariant 3 holds by construction. Scripts are typechecked/validated against the published API schema. Because the sandbox boundary is WASM rather than a language, additional runtimes can be added without changing the security model. The declarative vocabulary may grow by the same schema-freeze discipline as node types (R6); scripts arrive only after the Phase-2 dogfood gate proves the declarative layer insufficient.
+
+### 7.11 The CLI — automation and agent surface
+
+The CLI is a peer client of the localhost API and the designated surface for scripts and agents — one entry point (`akasha daemon` runs the service; `akasha new | get | set | rm` are subcommands speaking to it over the localhost API), installed together via pipx/uv; the true single-binary artifact (Tailscale/Syncthing style) arrives with the Rust era (§7.12). Governing invariant (**API-first parity**): any capability of any UI must exist as an API endpoint first; the CLI tracks the API — generated from the daemon's OpenAPI spec (free with FastAPI, frozen as the migration contract per §7.12) — so new endpoints become verbs at near-zero cost and nothing is ever UI-only. MVP scope per spec: **CRUD over atomic notes** (`akasha new | get | set | rm`, with `rm` routing through the same maturity-ladder deletion rules as every client — S0 deletes freely, S1+ requires tombstone/redirect). Agent-grade from day one: `--json` with a versioned output schema (a stability contract for scripts, held to the same discipline as the sync contract), `--dry-run` on all mutations, meaningful exit codes, `--as-of` on reads. **Token classes (day-one, unretrofittable):** the *human token* writes; *agent tokens* are propose-only by default and per-token rate-limited — an agent driving the CLI feeds the review queue, not the truth store, and granting write capability to an agent requires deliberate friction (explicit flag + confirmation), because the human-only-writer invariant must survive convenience, not just design. All token activity is audit-logged.
+
+### 7.12 Migration architecture (Python → Rust) — making the planned rewrite real
+
+Planned rewrites default to never happening or becoming death marches; this section is the discipline that prevents both, and all of it is cheap at Phase 0 and brutal to retrofit. **Rule 1 — the API spec is the migration boundary:** FastAPI's generated OpenAPI spec is snapshotted and guarded by a contract-test suite; any server passing the suite is a valid daemon, so the plugin, web UI, CLI, and MCP facade never change during migration. **Rule 2 — on-disk state is language-neutral, always:** SQLite plus canonically serialized bytes; never pickle, never Python-shaped structures; canonicalization is defined at the byte level in the grammar document, not by incidental interpreter behavior. **Rule 3 — the golden corpus is the acceptance suite:** the Phase-0 fuzz corpora and round-trip fixtures are stored as versioned golden files (vault in → canonical bytes out; reconciliation traces); a reimplementation is done when it is byte-identical against the corpus — the rewrite's test suite is a byproduct of building the product. **Rule 4 — strangler-fig, never big-bang:** Python hosts Rust natively (PyO3/maturin), so migration begins by replacing the two hot, correctness-critical modules — the contract parser/serializer and the reconciliation engine — as Rust extensions *inside the running Python daemon*, shippable and corpus-validated at every step; the eventual full-daemon cutover swaps a process, not a product. **Triggers, made testable:** any sustained perf-budget breach → strangler-step the offending module now; Phase-4 external gate passed (the "market traction" signal) → full-cutover evaluation. Rust inherits the mature-era targets: static single binary (solving Windows packaging permanently), daemon+CLI in one artifact, 30–60 MB RSS.
+
+---
+
+## 8. MVP Definition
+
+**MVP thesis to prove:** one user (the founder) can run the full loop *inside their existing Obsidian vault* — capture at typing speed via deterministic syntax, truth store accumulates, interface breaks flag exactly the right dependents, staleness stays bounded, round-trip is lossless in-contract — for one month at ~500 canonical nodes across the two launch domains (universal concepts; task management with open/done + transclusion + supertask/subtask composition), and would not go back.
+
+**In scope:** resident daemon (§7.9) with localhost API + auth token + autostart, CLI v1 with CRUD verbs, --json, --dry-run, and both token classes (§7.11), kernel with facets and the maturity ladder (§7.1–7.2, §6), all seven node types + facet-bound edges, deterministic-syntax capture (front end A), interface-break invalidation + stale badges + review queue, declarative triggers v1 including the supertask flag (§7.10), split/merge with redirects, built-in editor as daemon-served web UI (node view with 1-hop neighborhood, review queue, history/as-of), **Obsidian bijective sync**: contract grammar v1, linter with certain-auto-repair (silent only when derivable deterministically from base snapshot + grammar; logged and undoable) and confirm-first for everything else, base-snapshot three-way reconciliation, clipboard plugin, plain-Markdown export (the contract doubles as the export format).
+
+**Out of scope for MVP:** LLM decomposer (front end B — Phase 3 feature), MCP server, mobile, multi-device sync, federation, teams, any monetization, task scheduling/recurrence (task state remains pure open/done; supertask completion semantics are *resolved* — flag-for-review via trigger, never auto-close), executable script notes (declarative triggers only).
+
+**MVP user stories (acceptance criteria inline):**
+1. *Capture:* Given the caffeine sentence, the system proposes the three-node decomposition with links and an evidence prompt in ≤1.5s; approve-all costs ≤3s of attention; the graph gains the nodes with full provenance.
+2. *Contradiction:* Given a new claim conflicting with an existing one, the capture response includes the conflict with the old claim's text, date, and evidence; the user can adjudicate immediately or defer (both recorded).
+3. *Invalidation:* Editing `half-life(caffeine, ~5h)` to a phenotype-dependent range, classified major, badges `because(№1,№2)` stale within the same session; the badge names the cause and version; *still holds / revise / retract* all function and record adjudication.
+4. *Refactor:* Splitting a node produces a tombstone redirect and a reassignment queue covering 100% of inbound references; zero dangling IDs (property-tested).
+5. *Time travel:* Any node renders as-of any past date, including which claims were then believed and what has since changed.
+6. *Review economy:* Daily queue never exceeds cap; dashboard shows inflow vs resolution; week-one experience includes at least one genuine "this contradicts what you believed, with source" moment (the conversion moment — engineered for, not hoped for).
+7. *Contract sync:* Editing a projected node in Obsidian (in-contract) round-trips to the hub byte-losslessly, including after app-closed offline edits reconciled at startup; moving a block via the clipboard plugin preserves identity; an out-of-contract edit (e.g., a mangled ID) is flagged with location and a one-click repair within the same sync cycle; zero silent guesses across the full scripted edit battery.
+8. *Tasks:* Creating an indented task list in Obsidian yields supertask→subtask `composes` edges; a task transcluded into three contexts shows one state everywhere; closing the last open subtask fires the trigger and the supertask appears in the review queue flagged "all subtasks complete" — never auto-closed; a quick inline definition is born at S0, linked from a task via footnote ID (reaching S1 automatically), and can be promoted up the ladder or — if unlinked again — deleted freely.
+9. *Residency:* The daemon survives reboot (autostarts), a kill -9 mid-sync (startup reconciliation converges, idempotently), and a week of continuous background operation within resource budget; edits made in Obsidian while the daemon was down are reconciled correctly on restart via the base-snapshot three-way path.
+
+---
+
+## 9. Phases
+
+**Phase 0 — Kernel + contract foundations (target: ~3 weeks).** Storage schema with facets and maturity stages, object log, commit DAG, facet-bound edges, redirects, retrieval queries, ID scheme (base-32 + checksum, escaping, NFC/LF normalization), **canonical serialization + contract grammar v1**, property tests (no dangling refs from S1 up; as-of correctness; append-only invariants; S0 GC safety; fuzz-tested `render∘parse = id` round-trip). Tech: Python daemon (FastAPI + uvicorn, watchdog, sqlite3/apsw; pydantic models as the schema source of truth, pyright strict); migration-readiness from day one per §7.12 (OpenAPI snapshot + contract tests, no-pickle rule, byte-level canonicalization spec, golden-file corpus); Obsidian plugin remains a thin TypeScript HTTP client; built-in UI as a daemon-served localhost web app; CLI generated from the OpenAPI spec (§7.11); per-install API auth token from day one; **Windows-first packaging** (pipx/uv install now, PyInstaller polish later, tray, Task Scheduler/NSSM autostart) with a Dockerfile as secondary headless target. *Exit:* kernel API complete behind the daemon's HTTP/WS interface; round-trip fuzz corpus green; 10k synthetic nodes with p95 neighborhood query <50ms. *Learn from:* Datomic (EAVT, as-of), Git internals (content addressing, the index pattern), Jupytext (bijective conventions), Syncthing (resident-daemon model), Automerge/Loro (CRDT-compatible shapes).
+
+**Phase 1 — Human editor + Obsidian bijective sync (~5–6 weeks).** Deterministic-syntax parser (front end A: footnote IDs, task/indentation compilation, quick-defs), built-in editor views, Obsidian plugin: vault watcher, projection/writeback under contract, linter + repair UX, base-snapshot three-way reconciliation with origin tagging, clipboard plugin, conflict queue. *Exit:* §8 stories 1, 7, 8, 9 pass **on Windows** (battery includes CRLF, file-locking retry, and antivirus watch-noise cases); scripted edit battery shows 100% lossless round-trip in-contract and 100% violation detection (0 silent guesses). *Kill signal:* if the contract can't be made wide enough that normal Obsidian editing stays in-contract most of the time (violation rate chronically high in real use), the bijection doctrine fails in practice — reassess before Phase 2. *Learn from:* Obsidian block-reference conventions, Jupytext, Unito/Stacksync writeups (echo suppression), Hypothesis/W3C anchoring (the demoted recovery path).
+
+**Phase 2 — TMS loop (~4 weeks).** Facet-subscription invalidation (interface-break rule), badges, adjudication flows, declarative triggers v1 (supertask flag, evidence-retraction, recheck-after — unified with staleness in one queue and audit log), split/merge + redirect queues, review queue + dashboard + daily cap, as-of view, contradiction surfacing for exact/near-duplicate claims (non-LLM heuristics first). *Exit:* full §8 acceptance; then the **one-month dogfood gate** on the founder's real vault, launch domains only: ≥500 canonical nodes, review inflow ≤ capacity throughout, founder prefers it to plain notes. Go/no-go for everything after. *Learn from:* Doyle/de Kleer (in/out labeling; assumption vs derivation), Anki (bounded queue psychology), Wikidata backlogs (the failure designed against).
+
+**Phase 3 — LLM interface layer (feature, ~4 weeks).** Front end B: decomposer prompt/schema, entity linking (embeddings + FTS), facet-binding proposals, contradiction candidates with provenance, proposal-approval UI. All proposal-status. *Exit:* decomposer approve-without-edit ≥85% and edge-proposal precision ≥90% on a 100-sentence real-input sample; below 80% sustained → degrade to link-suggestion-only mode. *Learn from:* Wikidata (statement/qualifier/reference model), Freebase (why human entry of rich content dies), RDF-star (nested reification).
+
+**Phase 4 — Verified memory / MCP (~3–4 weeks; first monetizable surface).** MCP server with provenance-carrying reads and proposal-only writes; agent-facing docs; "your AI's memory, verified by you" landing narrative; private beta (target: 20 users from PKM+agent communities). *Exit:* ≥5 external users complete their own two-week loop with inflow ≤ capacity; qualitative evidence agents ground answers in the store. *Learn from:* MCP server references; the agent-memory competitive landscape (differentiator: human-vetted + versioned + provenance, not scraped context).
+
+**Phase 5 — Deferred (explicitly not designed yet):** read-only federation ("publish a subgraph" — never cross-user merge, F10), staleness-priced verticals (compliance/legal/clinical: source-change → invalidated-conclusions as the pitch), team tier, mobile capture. Each requires its own PRD; the moat by then is the accumulated human-vetted graph, which is also the user's — full export stays sacred.
+
+---
+
+## 10. Technology Mapping (copy this / avoid that)
+
+| System | Copy | Avoid (their documented failure) |
+|---|---|---|
+| Wikidata | Reified statements; stable IDs + redirects; per-claim references; rank labels (≈ change classes); statements-about-statements | Human-entry friction; unbounded violation backlogs; ontology committee sprawl → frozen v1 schema |
+| Freebase | The confirmation that machine-extracts + human-curates is the only scalable order | Human-entered structured knowledge as the product |
+| Doyle TMS / de Kleer ATMS | Justification edges; in/out (stale) labeling; assumption vs derivation split | Autonomous belief revision over rich content (combinatorial, brittle) — human adjudicates |
+| Xanadu | Append-only invariant store; permanent addresses; versions-as-views; bidirectional link index | Scope-before-kernel; prose-modularity premise; global network ambitions |
+| Datomic | EAVT atomic facts; immutable history; as-of queries | (Adopt the model, not the JVM dependency) |
+| Git | Content addressing; commit DAG; branches-as-hypotheses | Literal repos + submodules for knowledge atoms (F5) |
+| Automerge/Loro | Change-history CRDTs for Phase 3+ multi-device | Adopting before sync is actually needed |
+| Anki | Bounded daily queue; seconds-per-item; streak psychology | Unbounded inbox framing |
+| Jupytext | The proof that conditional bijective sync works: a lossless two-way mapping between formats, given user-kept conventions — the model for every sync contract | Attempting bijection over the *unrestricted* format instead of a well-formed sublanguage |
+| Hypothesis / W3C annotation | Selector chains (exact → quote+context → position) as the *recovery* path for contract violations; explicit orphan states | Using heuristic re-anchoring as the primary mechanism (F13, revised) |
+| Obsidian | Block IDs + native transclusion as spoke #1 substrate; plugin ecosystem | Treating any spoke as a faithful mirror |
+| Roam/Tana/Capacities | Object/typed-node UX patterns; proof the concept layer survives | Competing in their category (F11) |
+
+---
+
+## 11. Metrics and Kill Criteria
+
+**Capture:** common-path attention overhead ≤3s in either front end (hard budget); deterministic-syntax parse errors always actionable linter messages. **Sync:** 100% lossless round-trip in-contract (fuzz + scripted battery, CI-gated); 100% violation detection, 0 silent guesses; real-use violation rate low enough that the linter feels like a spellchecker, not a nag (tracked during dogfood). **Daemon:** idle CPU ≈ 0% (event-driven), RSS <150 MB MVP budget (sustained breach = a §7.12 strangler-step trigger, not a tolerated regression); startup reconciliation always converges (idempotence property-tested); zero unauthenticated local API access. **Auto-repair:** silent repairs only under the certainty criterion (derivable deterministically from base snapshot + contract grammar), 100% logged and undoable; a single incorrect silent repair demotes that repair class to confirm-first permanently. **Truth loop:** review inflow ≤ capacity (dashboard-tracked; sustained violation = redesign damping, not exhort the user); false-invalidation rate near zero (facet narrowing's promise, verified); median staleness age <7 days for top-centrality nodes; zero dangling references ever (property-tested invariant); **facet coverage** (share of S2+ definitions whose inbound relations carry non-trivial facet bindings) tracked from day one — persistently low coverage means the TMS loop is inert and the facet-from-span capture flow (R8) gets redesigned before anything else ships; inflow **variance** tracked alongside its mean — hub-refactor spikes route through branch-and-migrate (R13), never bulk-approve. **Value:** first contradiction-with-provenance moment within week one; founder-gate at Phase 2 (500 canonical nodes/1 month, would-not-go-back); external-gate at Phase 4 (5+ users complete the loop). **LLM layer (Phase 3):** decomposer approve-without-edit ≥85%; edge-proposal precision ≥90%; <80% sustained → degrade to link-suggestion-only. **Explicit kill criteria:** Phase-1 contract-viability signal fails (chronic real-use violations) → bijection doctrine reassessed before further build; Phase-2 dogfood gate fails → no LLM/MCP work proceeds.
+
+---
+
+## 12. Risks
+
+**R1 — Capture friction (existential).** Mitigation: the 3s budget as a tracked SLO; approve-all fast path; degrade gracefully to unstructured inbox items that get decomposed later rather than blocking the user mid-thought.
+**R2 — LLM edge hallucination.** Mitigation: proposal-only status for all machine output; provenance labels on every edge; precision metric with automatic degradation mode.
+**R3 — Review-debt spiral.** Mitigation: major-only invalidation; non-transitive staleness; caps; centrality prioritization; the dashboard framing failure as product failure.
+**R4 — Boundary erosion at spokes.** Mitigation: lossy-projection doctrine in UI copy; orphans surfaced; anchoring battery in CI.
+**R5 — Category confusion in go-to-market** (read as another notes app → graveyard). Mitigation: lead every surface with the AI-memory framing; the editor is a demo, not the product.
+**R6 — Schema creep** (the Cyc/Wikidata committee failure, single-player edition). Mitigation: frozen v1 types; additions require a written case against this document.
+**R7 — Solo-developer scope risk** (the Xanadu curse itself). Mitigation: phase gates with kill criteria; kernel-first; every phase ships a usable artifact.
+
+**Second adversarial pass (v1.4) — weaknesses of the refined plan, with adopted mitigations:**
+**R8 — Facet bootstrap (the loop may never turn on).** Mechanical staleness requires facets and bindings, which are optional work the human-first path avoids; an unfaceted graph makes the invalidation walk inert and silently degrades the product to a transclusion/task syncer. *Adopted:* **facets from spans** — creating a relation asks the user to highlight the span of the target definition it depends on; the span becomes the facet, so facets accrete as a byproduct of linking; facet coverage is a gating dogfood metric (§11).
+**R9 — Epistemic closure / coherence theater (can defeat the entire purpose).** The system guarantees internal consistency of one person's beliefs, not correspondence with reality; a perfectly maintained graph can be coherently wrong, and the AI-memory surface then launders those errors with provenance — confidently wrong is worse than hallucinating. *Adopted:* system language says **"vetted by you," never "true"** (including MCP responses); evidence-first nudges; an **adversarial-recheck trigger** — a scheduled job where an LLM argues against sampled S4 claims and files counterarguments as proposals — manufacturing the external friction a single author lacks.
+**R10 — The border toll.** Excluding prose means every thought pays a classification decision at the boundary; friction lands mid-thought, where it costs most. *Partial mitigation:* syntax-captured content defaults to S0 with zero ceremony, promotion deferred; crossing rate tracked in dogfood. This toll is structural and is accepted, watched, not solved.
+**R11 — Third-party formatter storms.** Obsidian plugins (Linter, Templater, auto-formatters) rewrite files wholesale — renumbering footnotes, reordering content — creating mass contract violations no human made. *Adopted:* prefer Obsidian-native `^block-id` anchors where possible (less molested by formatters than footnote syntax), compatibility-test the contract against the top plugins, and a **bulk-violation "pause & diff" mode** replacing any orphan storm.
+**R12 — Cloud-synced vaults.** OneDrive/Dropbox placeholders and tunneling fight file watchers on a large share of real Windows vaults. *Adopted:* detection + conservative profiles + explicit user warning (§7.9).
+**R13 — Inflow variance.** Bounded average inflow doesn't bound spikes: refactoring one hub concept can legitimately flag hundreds of dependents at once, and bulk-approve would quietly destroy the vetting guarantee. *Adopted:* **branch-and-migrate** — the changed definition lives on a branch; dependents migrate incrementally; declared "epistemic bankruptcy" (marking a subtree unvetted) is the honest fallback over pretend-review.
+**R14 — Agent-surface abuse.** CLI/MCP agents can flood the proposal queue (review-economy DoS) or be lazily granted write tokens, killing the human-only-writer invariant by convenience. *Adopted:* propose-only default tokens, per-token rate limits, audit logging, deliberate friction on write grants (§7.11).
+**R15 — Platform risk.** Frontier assistants shipping native user-curated, versioned memory would drain the category's oxygen. *Counter-position (marketing spine, not footnote):* local-first sovereignty, cross-agent neutrality, and the user-owned vetted graph — plus speed to Phase 4 while the window is open.
+
+---
+
+## 13. Monetization Path
+
+Phase ≤3: none (dogfood). Phase 4: personal pro subscription for the verified-memory surface (MCP server, hosted encrypted backup, premium decomposer models), free local-only core — the store is always the user's, full export always available (lock-in-resistance is both ethics and, per the analysis, the moat: the accumulated human-vetted graph is valuable only to its owner and non-replicable by competitors). Phase 5: team pricing in staleness-priced verticals, where the invalidation walk is priced against the cost of acting on a stale conclusion. Explicit non-strategies: ads, data monetization, per-seat notes-app pricing (F11).
+
+---
+
+## 14. Assumptions Filled from User Intent
+
+**Resolved in v1.1 (former open questions):** Stack = **TypeScript** (decisive: the Obsidian plugin is TS-only and now in the MVP; one language across kernel/editor/plugin/MCP server; better-sqlite3; sane desktop distribution — Python's ML-ecosystem edge is irrelevant since LLM access is via API; perf escape hatch is a Rust core with TS bindings, never Python). Licensing = **open core** (kernel, schema, contract grammars open; monetized surfaces proprietary). Launch domains = **universal concepts** (pure truth) + **task management** (pure open/done + transclusion, supertask/subtask via composition). Task semantics = minimal by decision, not assumption.
+
+**Resolved in v1.2:** Node lifecycle = **maturity ladder** (S0–S4; uniform append-only substrate, graduated guarantees; S1–S3 attach mechanically as infrastructure accrues, replacing the two-tier design). Process model = **resident daemon** (localhost API + auth token; all surfaces are clients; built-in editor is a daemon-served web UI; Tauri/Electron removed; functionality-first with tracked lightweight budgets). Supertask completion = **trigger flags for review, never auto-closes**. Linter policy = **auto-repair only under the certainty criterion**, logged and undoable, confirm-first otherwise. LLM provider = **fully abstract** (base URL + key + model; OpenAI-compatible default; local or hosted indifferent). Working name = **akasha**, internal only pending collision review (§15).
+
+**Resolved in v1.3:** OS order = **Windows first** (native single-executable daemon; Docker as secondary headless target only — WSL2 mount boundary breaks file-watching for host vaults, so containers are never the primary Windows distribution). Script notes = **TS/JS in QuickJS-WASM sandbox with capability-scoped host API** (reads + proposals only; full spec in §7.10; post-dogfood-gate). Daemon language = **TypeScript, reaffirmed** (Obsidian plugin is TS-only and in MVP; scripting language equals daemon language; single-exe Windows distribution; async-I/O + SQLite workload; Python's ML edge unused since inference is API-based; perf escape hatch remains a Rust core behind the unchanged API). Public name = **akasha at launch**, rebrand deliberately cheap: the name never appears in on-disk formats, contract grammars, or schema identifiers — UI strings and packaging only; trademark clearance (notably vs. AKASHA Foundation) scheduled before Phase-4 commercialization.
+
+**Resolved in v1.4:** Daemon language = **Python** — a deliberate reversal of v1.1's TypeScript verdict, on new information: founder familiarity dominates solo-dev velocity (the project's binding risk is schedule, not performance); the localhost API boundary makes daemon language invisible to spokes, and with Obsidian demoted to one outlet among many, "one language everywhere" was never achievable anyway; the plugin remains a thin TS client; the WASM sandbox decision is language-agnostic and survives; MCP's Python SDK is first-class. Acknowledged costs: weaker Windows single-exe story (pipx/uv now, PyInstaller later), two-language repo, type rigor by discipline (pydantic + pyright-strict). CLI = **first-class surface** (§7.11): API-first parity invariant, OpenAPI-generated, CRUD in MVP, versioned `--json` schema, propose-only agent tokens with rate limits and audited write-grants.
+
+**Resolved in v1.6 (final language strategy, superseding v1.5):** **Python now, Rust at maturity** — a founder strategy choice, not a fit dispute: v1.5's Go analysis identified the static optimum; v1.6 chooses the optimal *sequence* — maximize iteration speed through the phase gates where survival is decided (Python for pure development speed and prototyping), pay for maturity only when traction earns it (Rust when the product must become mature). The strategy is made real rather than aspirational by §7.12: frozen API contract + language-neutral on-disk state + golden-corpus acceptance suite + strangler-fig via PyO3, with testable triggers (budget breach → module strangler-step; Phase-4 external gate → full-cutover evaluation). Accepted costs, reinstated: Windows packaging tax until migration (pipx/uv now, PyInstaller polish later), RSS budget 150 MB, single-binary daemon+CLI deferred to the Rust era. The v1.5 Go analysis remains on record as the reference for what the mature-era targets are.
+
+**Remaining assumptions (flagged for correction):**
+A1 — Solo founder-developer; timelines sized accordingly. A2 — Desktop-first, local-first; daemon + browser UI (no app-shell dependency). A3 — LLM via user-supplied endpoint; no bundled inference cost. A4 — English-first UX; schema language-neutral. A5 — Personal data domain (no regulated-data handling pre-Phase-5). A6 — "Akashic-records subset" framing treated as vision language, not a federation requirement, per Phase-5 deferral. A7 — S0 default GC retention 30 days (configurable); GC blocked at S1 automatically.
+
+---
+
+## 15. Consolidated Open Questions
+
+Q1 — **Trademark clearance for "akasha"** (action item, pre-Phase-4): professional clearance vs. AKASHA Foundation and other collisions before any commercial launch; also settle package and binary naming (`akasha` is collided on PyPI as well — e.g., package `akasha-tms`, binary `akashad`).
+Q2 — **Script-API surface (pre-script-notes):** which capabilities does the v1 script token expose beyond read + propose — e.g., UI panel rendering, network egress (off by default?), timers? Each is a security-surface decision to make deliberately when script notes are scheduled.
+Q3 — **Blessed script runtime:** QuickJS/JS (lightest sandbox, matches Obsidian-plugin authors) vs. Pyodide/Python (heavier). Decide when script notes are scheduled, after the Phase-2 gate; the wasmtime/WASM boundary and capability design are identical either way, and survive the §7.12 migration untouched.
+
+---
+
+## 16. Appendix — Design Invariants (tape above the keyboard)
+
+1. Syntactic identity is a solved database problem; **semantic identity is a human judgment the system can only make cheap, never automatic.** Every feature is machinery for cheapening that judgment.
+2. Propagate **invalidation, never conclusions.** Staleness = interface break, in every layer.
+3. Machine proposes; **human is the only writer of truth** — the system is fully operable with no machine in the loop, and **triggers and scripts, however computationally powerful, can only enqueue review items and proposals; nothing but a human mutates truth or closes anything.**
+4. Staleness inflow ≤ review capacity, **by construction.** Relations bind the narrowest facet.
+5. In-contract sync is a **bijection**; out-of-contract edits are **flagged, never guessed** — silent repair only when certain, and always undoable.
+6. One append-only substrate; guarantees accrue up the **maturity ladder** — the past of everything that earned permanence is queryable and **never retroactively falsified.** S0 is for forgetting; S1+ forgets nothing.
+7. Prose is out of scope. When tempted, reread F2.
+8. The contract grammar is **versioned and frozen per release** — vaults outlive software.
