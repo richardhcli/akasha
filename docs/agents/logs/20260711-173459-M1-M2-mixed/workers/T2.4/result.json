@@ -1,0 +1,28 @@
+{
+  "status": "DONE",
+  "files_changed": [
+    "tests/golden/test_serialization.py",
+    "tests/golden/serialization/nfd_input/input.md", "tests/golden/serialization/nfd_input/expected.md",
+    "tests/golden/serialization/crlf_input/input.md", "tests/golden/serialization/crlf_input/expected.md",
+    "tests/golden/serialization/cr_only_input/input.md", "tests/golden/serialization/cr_only_input/expected.md",
+    "tests/golden/serialization/mixed_line_endings/input.md", "tests/golden/serialization/mixed_line_endings/expected.md",
+    "tests/golden/serialization/trailing_whitespace/input.md", "tests/golden/serialization/trailing_whitespace/expected.md",
+    "tests/golden/serialization/trailing_tabs_whitespace/input.md", "tests/golden/serialization/trailing_tabs_whitespace/expected.md",
+    "tests/golden/serialization/emoji_basic/input.md", "tests/golden/serialization/emoji_basic/expected.md",
+    "tests/golden/serialization/emoji_zwj_sequence/input.md", "tests/golden/serialization/emoji_zwj_sequence/expected.md",
+    "tests/golden/serialization/nested_fences/input.md", "tests/golden/serialization/nested_fences/expected.md",
+    "tests/golden/serialization/tabs_in_fence/input.md", "tests/golden/serialization/tabs_in_fence/expected.md",
+    "tests/golden/serialization/tabs_outside_fence/input.md", "tests/golden/serialization/tabs_outside_fence/expected.md",
+    "tests/golden/serialization/mixed_tabs_fence_and_plain/input.md", "tests/golden/serialization/mixed_tabs_fence_and_plain/expected.md",
+    "tests/golden/serialization/tilde_fence/input.md", "tests/golden/serialization/tilde_fence/expected.md",
+    "tests/golden/serialization/multiple_trailing_newlines/input.md", "tests/golden/serialization/multiple_trailing_newlines/expected.md",
+    "tests/golden/serialization/no_trailing_newline/input.md", "tests/golden/serialization/no_trailing_newline/expected.md",
+    "tests/golden/serialization/empty_file/input.md", "tests/golden/serialization/empty_file/expected.md",
+    "tests/golden/serialization/whitespace_only_file/input.md", "tests/golden/serialization/whitespace_only_file/expected.md",
+    "tests/golden/serialization/combining_marks_nfd/input.md", "tests/golden/serialization/combining_marks_nfd/expected.md"
+  ],
+  "verify_command": "uv run pytest tests/golden/test_serialization.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/golden/test_serialization.py ...................                   [100%]\n\n============================== 19 passed in 0.11s ===============================",
+  "spec_questions": []
+}

@@ -34,21 +34,25 @@ CI matrix not yet run (no remote configured).
 | T0.7 | Makefile targets | DONE | `make` itself isn't installed in this sandbox; targets verified by running their `uv run ...` bodies directly |
 | T0.8 | CI matrix (GitHub Actions) | DONE | YAML validated locally; not yet run against a remote |
 
-## M2 — IDs + canonicalization (Depends on: M0)
+## M2 — IDs + canonicalization (Depends on: M0) — **CLOSED**
+
+Milestone DoD: `pytest tests/unit/test_ids.py tests/golden/test_serialization.py`
+→ 33 passed. Hypothesis round-trip (`tests/property/test_canonical_idempotent.py`)
+→ 2 passed, no falsifying example. Verified locally on ubuntu.
 
 | Task | Goal | Status | Notes |
 |---|---|---|---|
 | T2.1 | ID minting + checksum + validation (`ids.py`) | DONE | Sonnet worker recovered after initial orchestration halt; 14 tests passing (includes 5 known checksum vectors, validation, minting, anchors). Confirmed via `make check`: ruff/pyright clean, 41 total tests pass. |
 | T2.2 | Text + JSON canonicalization (`canonical.py`) | DONE | Sonnet worker created both canonical.py and test_canonical.py; 14 tests passing (CRLF/LF, NFC, fence detection, tabs, JSON hashing). Confirmed via `make check`: ruff/pyright clean, 41 total tests pass. |
-| T2.3 | Canonicalization idempotence (property test) | TODO | |
-| T2.4 | Golden serialization corpus (≥15 cases) | TODO | |
+| T2.3 | Canonicalization idempotence (property test) | DONE | Ran via redesigned fleet-workflow.js pipeline (docs/agents/logs/20260711-173459-M1-M2-mixed/). Hypothesis property test, 2 passed. Independently CONFIRMED_DONE by separate verifier agent (re-ran pytest itself). M2 milestone now CLOSED — T2.1-T2.4 all DONE. |
+| T2.4 | Golden serialization corpus (≥15 cases) | DONE | Same run. 18 golden cases (>=15 required), 19 tests passed. Independently CONFIRMED_DONE — verifier checked all 37 files exist/non-empty (empty_file/input.md correctly 0 bytes by design) and cross-referenced git status. |
 
 ## M1 — Kernel store (Depends on: M0)
 
 | Task | Goal | Status | Notes |
 |---|---|---|---|
-| T1.1 | DDL migration `001_init.sql` (verbatim) | TODO | |
-| T1.2 | pydantic models (`model.py`) | TODO | |
+| T1.1 | DDL migration `001_init.sql` (verbatim) | DONE | Same run as T2.3/T2.4 (docs/agents/logs/20260711-173459-M1-M2-mixed/). 5 schema tests passed. Independently CONFIRMED_DONE. |
+| T1.2 | pydantic models (`model.py`) | DONE | Same run. 15 model tests passed (facet_binding validator, justification-edge constant, defaults). Independently CONFIRMED_DONE. |
 | T1.3 | Store: node create/read + commit DAG (`store.py`) | TODO | extends the `store.py` migration-runner code from T0.3 |
 | T1.4 | Store: edges create/retract + neighborhood/search | TODO | |
 | T1.5 | Maturity derivation (`maturity.py`) | TODO | |

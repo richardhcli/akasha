@@ -1,0 +1,8 @@
+{
+  "status": "DONE",
+  "files_changed": ["tests/unit/test_verifier_probe.py"],
+  "verify_command": "test -e tests/unit/test_verifier_probe.py && echo OK",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "OK",
+  "spec_questions": []
+}

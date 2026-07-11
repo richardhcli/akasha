@@ -1,0 +1,8 @@
+{
+  "files_exist": [],
+  "verify_exit_code": 4,
+  "verify_stdout_tail": "ERROR: file or directory not found: tests/unit/test_fake_verification_marker.py\n\n============================= test session starts ==============================\nplatform linux -- Python 3.14.4, pytest-9.1.1, pluggy-1.6.0\nrootdir: /home/richardhcli/projects/personal-projects/akasha\nconfigfile: pyproject.toml\nplugins: anyio-4.14.1, hypothesis-6.156.6\ncollected 0 items\n\n============================ no tests ran in 0.09s =============================",
+  "git_status_matches_claim": false,
+  "verdict": "CONFIRMED_BLOCKED",
+  "notes": "Worker claimed status=BLOCKED, files_changed=[], verify_exit_code=4. Re-running the verify command confirms: file does not exist, pytest exits 4 exactly as claimed. git_status_matches_claim set false because the working tree was not clean overall (unrelated concurrent edits from other agents in this session — fleet-orchestrator.md, fleet-architecture.md, runbook.md, spec-questions.md, fleet-workflow.js, logs/.gitkeep), none of which relate to this task's target file. Core falsifiable claim (verify_exit_code=4) checks out, so verdict is CONFIRMED_BLOCKED."
+}

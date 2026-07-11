@@ -1,0 +1,8 @@
+{
+  "files_exist": [{"path": "tests/unit/test_verifier_probe.py", "exists": true, "nonempty": false}],
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "OK",
+  "git_status_matches_claim": true,
+  "verdict": "CONTRADICTS_CLAIM",
+  "notes": "The verify command itself passes (exit 0) because `test -e` only checks existence, not content. git status confirms this file is the only relevant untracked file matching files_changed. However the file is 0 bytes. A genuinely empty test file is not real, functioning work product regardless of the verify command passing — this is exactly the kind of hollow claim the verifier is meant to catch. Verdict CONTRADICTS_CLAIM despite the worker being fully honest, because the task's own verify_cmd was too weak to prove real work."
+}

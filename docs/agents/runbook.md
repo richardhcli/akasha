@@ -5,30 +5,90 @@ This describes how to actually kick off an unattended run through
 this is the procedure a human (or a session acting on the human's explicit
 request) follows to start one.
 
-## Accelerated path: Fleet Orchestrator (recommended for large batches)
+## Primary path: fleet-dispatch Workflow (recommended for large batches)
 
-**New in this iteration:** `docs/agents/fleet-architecture.md` defines a
-3-tier agent hierarchy (Opus → Sonnet → Cursor) that automates the dispatch
-procedure below. Use this path when:
-
-- You want to parallelize file-disjoint tasks and run multiple tasks at once.
-- You want to optimize token spend by matching task complexity to model cost
-  (Cursor handles verbatim-spec work, Sonnet handles most tasks, Opus
-  orchestrates).
+`docs/agents/fleet-architecture.md` defines a 3-tier agent hierarchy (Opus
+scanner → Sonnet worker → Cursor editor). Dispatch and verification are
+implemented as a `Workflow` script, `docs/agents/fleet-workflow.js`, not as
+a prose-narrating orchestrator agent — see "Why this is a Workflow, not an
+orchestrator agent" below for why that distinction matters.
 
 **How to use:**
-1. Spawn a `fleet-orchestrator` agent via the Agent tool (it has no
-   parameters — it reads the entire build-plan + task-status state and
-   decides what to run).
-2. The orchestrator will parallelize where safe, spawn `fleet-worker` agents
-   for each task, reconcile results, and update `docs/agents/task-status.md`
-   itself.
-3. Specify which milestone to start from (e.g., "run M2 to completion" or "run
-   all ready tasks in M0–M5").
+1. Spawn a `fleet-orchestrator` agent via the Agent tool to scan
+   `docs/agents/task-status.md` + `docs/build-plan.md` and return the next
+   eligible, file-disjoint cohort (see `.claude/agents/fleet-orchestrator.md`
+   — it is scanner-only now, it does not dispatch or narrate results).
+2. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`) and invoke:
+   ```
+   Workflow({
+     scriptPath: "docs/agents/fleet-workflow.js",
+     args: { run_id, cohort: <cohort from step 1> },
+   })
+   ```
+3. When the Workflow returns, its `results` array contains, per task, the
+   worker's structured result and an independent verifier's structured
+   verdict (`CONFIRMED_DONE` / `CONTRADICTS_CLAIM` / `CONFIRMED_BLOCKED`).
+   Only flip a task to `DONE` in `docs/agents/task-status.md` when its
+   verdict is `CONFIRMED_DONE` — a `CONTRADICTS_CLAIM` verdict means the
+   worker claimed success but independent re-verification found otherwise;
+   treat it as `BLOCKED: verifier contradicted worker claim` and stop the
+   pipeline for that task, same as any other Verify failure.
+4. Persist a durable log for the run under `docs/agents/logs/<run_id>/`
+   (see "Logging" below) using the real structured data the Workflow
+   returned — never a re-narrated summary of it.
+5. Repeat from step 1 for the next eligible cohort.
 
 **Fallback:** The manual one-task-at-a-time procedure below remains valid and
-required as a fallback if the orchestrator is unavailable or you prefer
-single-task control.
+required if `Workflow` is unavailable or you prefer single-task control.
+
+### Why this is a Workflow, not an orchestrator agent
+
+An earlier version of this system had an `fleet-orchestrator` agent spawn
+`fleet-worker` agents via the `Agent` tool directly and report on their
+results in prose. A live incident showed this is unsafe: the orchestrating
+turn narrated a fake "worker complete" result — before the real background
+task's actual completion had arrived — and that fabrication was
+indistinguishable from a genuine report until an independent filesystem
+check caught the contradiction. A `Workflow` script's `agent()` calls are
+real synchronous awaits in deterministic code: the script cannot proceed
+until the harness resolves the actual subagent result, so this failure mode
+is closed by construction, not by prompting discipline. See the
+`ORCHESTRATION-INCIDENT` entry in `docs/spec-questions.md` for the full
+incident writeup.
+
+### Logging
+
+Every `fleet-dispatch` Workflow run should be persisted to
+`docs/agents/logs/<run_id>/` for durable, human-reviewable audit trail:
+
+```
+docs/agents/logs/<run_id>/
+  manifest.json              # {run_id, cohort: [task_ids], final_status}
+  workers/<task_id>/
+    prompt.md                 # the exact prompt sent to the worker (verbatim)
+    result.json                # the worker's schema-validated structured result
+  verify/<task_id>/
+    prompt.md                  # the exact prompt sent to the verifier (verbatim)
+    result.json                 # the verifier's schema-validated verdict
+```
+
+Write these files from the Workflow's returned `results` array directly
+after `await Workflow(...)` resolves — the workflow script itself has no
+filesystem access, so this is the caller's responsibility, and it must come
+from the structured return value, not a freeform description of it.
+
+### Hang handling
+
+A worker or verifier agent that stalls should self-report `BLOCKED:
+possible hang — exceeded tool-call budget` per the guard built into every
+prompt in `fleet-workflow.js` — this is a soft, prompt-level cap, not a
+guarantee. There is no documented hard per-`agent()` timeout inside a
+Workflow script. If a `Workflow` run itself appears wedged (no progress
+after a delay sized to the cohort's expected runtime), force-stop it with
+`TaskStop` on the Workflow's task ID, write a `manifest.json` with
+`final_status: "ABORTED"` and `hang_detected: true`, and stop — do not
+retry automatically. This has been exercised in practice (a stalled
+planning subagent was force-stopped this way during this system's design).
 
 ## Preconditions
 

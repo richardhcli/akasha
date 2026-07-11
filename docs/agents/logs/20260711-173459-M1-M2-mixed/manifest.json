@@ -1,0 +1,7 @@
+{
+  "run_id": "20260711-173459-M1-M2-mixed",
+  "cohort": ["T2.3", "T2.4", "T1.1", "T1.2"],
+  "final_status": "COMPLETE",
+  "verdicts": {"T2.3": "CONFIRMED_DONE", "T2.4": "CONFIRMED_DONE", "T1.1": "CONFIRMED_DONE", "T1.2": "CONFIRMED_DONE"},
+  "notes": "First real (non-synthetic) cohort run through the redesigned fleet-workflow.js pipeline: scanner agent (fleet-orchestrator) computed the cohort, Workflow dispatched 4 file-disjoint workers in parallel with independent per-task verifiers. All 4 CONFIRMED_DONE by independent re-verification. Cross-checked with a fresh `make check`-equivalent run afterward: 82 tests pass, ruff/pyright clean. Total: 8 agents, 91 tool calls, 207386 tokens, ~192s wall clock."
+}

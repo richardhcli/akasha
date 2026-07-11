@@ -1,0 +1,8 @@
+{
+  "files_exist": [{"path": "tests/property/test_canonical_idempotent.py", "exists": true, "nonempty": true}],
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/property/test_canonical_idempotent.py ..                           [100%]\n\n============================== 2 passed in 0.34s ===============================",
+  "git_status_matches_claim": true,
+  "verdict": "CONFIRMED_DONE",
+  "notes": "Re-ran pytest independently: 2 passed, exit code 0, matching the worker's claim. File exists (2425 bytes) and is non-empty. git status shows tests/property/ as untracked, consistent with a new file. No evidence the worker's claim is false."
+}

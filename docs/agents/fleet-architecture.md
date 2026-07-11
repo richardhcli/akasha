@@ -41,11 +41,27 @@ T1.3, T1.4, T1.5 all touch store.py → run sequentially, one at a time.
 
 ### Orchestrator Responsibilities
 
-1. **Read task-status.md + build-plan.md** → identify all TODO tasks with satisfied dependencies.
-2. **Partition by file disjointness** → group into cohorts (sequential, or a batch of parallels).
-3. **Spawn fleet-worker agents** (Sonnet) — one per task, or all at once if parallel.
-4. **Reconcile results** → update task-status.md (DONE / BLOCKED), collect spec questions, run `make check` + `make battery` to verify.
-5. **Own writes** to `docs/agents/task-status.md` and `docs/spec-questions.md` — workers report; orchestrator writes.
+The "orchestrator" role is now split across two components rather than one
+prose-narrating agent — see "Verification model" below for why.
+
+1. **`fleet-orchestrator` agent (scanner, Opus)** — reads task-status.md +
+   build-plan.md, identifies all TODO tasks with satisfied dependencies,
+   partitions by file disjointness into a cohort (sequential group collapsed
+   to its first task, or a batch of fully parallel tasks), and returns that
+   cohort as structured data. It does not spawn workers and does not write
+   task-status.md.
+2. **`docs/agents/fleet-workflow.js` (Workflow script)** — receives the
+   cohort, spawns one `fleet-worker` agent per task (in parallel where
+   file-disjoint, via `pipeline()`), then spawns a separate, independent
+   verifier agent per task that re-runs Verify and cross-checks claimed
+   files against `git status`. Returns structured worker + verifier results
+   for the whole cohort.
+3. **Caller (the outer Claude Code session)** — after the Workflow returns,
+   writes the durable log under `docs/agents/logs/<run_id>/` (see
+   "Logging" below) and updates `docs/agents/task-status.md` /
+   `docs/spec-questions.md`, flipping a task to `DONE` only when its
+   verifier verdict is `CONFIRMED_DONE`. Runs `make check` (+ `make battery`
+   for M5+ closures) before considering the cohort settled.
 
 ### Worker Responsibilities
 
@@ -139,6 +155,86 @@ echo '{"task_id":"T2.4",...}' | python scripts/fleet/cursor_bridge.py
 ```
 
 **Important:** The bridge does NOT run the task's `Verify` command. It only reports "edits happened"; the worker is responsible for verifying correctness.
+
+---
+
+## Verification Model
+
+**Never trust a worker's self-report as the sole basis for marking a task
+`DONE`.** `docs/agents/fleet-workflow.js` spawns a second, independent
+`agent()` call per task — the verifier — after the worker returns. The
+verifier:
+
+1. Re-runs the task's exact `Verify` command itself, via its own `Bash`
+   call, and records the real exit code and output tail.
+2. Checks every path the worker claimed in `files_changed` actually exists
+   on disk and is non-empty.
+3. Cross-checks `git status --porcelain` / `git diff --name-only` against
+   the claim.
+4. Returns a structured verdict: `CONFIRMED_DONE`, `CONTRADICTS_CLAIM`, or
+   `CONFIRMED_BLOCKED`.
+
+A task is flipped to `DONE` in `docs/agents/task-status.md` only on
+`CONFIRMED_DONE`. `CONTRADICTS_CLAIM` is treated exactly like any other
+Verify failure: `BLOCKED: verifier contradicted worker claim`, pipeline
+stops for that task.
+
+This exists because of a real incident, not a hypothetical: the
+orchestrating turn once narrated a fabricated "worker complete" result
+before the real background task had actually finished, and that
+fabrication was indistinguishable from a genuine report by inspection
+alone — only an independent, out-of-band filesystem check caught it. Using
+a `Workflow` script for dispatch closes the *orchestrator*-side version of
+this bug by construction (its `agent()` calls are real blocking awaits, not
+narratable text). The independent verifier stage closes the *worker*-side
+version — including a separately documented Claude Code failure mode where
+a background subagent's tool call can be silently auto-denied and the
+subagent then self-reports as if it succeeded. See the
+`ORCHESTRATION-INCIDENT` entry in `docs/spec-questions.md` for the full
+writeup.
+
+## Logging
+
+Every `fleet-dispatch` Workflow run is persisted to
+`docs/agents/logs/<run_id>/` (`run_id` format:
+`<YYYYMMDD-HHMMSS>-<milestone-label>`):
+
+```
+docs/agents/logs/<run_id>/
+  manifest.json              # {run_id, cohort: [task_ids], final_status: "COMPLETE"|"PARTIAL"|"ABORTED"}
+  workers/<task_id>/
+    prompt.md                 # exact prompt sent to the worker, verbatim
+    result.json                # worker's schema-validated structured result, verbatim
+  verify/<task_id>/
+    prompt.md                  # exact prompt sent to the verifier, verbatim
+    result.json                 # verifier's schema-validated verdict, verbatim
+```
+
+Workflow scripts have no filesystem access, so this is written by the
+caller (the outer Claude Code session) immediately after `await
+Workflow(...)` resolves, directly from the structured `results` array the
+workflow returns — never from a re-narrated summary of it. This is what
+makes the log trustworthy for manual review: every prompt on disk is the
+literal string that was sent, and every result on disk is the literal
+schema-validated object the harness returned, with no narration step in
+between where a fabrication could be introduced.
+
+## Hang Handling
+
+Every worker and verifier prompt built by `fleet-workflow.js` includes a
+soft guard: "if you haven't reached a terminal status within ~20 tool
+calls, stop and report BLOCKED: possible hang." This is a prompt-level cap,
+not a hard guarantee — there is no documented per-`agent()` wall-clock
+timeout inside a Workflow script, and a script cannot reach in and kill a
+single internal `agent()` call.
+
+The real hard-kill lever is `TaskStop` on the entire `Workflow` invocation's
+task ID, from the outer session, if a run shows no progress after a delay
+sized to the cohort's expected runtime. On a force-stop: write
+`manifest.json` with `final_status: "ABORTED"` and `hang_detected: true`,
+and stop — do not retry automatically or burn further tokens. This is not
+theoretical: a stalled planning subagent was force-stopped this exact way
+while this system was being designed.
 
 ---
 

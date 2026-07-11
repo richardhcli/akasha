@@ -1,0 +1,7 @@
+{
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/golden/test_serialization.py ...................                   [100%]\n\n============================== 19 passed in 0.11s ===============================",
+  "git_status_matches_claim": true,
+  "verdict": "CONFIRMED_DONE",
+  "notes": "Re-ran pytest independently: 19 passed, exit code 0 (satisfies the >=15 case DoD and the module's own test_at_least_fifteen_cases_present assertion). All 37 claimed files exist. Only tests/golden/serialization/empty_file/input.md is 0 bytes, which is correct by design (that case's purpose is to feed an empty input to canonicalize_text); its expected.md is non-empty. git status --porcelain shows all 18 case directories plus test_serialization.py as untracked, exactly matching the 37 claimed paths. Cross-checked against build-plan.md T2.4 spec: required case categories (NFD, CRLF, trailing whitespace, emoji, nested fences, tabs-in-fence, mixed line endings, empty file, no-trailing-newline, multiple-trailing-newlines) are all present among the 18 cases."
+}

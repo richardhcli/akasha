@@ -1,0 +1,11 @@
+{
+  "files_exist": [
+    {"path": "migrations/001_init.sql", "exists": true, "nonempty": true},
+    {"path": "tests/unit/kernel/test_schema.py", "exists": true, "nonempty": true}
+  ],
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/unit/kernel/test_schema.py .....                                   [100%]\n============================== 5 passed in 0.11s ===============================",
+  "git_status_matches_claim": true,
+  "verdict": "CONFIRMED_DONE",
+  "notes": "Re-ran pytest independently: 5 passed, exit code 0, matching claim. Both files exist and are non-empty (2932 and 4220 bytes). git status shows both as untracked, consistent with new files."
+}

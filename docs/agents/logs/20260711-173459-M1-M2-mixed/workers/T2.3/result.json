@@ -1,0 +1,8 @@
+{
+  "status": "DONE",
+  "files_changed": ["tests/property/test_canonical_idempotent.py"],
+  "verify_command": "uv run pytest tests/property/test_canonical_idempotent.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "..                                                                       [100%]\n2 passed in 0.37s",
+  "spec_questions": []
+}
