@@ -5,21 +5,7 @@
       "Read(/home/richardhcli/personal-projects/akasha/**)",
       "Edit(/home/richardhcli/personal-projects/akasha/**)",
       "Write(/home/richardhcli/personal-projects/akasha/**)",
-      "Bash(git *)",
-      "Bash(git -C /home/richardhcli/personal-projects/akasha *)",
-      "Bash(npm *)",
-      "Bash(npm run *)",
-      "Bash(npm test)",
-      "Bash(npm install)",
-      "Bash(uv *)",
-      "Bash(python *)",
-      "Bash(pytest *)",
-      "Bash(find /home/richardhcli/personal-projects/akasha *)",
-      "Bash(grep *)",
-      "Bash(ls *)",
-      "Bash(cat *)",
-      "Bash(head *)",
-      "Bash(tail *)"
+      "Bash(*)"
     ],
     "deny": [
       "Bash(rm -rf *)",

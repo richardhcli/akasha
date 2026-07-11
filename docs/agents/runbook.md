@@ -5,6 +5,31 @@ This describes how to actually kick off an unattended run through
 this is the procedure a human (or a session acting on the human's explicit
 request) follows to start one.
 
+## Accelerated path: Fleet Orchestrator (recommended for large batches)
+
+**New in this iteration:** `docs/agents/fleet-architecture.md` defines a
+3-tier agent hierarchy (Opus → Sonnet → Cursor) that automates the dispatch
+procedure below. Use this path when:
+
+- You want to parallelize file-disjoint tasks and run multiple tasks at once.
+- You want to optimize token spend by matching task complexity to model cost
+  (Cursor handles verbatim-spec work, Sonnet handles most tasks, Opus
+  orchestrates).
+
+**How to use:**
+1. Spawn a `fleet-orchestrator` agent via the Agent tool (it has no
+   parameters — it reads the entire build-plan + task-status state and
+   decides what to run).
+2. The orchestrator will parallelize where safe, spawn `fleet-worker` agents
+   for each task, reconcile results, and update `docs/agents/task-status.md`
+   itself.
+3. Specify which milestone to start from (e.g., "run M2 to completion" or "run
+   all ready tasks in M0–M5").
+
+**Fallback:** The manual one-task-at-a-time procedure below remains valid and
+required as a fallback if the orchestrator is unavailable or you prefer
+single-task control.
+
 ## Preconditions
 
 - `docs/agents/task-status.md` is up to date — the next `TODO` task's

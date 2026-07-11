@@ -15,6 +15,7 @@
 5. All persisted bytes obey §4.3 (canonicalization). **Pickle is forbidden everywhere** (enforced by lint rule).
 6. The product name never appears in on-disk formats, anchors, or schema identifiers (rebrand invariant). The neutral on-disk prefix is `tm` (e.g., anchors `^tm-...`), chosen because it is not brand-derived.
 7. Run `make check` (lint + typecheck + unit + property) before considering any task done; run `make battery` before closing M5+ tasks.
+8. NO BACKWARD COMPATIBILITY is needed-- always make optimal changes. ALWAYS MAKE CHANGES that conform to the interfaces of other mudules if needed to use with CURRENT codebase, but NEVER make changes to previous codebases-- I am the only user. 
 
 ---
 
