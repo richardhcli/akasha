@@ -1,0 +1,11 @@
+{
+  "task_id": "T1.8",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "1 passed in 0.38s EXIT_CODE=0",
+  "files_exist": [
+    {"path": "tests/property/test_store.py", "exists": true, "nonempty": true}
+  ],
+  "git_status_matches_claim": true,
+  "notes": "Re-ran verify: 1 passed, exit 0. test_store.py=10184 bytes/230 lines (new). Opus additionally audited the test body: all four §4.5 invariants genuinely asserted (1&2 after every op; 3&4 per sequence) with independently-computed expectations — not vacuous."
+}

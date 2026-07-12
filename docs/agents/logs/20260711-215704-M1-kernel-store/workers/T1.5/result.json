@@ -1,0 +1,12 @@
+{
+  "task_id": "T1.5",
+  "status": "DONE",
+  "files_changed": ["src/akasha/kernel/maturity.py", "tests/unit/kernel/test_maturity.py"],
+  "verify_command": "uv run pytest tests/unit/kernel/test_maturity.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "16 passed in 0.15s",
+  "spec_questions": [
+    "T1.5: store-recompute wiring (§4.6 'recomputed inside the same transaction') intentionally deferred to T1.6 (owns store.py; not in T1.5 Files).",
+    "T1.5: S4 chaining ambiguity — §4.6 says 'S4 iff vetted flag set' without chaining to S3-eligible (unlike S2/S3). Implemented literal reading: vetted alone => S4 regardless of S1-S3. Flagged for human confirmation."
+  ]
+}

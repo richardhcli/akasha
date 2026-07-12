@@ -1,0 +1,11 @@
+{
+  "task_id": "T1.9",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "1 passed in 3.34s EXIT:0",
+  "files_exist": [
+    {"path": "tests/integration/test_perf.py", "exists": true, "nonempty": true}
+  ],
+  "git_status_matches_claim": true,
+  "notes": "Re-ran verify: 1 passed, exit 0. test_perf.py=72 lines (new). Opus audited: genuinely seeds 10,000 nodes + ~30k edges via store API, 500 timed neighborhood(hops=1) samples, real p95 via statistics.quantiles, asserts <0.050s (threshold NOT weakened)."
+}

@@ -1,0 +1,24 @@
+{
+  "run_id": "20260711-215704-M1-kernel-store",
+  "milestone": "M1",
+  "cohort": ["T1.3", "T1.4", "T1.5", "T1.6", "T1.7", "T1.8", "T1.9"],
+  "dispatch_mode": "sequential (strict linear dependency chain; one single-task fleet-workflow dispatch per task, each with worker + independent verifier)",
+  "final_status": "COMPLETE",
+  "per_task_verdicts": {
+    "T1.3": "CONFIRMED_DONE",
+    "T1.4": "CONFIRMED_DONE",
+    "T1.5": "CONFIRMED_DONE",
+    "T1.6": "CONFIRMED_DONE",
+    "T1.7": "CONFIRMED_DONE",
+    "T1.8": "CONFIRMED_DONE",
+    "T1.9": "CONFIRMED_DONE"
+  },
+  "milestone_dod": {
+    "command": "uv run pytest tests/unit/kernel tests/property/test_store.py",
+    "result": "92 passed",
+    "perf": "tests/integration/test_perf.py::test_neighborhood_p95 -> p95 < 50 ms, 1 passed",
+    "make_check_equivalent": "ruff clean; pyright --strict 0 errors; 132 unit+property tests pass"
+  },
+  "open_spec_questions": ["T1.3", "T1.5", "T1.6", "T1.7"],
+  "notes": "Orchestrator (fleet-orchestrator agent) invoked once to verify correctness + produce the first cohort; it correctly identified the strict linear T1.3->T1.9 chain and returned a single-task cohort. Remaining single-task cohorts were computed directly by the outer session (deterministic for a linear chain) to avoid redundant Opus scanner invocations. Each task still dispatched through fleet-workflow.js (worker + independent verifier). Every worker result was additionally audited against the mvp-spec by the outer Opus session, not just verifier-confirmed."
+}

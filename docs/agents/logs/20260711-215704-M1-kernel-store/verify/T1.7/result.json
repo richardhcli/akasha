@@ -1,0 +1,12 @@
+{
+  "task_id": "T1.7",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "6 passed in 0.17s EXIT_CODE:0",
+  "files_exist": [
+    {"path": "src/akasha/kernel/store.py", "exists": true, "nonempty": true},
+    {"path": "tests/unit/kernel/test_gc.py", "exists": true, "nonempty": true}
+  ],
+  "git_status_matches_claim": true,
+  "notes": "Re-ran verify: 6 passed, exit 0. store.py=915 lines (modified), test_gc.py=130 lines (new). Consistent with claim."
+}

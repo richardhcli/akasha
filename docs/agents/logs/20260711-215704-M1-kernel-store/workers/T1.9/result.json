@@ -1,0 +1,9 @@
+{
+  "task_id": "T1.9",
+  "status": "DONE",
+  "files_changed": ["tests/integration/test_perf.py"],
+  "verify_command": "uv run pytest tests/integration/test_perf.py::test_neighborhood_p95",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "1 passed in 3.47s (10k nodes, ~30k edges, 500 samples, p95 < 50ms)",
+  "spec_questions": []
+}

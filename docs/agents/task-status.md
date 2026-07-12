@@ -47,19 +47,33 @@ Milestone DoD: `pytest tests/unit/test_ids.py tests/golden/test_serialization.py
 | T2.3 | Canonicalization idempotence (property test) | DONE | Ran via redesigned fleet-workflow.js pipeline (docs/agents/logs/20260711-173459-M1-M2-mixed/). Hypothesis property test, 2 passed. Independently CONFIRMED_DONE by separate verifier agent (re-ran pytest itself). M2 milestone now CLOSED — T2.1-T2.4 all DONE. |
 | T2.4 | Golden serialization corpus (≥15 cases) | DONE | Same run. 18 golden cases (>=15 required), 19 tests passed. Independently CONFIRMED_DONE — verifier checked all 37 files exist/non-empty (empty_file/input.md correctly 0 bytes by design) and cross-referenced git status. |
 
-## M1 — Kernel store (Depends on: M0)
+## M1 — Kernel store (Depends on: M0) — **CLOSED**
+
+Milestone DoD: `pytest tests/unit/kernel tests/property/test_store.py` → 92 passed;
+property suite covers no-dangling-refs, head-reachable, as-of, S0-GC-safety;
+10k-node benchmark `tests/integration/test_perf.py::test_neighborhood_p95` → p95 < 50 ms
+(1 passed in ~3.5s). Verified locally on ubuntu via `make check` equivalent:
+ruff clean, pyright --strict 0 errors, 132 unit+property tests pass. All T1.3–T1.9
+worker results independently verified (CONFIRMED_DONE) AND separately audited against
+spec §4.1/§4.2/§4.4/§4.5/§4.6 by the Opus orchestrating session. Run log:
+docs/agents/logs/20260711-215704-M1-kernel-store/. SPEC-QUESTIONs T1.3/T1.5/T1.6/T1.7
+all RESOLVED 2026-07-11 (see docs/spec-questions.md): every narrowest reading was
+confirmed correct against vision.md + mvp-spec.md; no code changes required. Follow-ups
+noted there for M4 (vet endpoint must recompute maturity in-txn; history order is frozen
+oldest-first) and M7 (T7.6 reassignment queue layers on the mechanical redirect default;
+T7.2 maps facet-adds to 'minor').
 
 | Task | Goal | Status | Notes |
 |---|---|---|---|
 | T1.1 | DDL migration `001_init.sql` (verbatim) | DONE | Same run as T2.3/T2.4 (docs/agents/logs/20260711-173459-M1-M2-mixed/). 5 schema tests passed. Independently CONFIRMED_DONE. |
 | T1.2 | pydantic models (`model.py`) | DONE | Same run. 15 model tests passed (facet_binding validator, justification-edge constant, defaults). Independently CONFIRMED_DONE. |
-| T1.3 | Store: node create/read + commit DAG (`store.py`) | TODO | extends the `store.py` migration-runner code from T0.3 |
-| T1.4 | Store: edges create/retract + neighborhood/search | TODO | |
-| T1.5 | Maturity derivation (`maturity.py`) | TODO | |
-| T1.6 | Deletion, tombstone, redirects, split/merge | TODO | |
-| T1.7 | S0 garbage collection job | TODO | |
-| T1.8 | Store property suite | TODO | |
-| T1.9 | 10k-node neighborhood benchmark | TODO | |
+| T1.3 | Store: node create/read + commit DAG (`store.py`) | DONE | Run 20260711-215704-M1-kernel-store. 13 store-node tests pass; verifier CONFIRMED_DONE (re-ran pytest). Opus main-session audited store.py vs §4.5/§4.4/§4.1: create/commit/get_node(as_of)/history all correct, transactional, append-only. Logged SPEC-QUESTION T1.3 (object-blob layout, commit-hash addressing, history ordering — narrowest reading, open). |
+| T1.4 | Store: edges create/retract + neighborhood/search | DONE | Run 20260711-215704-M1-kernel-store. 9 edge tests pass; verifier CONFIRMED_DONE. Opus audit vs §4.5/§4.2/§4.4: create_edge reuses Edge pydantic validator (no reinvented rule), retract is soft (retracted_at, never DELETE), neighborhood filters retracted_at IS NULL both directions, FTS sync wired into create_node (INSERT) + commit_node (UPDATE), search via nodes_fts MATCH. No spec questions. |
+| T1.5 | Maturity derivation (`maturity.py`) | DONE | Run 20260711-215704-M1-kernel-store. 16 tests pass; verifier CONFIRMED_DONE. Opus audit vs §4.6: S0-S4 ladder correct, task/entity S2 facet-exemption handled, pure fn (no DB). Store-recompute wiring DEFERRED to T1.6 (store.py not in T1.5 Files). Logged SPEC-QUESTION T1.5 on S4-vs-S3 chaining ambiguity (literal reading: vetted alone => S4) — open, needs human. |
+| T1.6 | Deletion, tombstone, redirects, split/merge | DONE | Run 20260711-215704-M1-kernel-store. 24 tests pass; verifier CONFIRMED_DONE. Opus audit vs §4.5/§4.6/§4.4: delete_node S0 hard-delete (node/commits/incident edges/fts) vs S1+ tombstone+redirect vs E_NEEDS_REDIRECT; split/merge insert redirects + reassign live inbound edges (zero dangling). Maturity wiring (deferred from T1.5) landed here: _recompute_maturity called in create_edge/retract_edge/commit_node/delete/split/merge, same-txn. commits.py minimal facets_touched + default_change_class helpers. 3 SPEC-QUESTIONs logged (split parts shape, merge survivor, facets_touched span rule) — open. |
+| T1.7 | S0 garbage collection job | DONE | Run 20260711-215704-M1-kernel-store. 6 tests pass; verifier CONFIRMED_DONE. Opus audit vs §4.4/§4.5: gc_objects reachable = commits.object_hash ∪ nodes.head_hash ∪ sync_files.base_hash; deletes only orphans (all−reachable), single txn, returns sorted deleted hashes. Critical 'never collects live-S0 head' case covered. SPEC-QUESTION T1.7 logged (reachability widened past literal 'S1+ heads/history' to preserve 'never removes a referenced object') — open. |
+| T1.8 | Store property suite | DONE | Run 20260711-215704-M1-kernel-store. Stateful hypothesis test passes (25 examples); verifier CONFIRMED_DONE. Opus audited test body (not vacuous): all 4 §4.5 invariants genuinely asserted — no-dangling-edges + head-reachable-to-genesis after EVERY op; as-of correctness + GC-safety per sequence, with independently-computed expected values. Scope note: delete/split/merge not in the random sequence (covered by T1.6 unit tests); the 4 enumerated invariants are fully exercised. |
+| T1.9 | 10k-node neighborhood benchmark | DONE | Run 20260711-215704-M1-kernel-store. Passes (p95 < 50ms); verifier CONFIRMED_DONE. Opus audit: genuinely seeds 10,000 nodes + ~30k edges via store API, 500 timed neighborhood(hops=1) samples, real p95 via statistics.quantiles, asserts <0.050s (threshold not weakened). |
 
 ## M3 — Contract parser / renderer (Depends on: M2)
 

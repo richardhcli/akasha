@@ -1,0 +1,12 @@
+{
+  "task_id": "T1.5",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "16 passed in 0.16s EXIT:0",
+  "files_exist": [
+    {"path": "src/akasha/kernel/maturity.py", "exists": true, "nonempty": true},
+    {"path": "tests/unit/kernel/test_maturity.py", "exists": true, "nonempty": true}
+  ],
+  "git_status_matches_claim": true,
+  "notes": "Re-ran verify: 16 passed, exit 0. maturity.py=99 lines, test_maturity.py=101 lines, both new untracked. Consistent with claim."
+}
