@@ -1,0 +1,7 @@
+{
+  "task_id": "T3.5",
+  "verdict": "CONFIRMED_DONE",
+  "evidence": "14 passed reproduced exactly; ruff/pyright clean; traced E_ID_CHECKSUM and E_DELETED_S1 code paths -- confirmed no code path ever populates repairs for these two codes; confirmed E_DUP_ID/E_LOST_ANCHOR repairs require exact byte-identical match to base; 4 adversarial probes constructed live against lint() (dup-id no match, lost-anchor 0.99-not-1.0 similarity, checksum bad, deleted_s1) all correctly landed in review_items with repairs==[]; confirmed kernel.ids.validate reused, no DB/filesystem I/O in module.",
+  "files_confirmed": ["src/akasha/contract/linter.py", "tests/unit/contract/test_linter.py"],
+  "discrepancies": []
+}

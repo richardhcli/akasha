@@ -1,0 +1,7 @@
+{
+  "task_id": "T3.3",
+  "verdict": "CONFIRMED_DONE",
+  "evidence": "8 passed reproduced exactly; ruff/pyright clean; reuse of parser.BlockSet/Block/Embed/Ref, grammar.INDENT_UNIT/CONTRACT_VERSION, kernel.ids.vault_anchor, kernel.canonical.canonicalize_text all confirmed by read-through; manual idempotence probe canonicalize_text(render(x))==render(x) reproduced True.",
+  "files_confirmed": ["src/akasha/contract/render.py", "tests/unit/contract/test_render.py"],
+  "discrepancies": ["worker's 190-passed count for the full unit+property suite was stale relative to later sibling-task landings (204 now) -- not a correctness issue"]
+}

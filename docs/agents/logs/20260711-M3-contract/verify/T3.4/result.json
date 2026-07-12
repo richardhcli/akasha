@@ -1,0 +1,7 @@
+{
+  "task_id": "T3.4",
+  "verdict": "CONFIRMED_DONE",
+  "evidence": "2 passed reproduced 3x with random hypothesis seeds (no flakiness); ruff/pyright clean; 216 passed full suite; manually verified id8 generation uses real kernel.ids alphabet+checksum (not hand-rolled); manually drove strategy for 5 draws confirming real variety and canonical-by-construction; confirmed scoping decisions (new_requests excluded, embed/ref line_no collision) are documented and justified, not silent weakening.",
+  "files_confirmed": ["tests/property/test_contract_roundtrip.py"],
+  "strength_assessment": "meaningfully strong, not vacuous -- varies 0-8 items, all 4 kinds, realistic nesting, unique checksum-valid ids each draw"
+}

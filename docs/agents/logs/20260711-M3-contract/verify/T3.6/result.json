@@ -1,0 +1,7 @@
+{
+  "task_id": "T3.6",
+  "verdict": "CONFIRMED_DONE",
+  "evidence": "10 passed + 14 passed regression reproduced exactly; ruff/pyright clean; 216 passed full suite; confirmed diff to linter.py is purely additive (T3.5 symbols untouched, test_linter.py mtime predates T3.6 session); independently reproduced the exact-25%-boundary case (1/4, 2/8 -> False; 3/8 -> True) via standalone script, matching the strict > 0.25 comparator; confirmed exactly one review_item per PauseDecision, real difflib.unified_diff, zero I/O.",
+  "files_confirmed": ["src/akasha/contract/linter.py", "tests/unit/contract/test_pause_and_diff.py"],
+  "discrepancies": ["process-only: task-status.md/spec-questions.md/this log were not yet updated at verification time -- orchestrator bookkeeping, addressed in same run"]
+}

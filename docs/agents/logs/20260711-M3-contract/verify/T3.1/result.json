@@ -1,0 +1,13 @@
+{
+  "task_id": "T3.1",
+  "verdict": "CONFIRMED_DONE",
+  "evidence": "pytest tests/unit/contract/test_grammar.py -v -> 32 passed, exit 0; ruff check src tests -> All checks passed; pyright src -> 0 errors; pytest tests/unit tests/property -q -> 164 passed",
+  "files_confirmed": [
+    "src/akasha/contract/grammar.py",
+    "tests/unit/contract/test_grammar.py"
+  ],
+  "discrepancies": [
+    "docs/spec-questions.md had no T3.1 entry yet at verification time (orchestrator responsibility, addressed in same run)",
+    "docs/agents/task-status.md still showed T3.1 as TODO at verification time (orchestrator responsibility, addressed in same run)"
+  ]
+}

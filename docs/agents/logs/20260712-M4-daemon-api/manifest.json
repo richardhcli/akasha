@@ -1,0 +1,6 @@
+{
+  "run_id": "20260712-M4-daemon-api",
+  "cohort_plan": ["T4.1", "T4.2", "T4.3", "T4.4", "T4.5", "T4.6", "T4.7", "T4.8", "T4.9"],
+  "final_status": "IN_PROGRESS",
+  "note": "Mostly sequential -- most tasks share app.py/routes/test_api.py files."
+}

@@ -29,11 +29,23 @@ def default_config_path() -> Path:
     return default_config_dir() / "config.toml"
 
 
+def default_db_path() -> Path:
+    """Default SQLite database file location.
+
+    Lives alongside ``config.toml`` in the neutral ``tm-daemon`` dir. The
+    spec (§3) fixes the config dir name but never names the DB file; ``store.db``
+    is a neutral, product-name-free filename (rule 0.6). See the T4.4
+    SPEC-QUESTION in docs/spec-questions.md.
+    """
+    return default_config_dir() / "store.db"
+
+
 @dataclass(frozen=True)
 class Config:
     port: int = DEFAULT_PORT
     bind: str = DEFAULT_BIND
     path: Path | None = None
+    db_path: Path | None = None
 
 
 def load_config(config_path: str | Path | None = None) -> Config:
@@ -43,11 +55,13 @@ def load_config(config_path: str | Path | None = None) -> Config:
     """
     path = Path(config_path) if config_path is not None else default_config_path()
     if not path.exists():
-        return Config(path=path)
+        return Config(path=path, db_path=default_db_path())
 
     data = tomllib.loads(path.read_text(encoding="utf-8"))
+    db = data.get("db_path")
     return Config(
         port=data.get("port", DEFAULT_PORT),
         bind=data.get("bind", DEFAULT_BIND),
         path=path,
+        db_path=Path(db) if db else default_db_path(),
     )

@@ -1,0 +1,8 @@
+{
+  "task_id": "T3.4",
+  "status": "DONE",
+  "edit_path": "direct edit (Sonnet) -- judgment-heavy hypothesis strategy design",
+  "verify_output": "2 passed (tests/property/test_contract_roundtrip.py); stress-tested at max_examples=500 with no falsifying example, restored to 100; ruff clean; pyright 0 errors; pytest tests/unit tests/property -q: 216 passed",
+  "files_touched": ["tests/property/test_contract_roundtrip.py"],
+  "spec_questions_drafted": []
+}

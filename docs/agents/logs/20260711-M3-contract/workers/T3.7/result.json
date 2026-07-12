@@ -1,0 +1,13 @@
+{
+  "task_id": "T3.7",
+  "status": "DONE",
+  "edit_path": "cursor (grok-4.5-high) via scripts/fleet/cursor_bridge.py + direct Sonnet fuzz-hunt and README rewrite",
+  "verify_output": "33 passed (tests/golden/test_serialization.py); 35 passed (M3 DoD command: golden + roundtrip property); ruff clean; pyright 0 errors; pytest tests/unit tests/property -q: 216 passed",
+  "files_touched": [
+    "11 new tests/golden/serialization/contract_* case dirs (tasks, nesting, embeds, refs, tm_new, e_id_checksum, e_dup_id, e_lost_anchor, e_deleted_s1, w_unmanaged_anchor, pause_and_diff)",
+    "tests/golden/serialization/fuzz/README.md",
+    "tests/golden/test_serialization.py (extended additively)"
+  ],
+  "spec_questions_drafted": [],
+  "fuzz_outcome": "no falsifying example found after 3000 examples/direction (uncommitted throwaway script); tests/property/test_contract_roundtrip.py itself untouched"
+}

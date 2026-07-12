@@ -1,0 +1,12 @@
+{
+  "task_id": "T3.2",
+  "status": "DONE",
+  "verify_output": "18 passed (tests/unit/contract/test_parser.py -v); ruff clean; pyright 0 errors; pytest tests/unit tests/property -q: 182 passed",
+  "files_touched": [
+    "src/akasha/contract/parser.py",
+    "tests/unit/contract/test_parser.py"
+  ],
+  "spec_questions_drafted": [
+    "T3.2: front-matter `tm:` value that doesn't match CONTRACT_VERSION (currently 1). Narrowest reading: only exact match counts as managed; any mismatch treated as unmanaged."
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "run_id": "20260711-M3-contract",
+  "cohort_plan": ["T3.1", "T3.2", "T3.3+T3.5", "T3.4+T3.6", "T3.7"],
+  "final_status": "COMPLETE",
+  "milestone_closed": "M3",
+  "note": "All 7 tasks CONFIRMED_DONE by independent verifiers. From T3.3 onward, cursor-agent came online mid-run (user directive) and edits were delegated to Cursor Grok 4.5 High via scripts/fleet/cursor_bridge.py, with Sonnet fleet-workers owning verification. make check equivalent green: 249 passed, ruff/pyright clean."
+}

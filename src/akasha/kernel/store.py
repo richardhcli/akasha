@@ -55,6 +55,10 @@ class EdgeNotFoundError(Exception):
     """Raised when an edge id has no matching row (spec §4.5)."""
 
 
+class TokenNotFoundError(Exception):
+    """Raised when a token id has no matching ``tokens`` row (task T4.5)."""
+
+
 class IdMintError(Exception):
     """Raised when minting a unique node id fails after the retry bound (spec §4.1)."""
 
@@ -82,8 +86,16 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def connect(db_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+def connect(db_path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """Open a WAL sqlite3 connection (spec §3 PRAGMAs).
+
+    ``check_same_thread`` defaults to ``True`` (stdlib default, preserving
+    every existing caller). The API daemon (T4.4) shares one connection
+    across the ASGI threadpool and passes ``check_same_thread=False``; the
+    daemon is a single-user localhost process (spec §3) issuing sequential
+    requests, so the one-connection-shared tradeoff is acceptable there.
+    """
+    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -145,6 +157,106 @@ def _mint_unique_edge_id(conn: sqlite3.Connection) -> str:
         if row is None:
             return candidate
     raise IdMintError(f"failed to mint a unique edge id after {_MINT_RETRY_BOUND} attempts")
+
+
+def _mint_unique_review_id(conn: sqlite3.Connection) -> str:
+    """Mint an id not already present in ``review_queue`` (spec §4.1: retry bound 10)."""
+    for _ in range(_MINT_RETRY_BOUND):
+        candidate = ids.mint()
+        row = conn.execute("SELECT 1 FROM review_queue WHERE id=?", (candidate,)).fetchone()
+        if row is None:
+            return candidate
+    raise IdMintError(f"failed to mint a unique review id after {_MINT_RETRY_BOUND} attempts")
+
+
+def mint_unassigned_node_id(conn: sqlite3.Connection) -> str:
+    """Mint an id8 not currently used by any ``nodes`` row, WITHOUT creating a node.
+
+    # SPEC-QUESTION (T4.6): ``review_queue.node_id`` is ``NOT NULL`` (spec
+    # §4.4 DDL) but an agent ``POST /nodes`` proposal (task T4.6) has no
+    # existing node to reference -- the create hasn't happened, and never
+    # will unless/until a human resolves the review item. The spec/DDL do
+    # not pin down what belongs in ``node_id`` for this case. Narrowest
+    # reading taken: reuse the *existing* node-id minting scheme (``ids.mint()``
+    # + collision-check against ``nodes.id``, exactly ``_mint_unique_id``'s
+    # logic) to produce a placeholder id that is guaranteed not to collide
+    # with any real node, record it as ``review_queue.node_id``, but do
+    # NOT insert a ``nodes`` row for it. This adds zero new id format
+    # (rule 2) and zero new schema (rule 2/8). Logged in
+    # docs/spec-questions.md.
+    """
+    return _mint_unique_id(conn)
+
+
+def get_edge_dst(conn: sqlite3.Connection, edge_id: str) -> str:
+    """Read-only: return edge_id's ``dst`` node id. Raises ``EdgeNotFoundError`` if unknown.
+
+    Used by the T4.6 agent-proposal gate for ``DELETE /edges/{id}`` — see
+    the T4.6 SPEC-QUESTION on picking ``dst`` as the review item's
+    ``node_id`` (docs/spec-questions.md).
+    """
+    row = conn.execute("SELECT dst FROM edges WHERE id=?", (edge_id,)).fetchone()
+    if row is None:
+        raise EdgeNotFoundError(edge_id)
+    return row[0]
+
+
+def enqueue_review(
+    conn: sqlite3.Connection,
+    node_id: str,
+    cause_kind: str,
+    *,
+    cause_ref: str | None = None,
+    facet: str | None = None,
+) -> dict[str, Any]:
+    """Append exactly one ``review_queue`` row (spec §4.4, §4.6, §4.11).
+
+    Persistent write, so per rule 0.4 this lives in ``kernel/store.py`` (no
+    other module INSERTs into ``review_queue`` directly) -- same precedent
+    as ``append_audit``/``vet_node``/``create_token``. ``cause_kind`` is a
+    closed enum per the §4.4 DDL comment
+    (``facet_break|subtasks_closed|evidence_retracted|recheck|conflict|
+    violation|proposal``); this function does not validate membership
+    itself (callers are the trusted in-repo call sites: T4.6's agent-proposal
+    gate passes ``cause_kind="proposal"`` verbatim, future M7 triggers pass
+    their own values) -- never invents a new value. ``resolved_at``/
+    ``resolution`` start NULL (open item). Returns the inserted row as a
+    plain dict (mirrors ``create_token``'s "return what was persisted"
+    shape) so callers can render it directly in an API response.
+    """
+    now = _now()
+    review_id = _mint_unique_review_id(conn)
+    with conn:
+        conn.execute(
+            "INSERT INTO review_queue (id, node_id, cause_kind, cause_ref, facet, "
+            "created_at, resolved_at, resolution) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
+            (review_id, node_id, cause_kind, cause_ref, facet, now),
+        )
+    return {
+        "id": review_id,
+        "node_id": node_id,
+        "cause_kind": cause_kind,
+        "cause_ref": cause_ref,
+        "facet": facet,
+        "created_at": now,
+        "resolved_at": None,
+        "resolution": None,
+    }
+
+
+def _mint_unique_token_id(conn: sqlite3.Connection) -> str:
+    """Mint an id not already present in ``tokens`` (spec §4.1: retry bound 10, then error).
+
+    Token ids reuse the same id8 scheme as nodes/edges (spec §4.1 fixes one
+    id format; this task does not invent a second one) even though a
+    bearer token id is never rendered as a vault anchor.
+    """
+    for _ in range(_MINT_RETRY_BOUND):
+        candidate = ids.mint()
+        row = conn.execute("SELECT 1 FROM tokens WHERE id=?", (candidate,)).fetchone()
+        if row is None:
+            return candidate
+    raise IdMintError(f"failed to mint a unique token id after {_MINT_RETRY_BOUND} attempts")
 
 
 def _node_content(body: str, facets: list[Facet], task_state: str | None) -> dict[str, Any]:
@@ -494,6 +606,43 @@ def history(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def get_maturity(conn: sqlite3.Connection, node_id: str) -> str:
+    """Return node_id's current persisted maturity stage (read-only, spec §4.6).
+
+    Maturity is derived state kept on the ``nodes`` row (not versioned by
+    commits, so the ``Node`` model does not carry it), refreshed by
+    ``_recompute_maturity`` on every mutation that can change its inputs.
+    The API's ``GET /nodes/{id}`` reports "node + maturity" (spec §4.11), so
+    it needs this alongside the ``Node`` body. Raises ``NodeNotFoundError``
+    if node_id is unknown.
+    """
+    row = conn.execute("SELECT maturity FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if row is None:
+        raise NodeNotFoundError(node_id)
+    return row[0]
+
+
+def vet_node(conn: sqlite3.Connection, node_id: str) -> Node:
+    """Mark node_id vetted (S4) and recompute its maturity (spec §4.6, §4.11 ``/vet``).
+
+    The ``POST /nodes/{id}/vet`` endpoint (T4.4) is human-only (∅). Sets
+    ``nodes.vetted=1`` and recomputes maturity in the SAME transaction (M1
+    close follow-up: "vet endpoint must recompute maturity in-txn"), so the
+    returned node reflects the new stage (S4 per ``maturity.derive``'s
+    ``vetted`` rule). Idempotent: vetting an already-vetted node is a no-op
+    re-write. Raises ``NodeNotFoundError`` if node_id is unknown. All writes
+    route through this store function (rule 0.4).
+    """
+    now = _now()
+    with conn:
+        row = conn.execute("SELECT 1 FROM nodes WHERE id=?", (node_id,)).fetchone()
+        if row is None:
+            raise NodeNotFoundError(node_id)
+        conn.execute("UPDATE nodes SET vetted=1, updated_at=? WHERE id=?", (now, node_id))
+        _recompute_maturity(conn, node_id)
+    return get_node(conn, node_id)
+
+
 def _edge_row_to_model(row: tuple[Any, ...]) -> Edge:
     (
         edge_id,
@@ -668,6 +817,37 @@ def search(conn: sqlite3.Connection, q: str) -> list[Node]:
         "SELECT id FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank", (q,)
     ).fetchall()
     return [get_node(conn, row[0]) for row in rows]
+
+
+def append_audit(
+    conn: sqlite3.Connection,
+    token_id: str | None,
+    action: str,
+    detail: str | None = None,
+) -> None:
+    """Append exactly one append-only row to ``audit_log`` (spec §4.4, §4.11).
+
+    ``audit_log`` is persistent SQLite state, so per build-plan rule 0.4
+    ("every mutation of persistent state goes through ``kernel/store.py``;
+    no other module writes SQLite directly") the raw INSERT lives here —
+    the API-layer audit middleware/decorator (T4.2, ``api/auth.py``) calls
+    this rather than touching SQLite itself. ``ts`` is stamped here with
+    the same ``_now()`` used by every other store write, keeping audit
+    timestamps lexically comparable with commit/edge timestamps.
+
+    Append-only: this issues a single ``INSERT`` and nothing else ever
+    ``UPDATE``s or ``DELETE``s ``audit_log``. ``token_id`` is nullable
+    (the DDL allows NULL for an unauthenticated action). The caller must
+    never pass a raw secret in ``detail`` — this layer only ever sees a
+    ``token_id`` (never the bearer secret), so no secret is available to
+    leak into the log, but ``detail`` is caller-controlled free text and
+    the caller owns keeping it secret-free (spec §4.11 step 2).
+    """
+    with conn:
+        conn.execute(
+            "INSERT INTO audit_log (ts, token_id, action, detail) VALUES (?, ?, ?, ?)",
+            (_now(), token_id, action, detail),
+        )
 
 
 def _reassign_inbound_edges(conn: sqlite3.Connection, old_dst: str, new_dst: str) -> None:
@@ -913,3 +1093,118 @@ def merge_nodes(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[str]
         _recompute_maturity(conn, survivor)
 
     return redirect_map
+
+
+# --- Tokens (task T4.5, spec §4.4 ``tokens`` DDL / §4.11 ``/tokens``) ------
+#
+# ``api/auth.py`` (T4.1) deliberately only *reads* ``tokens`` (see its module
+# docstring: "token issuance/revocation is a separate, API-layer concern that
+# belongs to T4.5's /tokens route"). Per build-plan rule 0.4 ("every mutation
+# of persistent state goes through kernel/store.py"), the actual INSERT/
+# UPDATE for token create/revoke lives here, not in ``api/routes/tokens.py``.
+# These functions never see or return a raw secret — the caller (T4.5's
+# route) hashes the secret via ``api.auth.hash_secret`` first and passes only
+# ``secret_hash`` in; ``list_tokens``/``create_token`` never select or return
+# ``secret_hash`` back out, so a raw or hashed secret can never leak through
+# this surface (spec §4.11 / build-plan T4.5 constraint: "never store or log
+# a raw secret" — the hash itself is already stored by the time it reaches
+# here, and is never re-exposed).
+
+
+def create_token(
+    conn: sqlite3.Connection,
+    name: str,
+    token_class: str,
+    secret_hash: str,
+    rate_per_min: int | None = None,
+) -> dict[str, Any]:
+    """Create a new ``tokens`` row and return its public fields (spec §4.4, §4.11).
+
+    Invariant: ``token_class`` must be ``"human"`` or ``"agent"`` (the DDL's
+    documented enum, spec §4.4 comment); raises ``ValueError`` and writes
+    nothing otherwise. Mints a fresh id8 (retrying on ``tokens.id``
+    collision, bound 10 attempts, then ``IdMintError`` — same scheme as
+    nodes/edges, spec §4.1) and inserts exactly one row with
+    ``created_at`` set and ``revoked_at`` NULL, inside a single transaction.
+    Returns ``{id, name, class, rate_per_min, created_at, revoked_at}`` —
+    deliberately omits ``secret_hash`` (never re-exposed once stored).
+    """
+    if token_class not in ("human", "agent"):
+        raise ValueError(f"invalid token class {token_class!r}; must be 'human' or 'agent'")
+    now = _now()
+    with conn:
+        token_id = _mint_unique_token_id(conn)
+        conn.execute(
+            "INSERT INTO tokens (id, name, class, secret_hash, rate_per_min, created_at, "
+            "revoked_at) VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            (token_id, name, token_class, secret_hash, rate_per_min, now),
+        )
+    return {
+        "id": token_id,
+        "name": name,
+        "class": token_class,
+        "rate_per_min": rate_per_min,
+        "created_at": now,
+        "revoked_at": None,
+    }
+
+
+def revoke_token(conn: sqlite3.Connection, token_id: str) -> None:
+    """Set ``revoked_at`` on token_id (spec §4.4, §4.11 ``DELETE /tokens/{id}``).
+
+    Invariant: never ``DELETE``s the ``tokens`` row (append-only discipline,
+    mirroring ``retract_edge``'s soft-retract pattern) — a revoked token's
+    audit history (``audit_log.token_id``) must remain resolvable. Raises
+    ``TokenNotFoundError`` if token_id does not exist. Re-revoking an
+    already-revoked token just re-sets ``revoked_at`` to a later timestamp
+    (not rejected as a no-op), same as ``retract_edge``.
+    """
+    now = _now()
+    with conn:
+        row = conn.execute("SELECT 1 FROM tokens WHERE id=?", (token_id,)).fetchone()
+        if row is None:
+            raise TokenNotFoundError(token_id)
+        conn.execute("UPDATE tokens SET revoked_at=? WHERE id=?", (now, token_id))
+
+
+def list_tokens(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return every token's public fields, oldest first (spec §4.11 ``GET /tokens``).
+
+    Invariant: read-only; never selects or returns ``secret_hash`` (a raw or
+    hashed secret must never be re-exposed once minted, per the module
+    docstring above and this task's constraint).
+    """
+    rows = conn.execute(
+        "SELECT id, name, class, rate_per_min, created_at, revoked_at "
+        "FROM tokens ORDER BY created_at ASC"
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "name": r[1],
+            "class": r[2],
+            "rate_per_min": r[3],
+            "created_at": r[4],
+            "revoked_at": r[5],
+        }
+        for r in rows
+    ]
+
+
+def list_synced_vaults(conn: sqlite3.Connection) -> list[str]:
+    """Return every distinct vault name that has at least one ``sync_files`` row.
+
+    Invariant: read-only; ``sync_files.vault`` (spec §4.4) is the only
+    vault-shaped column the frozen DDL provides. Task T4.5 needs `GET
+    /vaults` to list "managed vaults" but the spec has no dedicated
+    ``vaults`` table (see the T4.5 SPEC-QUESTION in
+    docs/spec-questions.md) — this derives a vault list from the one
+    spec-sanctioned table that already carries a ``vault`` name, rather
+    than inventing new schema (build-plan rule 2). Empty before M5 wires
+    real file watching (no ``sync_files`` rows exist yet), which matches
+    build-plan T4.5 step 4's "state only; watching arrives in M5".
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT vault FROM sync_files ORDER BY vault"
+    ).fetchall()
+    return [r[0] for r in rows]

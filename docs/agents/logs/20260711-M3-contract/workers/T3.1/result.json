@@ -1,0 +1,12 @@
+{
+  "task_id": "T3.1",
+  "status": "DONE",
+  "verify_output": "32 passed in 0.12s (tests/unit/contract/test_grammar.py -v); ruff check src tests: All checks passed; pyright src: 0 errors; pytest tests/unit tests/property -q: 164 passed",
+  "files_touched": [
+    "src/akasha/contract/grammar.py",
+    "tests/unit/contract/test_grammar.py"
+  ],
+  "spec_questions_drafted": [
+    "T3.1: `task_form` in `new_line` grammar is used but not defined by mvp-spec.md §4.7. Narrowest reading: mirrors task_line's indent+checkbox prefix applied to un-anchored text."
+  ]
+}

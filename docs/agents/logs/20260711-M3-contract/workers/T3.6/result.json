@@ -1,0 +1,11 @@
+{
+  "task_id": "T3.6",
+  "status": "DONE",
+  "edit_path": "cursor (grok-4.5-high) via scripts/fleet/cursor_bridge.py",
+  "verify_output": "10 passed (test_pause_and_diff.py); 14 passed (test_linter.py regression, no regressions); ruff clean; pyright 0 errors; pytest tests/unit tests/property -q: 216 passed",
+  "files_touched": ["src/akasha/contract/linter.py (extended, additive only)", "tests/unit/contract/test_pause_and_diff.py"],
+  "spec_questions_drafted": [
+    "T3.6: pause-ratio denominator (pre-cycle base.blocks count) and empty-base-blocks never-pauses behavior",
+    "T3.6: ViolationCode for the synthetic single pause-event review item (reuses first violation's code, deterministic)"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "task_id": "T3.5",
+  "status": "DONE",
+  "edit_path": "cursor (grok-4.5-high) via scripts/fleet/cursor_bridge.py",
+  "verify_output": "14 passed (tests/unit/contract/test_linter.py); ruff clean; pyright 0 errors; pytest tests/unit tests/property -q: 204 passed",
+  "files_touched": ["src/akasha/contract/linter.py", "tests/unit/contract/test_linter.py"],
+  "spec_questions_drafted": [
+    "T3.5: E_DUP_ID detection scope -- single BlockSet/file vs whole vault. Narrowest reading: single-BlockSet; vault-wide dedup deferred to M5 sync layer."
+  ]
+}

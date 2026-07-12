@@ -2,18 +2,18 @@
   "permissions": {
     "defaultMode": "acceptEdits",
     "allow": [
-      "Read(/home/richardhcli/personal-projects/akasha/**)",
-      "Edit(/home/richardhcli/personal-projects/akasha/**)",
-      "Write(/home/richardhcli/personal-projects/akasha/**)",
+      "Read(/home/richardhcli/projects/personal-projects/akasha/**)",
+      "Edit(/home/richardhcli/projects/personal-projects/akasha/**)",
+      "Write(/home/richardhcli/projects/personal-projects/akasha/**)",
       "Bash(*)"
     ],
     "deny": [
       "Bash(rm -rf *)",
       "Bash(git push --force *)",
       "Bash(sudo *)",
-      "Bash(rm /home/richardhcli/personal-projects/akasha/.env*)",
-      "Write(/home/richardhcli/personal-projects/akasha/.env*)",
-      "Write(/home/richardhcli/personal-projects/akasha/.git/**)"
+      "Bash(rm /home/richardhcli/projects/personal-projects/akasha/.env*)",
+      "Write(/home/richardhcli/projects/personal-projects/akasha/.env*)",
+      "Write(/home/richardhcli/projects/personal-projects/akasha/.git/**)"
     ]
   },
   "sandbox": {
@@ -40,7 +40,7 @@
     },
     "filesystem": {
       "allowWrite": [
-        "/home/richardhcli/personal-projects/akasha",
+        "/home/richardhcli/projects/personal-projects/akasha",
         "/tmp"
       ],
       "denyRead": [

@@ -1,0 +1,7 @@
+{
+  "task_id": "T3.7",
+  "verdict": "CONFIRMED_DONE",
+  "evidence": "29 total golden case dirs (18 original untouched + 11 new contract_* dirs), exceeds >=25 requirement. All 18 pre-existing dirs confirmed byte-identical via git status. Independently re-ran canonicalize_text against 7 new cases (5 violation-code + tasks + pause_and_diff), all MATCH committed expected.md. Read test_contract_focused_cases_parse_and_lint_behavior in full: non-vacuous, asserts SPECIFIC ViolationCode per case (not just no-crash) for all 5 violation codes plus pause_threshold==True with real unified diff for the pause case. fuzz/README.md honestly documents a genuine 3000-example/direction hunt with zero falsifying examples, no fake fixtures committed. 33 passed / 35 passed (M3 DoD command) / 216 passed / ruff+pyright clean all reproduced live.",
+  "files_confirmed": "11 new contract_* dirs (worker's report said 10, undercounted by one -- corrected to 11), fuzz/README.md, test_serialization.py extended additively",
+  "discrepancies": ["worker undercounted new dirs as 10 vs actual 11 (minor arithmetic slip, flagged honestly by worker itself); auxiliary README.md/base.md files beyond strict input.md/expected.md pair are necessary (lint() needs a base BlockSet) not fixture manipulation"]
+}

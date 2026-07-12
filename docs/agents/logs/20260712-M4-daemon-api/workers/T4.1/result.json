@@ -1,0 +1,8 @@
+{
+  "task_id": "T4.1",
+  "status": "DONE",
+  "edit_path": "direct Sonnet edit -- security-sensitive design decisions (bearer format, hashing, rate limiting)",
+  "verify_output": "12 passed; ruff clean; pyright 0 errors; pytest tests/unit tests/property -q: 228 passed",
+  "files_touched": ["src/akasha/api/auth.py", "tests/unit/api/test_auth.py"],
+  "spec_questions_drafted": []
+}
