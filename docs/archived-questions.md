@@ -71,3 +71,61 @@ action is needed.
 - **What actually happened:** The *orchestrating* turn narrated fake "T2.1/T2.2 complete" results — with malformed pseudo-XML (a leaked `<thinking>` tag, mismatched closing tags) and implausibly fast durations (~3.5s, ~4.2s) — before either background agent's real `<task-notification>` had arrived. The orchestrator then ran real `ls`/`git status` checks, which correctly found no files, but only because the genuine agents were still mid-flight (they took 296s and 411s respectively). This normal async latency was misdiagnosed as "worker hallucination," and T2.1/T2.2 were incorrectly flipped to `BLOCKED`. The real agents finished shortly after with genuine results (14 passed / 18 passed, matching on-disk file mtimes) and both tasks were subsequently flipped to `DONE` correctly — but the false "worker failure" diagnosis was never corrected until follow-up investigation.
 - **Root cause (orchestration, not spec, not worker tooling):** `fleet-worker` agents have working `Write`/`Edit`/`Bash` access and executed correctly. The defect is that the orchestrating turn narrated a background agent's outcome instead of waiting for its actual delivered completion signal — a hallucination risk, not a tooling gap.
 - **Resolution:** closed — no fleet-worker or dispatch-protocol change needed. Process lesson: never narrate/report a background `Agent` task's result until its real `<task-notification>` (or an explicit `TaskOutput` poll) has actually been received; treat any "result" appearing outside that delivery mechanism as suspect.
+
+## M4 resolution batch — daemon, API, CLI, and sync-root contract
+
+The following 13 questions were resolved together on 2026-07-12 against
+`docs/vision.md`, then made normative in `docs/mvp-spec.md` and
+`docs/build-plan.md`.
+
+### T4.2 — `audit_log` writes and the task Files list
+- **Narrowest reading taken:** `auth.py` owns audit policy; the INSERT is `store.append_audit`.
+- **Resolution:** **Confirmed.** Persistent-state rule 0.4 outranks an accidentally incomplete task Files list. The build-plan now states this sole precedence rule and lists the minimal store helper.
+
+### T4.3 — root `/health` versus `/v1`
+- **Narrowest reading taken:** mount the unauthenticated health probe at `/health`; application routes use `/v1`.
+- **Resolution:** **Confirmed.** Health is an operational liveness surface, not a versioned authenticated client resource. The §4.11 introduction now states the exception explicitly.
+
+### T4.4 — DB path and connection model
+- **Narrowest reading taken:** neutral `tm-daemon/store.db`; one shared WAL connection with `check_same_thread=False`.
+- **Resolution:** **Confirmed for the MVP.** This matches the resident, single-user local daemon in vision §7.9 and is now explicit in §3.
+
+### T4.4 — merge request shape
+- **Narrowest reading taken:** `POST /nodes/{id}/merge` uses path `{id}` as survivor and body `{"ids":[other_ids...]}`.
+- **Resolution:** **Confirmed.** It composes directly with the already-frozen first-id-survivor kernel rule and makes the human's survivor choice explicit.
+
+### T4.5 — token/sync-root store helpers outside the Files list
+- **Narrowest reading taken:** token writes and sync-root reads belong in `kernel/store.py`.
+- **Resolution:** **Confirmed.** Rule 0.4 controls; the T4.5 Files list was corrected.
+
+### T4.6 — review/proposal store helpers outside the Files list
+- **Narrowest reading taken:** review INSERTs and required lookups belong in `kernel/store.py`.
+- **Resolution:** **Confirmed.** Rule 0.4 controls; the T4.6 Files list was corrected.
+
+### T4.6 — create proposal `review_queue.node_id`
+- **Narrowest reading taken:** reserve a valid-looking id8 without creating a node.
+- **Resolution:** **Replaced.** A proposal is not truth and therefore must not reserve a node identity. `review_queue.node_id` is nullable for create proposals; the review row id is the correlation key, and `create_node` mints the real id only on human approval. This required the focused T4.11 schema/API refinement.
+
+### T4.6 — proposal payload in `cause_ref`
+- **Narrowest reading taken:** canonical JSON `{method,path,body}`.
+- **Resolution:** **Confirmed.** The complete would-be request is language-neutral, auditable, and sufficient for T7.5 to apply an approved proposal without guessing.
+
+### T4.6 — edge proposal target
+- **Narrowest reading taken:** use `dst` as `review_queue.node_id`.
+- **Resolution:** **Confirmed.** Inbound edges change the target's maturity/review-relevant state; both endpoint ids remain recoverable in `cause_ref`.
+
+### T4.5 — ephemeral `/vaults` durability gap
+- **Narrowest reading taken:** merge `sync_files.vault` names with a process-local registration dictionary.
+- **Resolution:** **Replaced.** Vision §7.9 requires an autostarted daemon to resume watching registered folders after restart. Registrations are now durable `sync_roots` rows, exposed as human-only `GET/POST /v1/sync/roots`; `sync_files` references `sync_root_id`. “Obsidian vault” remains user-facing folder terminology, while “spoke” names an integration/surface and “sync root” names a registered watched directory.
+
+### T4.8 — CLI review verbs before T7.5
+- **Narrowest reading taken:** call the specified future endpoints and handle their temporary 404 without a traceback.
+- **Resolution:** **Confirmed.** T7.5 supplies the server routes; the CLI contract and exit handling remain valid scaffolding until then.
+
+### T4.8 — omitted `set --class`
+- **Narrowest reading taken:** default to `patch`.
+- **Resolution:** **Confirmed.** Patch is the least-invalidating class and minimizes unnecessary review inflow, matching vision pillar 3.
+
+### T4.8 — CLI-only `--base-url`
+- **Narrowest reading taken:** provide an override defaulting to `http://127.0.0.1:7433`.
+- **Resolution:** **Confirmed.** Daemon location is client wiring, not an invented domain/API resource; the override is also required for isolated live-daemon integration tests.

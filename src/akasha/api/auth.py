@@ -190,9 +190,7 @@ def _clock() -> float:
     return time.monotonic()
 
 
-def check_rate_limit(
-    token_id: str, rate_per_min: int | None, *, now: float | None = None
-) -> None:
+def check_rate_limit(token_id: str, rate_per_min: int | None, *, now: float | None = None) -> None:
     """Record a call for ``token_id`` and raise if it exceeds ``rate_per_min``.
 
     ``rate_per_min is None`` means unlimited: never rate-limited, and no
@@ -281,8 +279,7 @@ def authenticate(
 # (what counts as a mutation, what to record, never recording a secret); the
 # actual SQLite INSERT is delegated to ``kernel.store.append_audit`` because
 # build-plan rule 0.4 reserves all persistent writes for ``kernel/store.py``
-# (no other module writes SQLite directly). See the SPEC-QUESTION below on the
-# Files-list vs. rule-0.4 tension for T4.2.
+# (no other module writes SQLite directly).
 
 # HTTP methods that mutate persistent state and therefore MUST be audited
 # (spec §4.11: agent-class *mutating* endpoints; every mutation is auditable).
@@ -325,15 +322,3 @@ def record_mutation(
     token_id = ctx.token_id if ctx is not None else None
     store.append_audit(conn, token_id, action, detail)
     return True
-
-
-# SPEC-QUESTION (T4.2): the build-plan Files list for T4.2 is
-# "src/akasha/api/auth.py or middleware, tests/unit/api/test_audit.py" and does
-# NOT list kernel/store.py, but non-negotiable rule 0.4 ("every mutation of
-# persistent state goes through kernel/store.py; no other module writes SQLite
-# directly") forbids INSERTing into audit_log from this API-layer module.
-# Narrowest reading taken: rule 0.4 is non-negotiable and controls, so the raw
-# audit INSERT is a minimal append-only helper (store.append_audit) in
-# store.py, and this module holds only the mutation-detection/recording policy.
-# The alternative (INSERT directly here) would violate rule 0.4. Logged in
-# docs/spec-questions.md for a human to confirm the store.py touch is intended.

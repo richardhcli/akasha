@@ -34,7 +34,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any, Literal, get_args
 
 from akasha.kernel import ids, maturity
 from akasha.kernel.canonical import canonical_json, canonicalize_text, object_hash
@@ -57,6 +57,14 @@ class EdgeNotFoundError(Exception):
 
 class TokenNotFoundError(Exception):
     """Raised when a token id has no matching ``tokens`` row (task T4.5)."""
+
+
+class SyncRootNotFoundError(Exception):
+    """Raised when a ``sync_root_id`` has no matching ``sync_roots`` row (task T5.1).
+
+    Used to reject writes (e.g. ``base_store.put``) scoped to a sync root
+    that was never durably registered via ``register_sync_root`` (T4.10).
+    """
 
 
 class IdMintError(Exception):
@@ -169,31 +177,12 @@ def _mint_unique_review_id(conn: sqlite3.Connection) -> str:
     raise IdMintError(f"failed to mint a unique review id after {_MINT_RETRY_BOUND} attempts")
 
 
-def mint_unassigned_node_id(conn: sqlite3.Connection) -> str:
-    """Mint an id8 not currently used by any ``nodes`` row, WITHOUT creating a node.
-
-    # SPEC-QUESTION (T4.6): ``review_queue.node_id`` is ``NOT NULL`` (spec
-    # §4.4 DDL) but an agent ``POST /nodes`` proposal (task T4.6) has no
-    # existing node to reference -- the create hasn't happened, and never
-    # will unless/until a human resolves the review item. The spec/DDL do
-    # not pin down what belongs in ``node_id`` for this case. Narrowest
-    # reading taken: reuse the *existing* node-id minting scheme (``ids.mint()``
-    # + collision-check against ``nodes.id``, exactly ``_mint_unique_id``'s
-    # logic) to produce a placeholder id that is guaranteed not to collide
-    # with any real node, record it as ``review_queue.node_id``, but do
-    # NOT insert a ``nodes`` row for it. This adds zero new id format
-    # (rule 2) and zero new schema (rule 2/8). Logged in
-    # docs/spec-questions.md.
-    """
-    return _mint_unique_id(conn)
-
-
 def get_edge_dst(conn: sqlite3.Connection, edge_id: str) -> str:
     """Read-only: return edge_id's ``dst`` node id. Raises ``EdgeNotFoundError`` if unknown.
 
-    Used by the T4.6 agent-proposal gate for ``DELETE /edges/{id}`` — see
-    the T4.6 SPEC-QUESTION on picking ``dst`` as the review item's
-    ``node_id`` (docs/spec-questions.md).
+    Used by the T4.6 agent-proposal gate for ``DELETE /edges/{id}``.
+    ``dst`` is the affected node because inbound edges determine its
+    maturity and review-relevant state.
     """
     row = conn.execute("SELECT dst FROM edges WHERE id=?", (edge_id,)).fetchone()
     if row is None:
@@ -203,7 +192,7 @@ def get_edge_dst(conn: sqlite3.Connection, edge_id: str) -> str:
 
 def enqueue_review(
     conn: sqlite3.Connection,
-    node_id: str,
+    node_id: str | None,
     cause_kind: str,
     *,
     cause_ref: str | None = None,
@@ -220,9 +209,12 @@ def enqueue_review(
     itself (callers are the trusted in-repo call sites: T4.6's agent-proposal
     gate passes ``cause_kind="proposal"`` verbatim, future M7 triggers pass
     their own values) -- never invents a new value. ``resolved_at``/
-    ``resolution`` start NULL (open item). Returns the inserted row as a
-    plain dict (mirrors ``create_token``'s "return what was persisted"
-    shape) so callers can render it directly in an API response.
+    ``resolution`` start NULL (open item). ``node_id`` is NULL only when a
+    create-node proposal has no node yet; the review id correlates that
+    proposal and the real node id is minted on human approval. Returns the
+    inserted row as a plain dict (mirrors ``create_token``'s "return what
+    was persisted" shape) so callers can render it directly in an API
+    response.
     """
     now = _now()
     review_id = _mint_unique_review_id(conn)
@@ -242,6 +234,58 @@ def enqueue_review(
         "resolved_at": None,
         "resolution": None,
     }
+
+
+def find_open_reviews(
+    conn: sqlite3.Connection,
+    *,
+    node_id: str | None = None,
+    cause_kind: str | None = None,
+    cause_ref: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read-only: every OPEN (``resolved_at IS NULL``) ``review_queue`` row (task T5.5).
+
+    All three filters are optional and ANDed together (mirrors
+    ``find_live_edges``'s filter style, T5.4); omitting all of them returns
+    every open review item. Added outside this task's own Files list (rule
+    0.4 recurring precedent, same as T4.2/T4.4/T4.5/T4.6/T5.1/T5.4's
+    store.py touches) because ``sync/reconcile.py``'s conflict handler needs
+    an idempotence gate ("is there already an open conflict review for this
+    exact node+cause_ref?") before enqueueing a duplicate on crash-replay
+    (T5.6). T5.7 ("Sync API routes") reuses this verbatim for
+    ``/sync/status``'s open-review reporting -- designed as a general
+    read-only query, not a conflict-only helper.
+    """
+    clauses = ["resolved_at IS NULL"]
+    params: list[Any] = []
+    if node_id is not None:
+        clauses.append("node_id=?")
+        params.append(node_id)
+    if cause_kind is not None:
+        clauses.append("cause_kind=?")
+        params.append(cause_kind)
+    if cause_ref is not None:
+        clauses.append("cause_ref=?")
+        params.append(cause_ref)
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        "SELECT id, node_id, cause_kind, cause_ref, facet, created_at, resolved_at, resolution "
+        f"FROM review_queue WHERE {where}",
+        params,
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "node_id": r[1],
+            "cause_kind": r[2],
+            "cause_ref": r[3],
+            "facet": r[4],
+            "created_at": r[5],
+            "resolved_at": r[6],
+            "resolution": r[7],
+        }
+        for r in rows
+    ]
 
 
 def _mint_unique_token_id(conn: sqlite3.Connection) -> str:
@@ -443,12 +487,159 @@ def create_node(
         return _create_node_tx(conn, node_type, body, facets, task_state, author, message)
 
 
+class _Unset:
+    """Sentinel type distinguishing "argument omitted" from ``None`` (task T5.4).
+
+    ``commit_node``'s new ``task_state`` parameter needs three distinct
+    meanings: "leave task_state exactly as it was" (omitted -> this
+    sentinel), "explicitly clear it" (``None``), and "set it to this value"
+    (``"open"``/``"done"``). A plain ``None`` default cannot express the
+    first case without also matching the second.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return "<UNSET>"
+
+
+_UNSET_TASK_STATE = _Unset()
+
+
+def _head_commit_hash(conn: sqlite3.Connection, node_id: str) -> str | None:
+    """Return the commit hash that produced ``nodes.head_hash``, or ``None`` if unknown.
+
+    Invariant: the newest (``rowid DESC``) commit whose ``object_hash``
+    equals the node's CURRENT ``head_hash`` -- i.e. the commit the hub
+    actually considers "current", not merely the most-recently-inserted
+    commit row for this node. These differ once a conflict-branch commit
+    (task T5.5, ``record_conflict_branch``) exists: a branch commit is
+    appended to the DAG WITHOUT moving ``head_hash``, so the newest-inserted
+    commit and the head commit are no longer the same row. Falls back to
+    the newest commit by ``rowid`` if no commit matches ``head_hash``
+    exactly (defensive; should not happen in practice since every write
+    path that changes ``head_hash`` also inserts the commit that produced
+    it in the same transaction). Returns ``None`` if node_id has no commits
+    at all (or does not exist) -- callers treat that as "genesis, no
+    parent", same as every existing parent-lookup call site.
+    """
+    row = conn.execute("SELECT head_hash FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if row is None:
+        return None
+    head_hash = row[0]
+    commit_row = conn.execute(
+        "SELECT hash FROM commits WHERE node_id=? AND object_hash=? ORDER BY rowid DESC LIMIT 1",
+        (node_id, head_hash),
+    ).fetchone()
+    if commit_row is not None:
+        return commit_row[0]
+    fallback_row = conn.execute(
+        "SELECT hash FROM commits WHERE node_id=? ORDER BY rowid DESC LIMIT 1", (node_id,)
+    ).fetchone()
+    return fallback_row[0] if fallback_row is not None else None
+
+
+def record_conflict_branch(
+    conn: sqlite3.Connection,
+    node_id: str,
+    branch_body: str | None,
+    *,
+    task_state: Literal["open", "done"] | None | _Unset = _UNSET_TASK_STATE,
+    author: str = "sync",
+    message: str = "",
+) -> str:
+    """Append the vault's conflicting version as a BRANCH commit (task T5.5, spec §4.8).
+
+    On a both-sides-edit conflict, the reconcile pipeline keeps BOTH
+    versions on the node's commit DAG rather than discarding either one
+    (spec §4.8: "hub keeps both versions as branches on the node's commit
+    DAG"). This function records the VAULT side as a new commit whose
+    ``parents`` is the node's CURRENT head commit (``_head_commit_hash`` --
+    the deterministic fork-anchor; the true last-synced commit the base
+    snapshot reflects is not recoverable without a new schema addition, see
+    the logged SPEC-QUESTION) WITHOUT moving ``nodes.head_hash`` -- the hub
+    head stays whatever the file-side winner is (the mainline commit the
+    caller already applied via ``commit_node``, or the pre-existing head if
+    nothing was applied). Content: canonicalized ``branch_body`` (or the
+    current head's body if ``branch_body`` is ``None`` -- e.g. a
+    task-state-only conflict), the CURRENT head object's facets (a conflict
+    branch never carries a facet edit of its own), and ``task_state``
+    resolved via the same ``_UNSET_TASK_STATE`` sentinel ``commit_node``
+    uses (omit to preserve the head's task_state, pass a value to set it).
+
+    Idempotence (required for T5.6 crash-replay): the new object is
+    content-addressed (``_insert_object``'s ``INSERT OR IGNORE`` -- a repeat
+    call with identical content reuses the same ``objects`` row), and this
+    function additionally gates the COMMIT insert itself: if a commit for
+    ``node_id`` with this exact ``object_hash`` already exists, its hash is
+    returned and NOTHING is inserted (no duplicate branch, no duplicate
+    parent-chain fork). Never touches ``nodes.head_hash``/``updated_at``/
+    ``nodes_fts`` and never calls ``_recompute_maturity`` -- no maturity
+    input (facet count, vetted, live inbound edges) changed by recording an
+    alternate, non-head version. Raises ``NodeNotFoundError`` if node_id
+    does not exist. All inside a single transaction. Returns the (new or
+    pre-existing) branch commit's hash.
+    """
+    now = _now()
+    with conn:
+        row = conn.execute("SELECT head_hash FROM nodes WHERE id=?", (node_id,)).fetchone()
+        if row is None:
+            raise NodeNotFoundError(node_id)
+        head_hash = row[0]
+
+        current_obj = conn.execute(
+            "SELECT bytes FROM objects WHERE hash=?", (head_hash,)
+        ).fetchone()
+        current_content = json.loads(current_obj[0])
+
+        canonical_body = (
+            canonicalize_text(branch_body)
+            if branch_body is not None
+            else current_content["body"]
+        )
+        facets = [Facet(**f) for f in current_content["facets"]]
+        task_state_value = (
+            current_content.get("task_state")
+            if isinstance(task_state, _Unset)
+            else task_state
+        )
+
+        content = _node_content(canonical_body, facets, task_state_value)
+        obj_hash = _insert_object(conn, content, now)
+
+        existing_commit = conn.execute(
+            "SELECT hash FROM commits WHERE node_id=? AND object_hash=? "
+            "ORDER BY rowid DESC LIMIT 1",
+            (node_id, obj_hash),
+        ).fetchone()
+        if existing_commit is not None:
+            return existing_commit[0]
+
+        parent_hash = _head_commit_hash(conn, node_id)
+        parents = [parent_hash] if parent_hash is not None else []
+
+        commit_hash = _insert_commit(
+            conn,
+            node_id,
+            parents=parents,
+            object_hash_=obj_hash,
+            change_class="patch",
+            facets_touched=[],
+            author=author,
+            message=message,
+            now=now,
+        )
+
+    return commit_hash
+
+
 def commit_node(
     conn: sqlite3.Connection,
     node_id: str,
     new_body: str | None = None,
     facets: list[Facet] | None = None,
     *,
+    task_state: Literal["open", "done"] | None | _Unset = _UNSET_TASK_STATE,
     change_class: str,
     facets_touched: list[str],
     author: str,
@@ -467,6 +658,18 @@ def commit_node(
     ``commits`` row; the previous head remains reachable via ``history``.
     Also recomputes and persists node_id's maturity in the same
     transaction (spec §4.6), since a commit can change its facet count.
+
+    # design note (T5.4, fable-reviewed, human-decided 2026-07-12, rule 0.4):
+    # ``task_state`` is a new sentinel-guarded optional keyword, added here
+    # (outside T5.4's own Files list, same recurring precedent as T4.2/T4.4/
+    # T4.5/T4.6/T5.1's store.py touches) because the sync reconcile pipeline
+    # needs to commit a checkbox toggle (spec §4.8 ``checkbox_toggled``) and
+    # a same-commit body+state flip (``modified``) without any other caller
+    # being able to accidentally clobber ``task_state`` on an ordinary body
+    # edit. Omitting the argument (the default) preserves today's behavior
+    # exactly (silently keeps the current ``task_state``); passing ``None``
+    # or a literal value explicitly sets it. 100% backward compatible: no
+    # existing call site passes this argument.
     """
     if change_class not in _VALID_CHANGE_CLASSES:
         raise ValueError(
@@ -493,15 +696,25 @@ def commit_node(
         new_facets = (
             facets if facets is not None else [Facet(**f) for f in current_content["facets"]]
         )
-        task_state = current_content.get("task_state")
+        task_state_value = (
+            current_content.get("task_state")
+            if isinstance(task_state, _Unset)
+            else task_state
+        )
 
-        content = _node_content(canonical_body, new_facets, task_state)
+        content = _node_content(canonical_body, new_facets, task_state_value)
         obj_hash = _insert_object(conn, content, now)
 
-        parent_row = conn.execute(
-            "SELECT hash FROM commits WHERE node_id=? ORDER BY rowid DESC LIMIT 1", (node_id,)
-        ).fetchone()
-        parents = [parent_row[0]] if parent_row is not None else []
+        # CRITICAL (task T5.5 companion fix): parent on the commit that
+        # produced the CURRENT head, not merely the newest-inserted commit
+        # row. Once a conflict-branch commit exists (``record_conflict_branch``,
+        # appended to the DAG WITHOUT moving ``head_hash``), the two differ;
+        # parenting on the newest row would silently collapse the branch
+        # into the mainline on the very next ``commit_node`` call. Bit-identical
+        # to the old lookup for every existing caller when no branch commit
+        # exists (the newest commit's object_hash always equals head_hash then).
+        parents_head = _head_commit_hash(conn, node_id)
+        parents = [parents_head] if parents_head is not None else []
 
         _insert_commit(
             conn,
@@ -529,7 +742,7 @@ def commit_node(
         node_type=node_type,
         body=canonical_body,
         facets=new_facets,
-        task_state=task_state,
+        task_state=task_state_value,
         vetted=bool(vetted),
         status=status,
     )
@@ -604,6 +817,32 @@ def history(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def get_commit_snapshot(conn: sqlite3.Connection, commit_hash: str) -> dict[str, Any]:
+    """Read-only: decode one commit's ``{body, facets, task_state}`` content (task T5.5).
+
+    Added outside this task's own Files list (rule 0.4 recurring precedent,
+    same as the other store.py touches above) -- ``sync/reconcile.py``'s
+    conflict-branch handler (and its tests) need to read back the body a
+    branch commit carries WITHOUT moving ``nodes.head_hash`` or otherwise
+    treating the branch as the node's current state, which ``get_node``
+    cannot express (it only ever resolves to the current head or an
+    as-of-time commit reachable from it). Raises ``NodeNotFoundError`` if
+    ``commit_hash`` has no matching ``commits`` row (reusing the existing
+    "unknown id" exception rather than inventing a new one for this
+    read-only lookup).
+    """
+    row = conn.execute("SELECT object_hash FROM commits WHERE hash=?", (commit_hash,)).fetchone()
+    if row is None:
+        raise NodeNotFoundError(commit_hash)
+    obj_row = conn.execute("SELECT bytes FROM objects WHERE hash=?", (row[0],)).fetchone()
+    content = json.loads(obj_row[0])
+    return {
+        "body": content["body"],
+        "facets": [Facet(**f) for f in content["facets"]],
+        "task_state": content.get("task_state"),
+    }
 
 
 def get_maturity(conn: sqlite3.Connection, node_id: str) -> str:
@@ -752,6 +991,48 @@ def retract_edge(conn: sqlite3.Connection, edge_id: str) -> None:
         _recompute_maturity(conn, dst)
 
 
+def find_live_edges(
+    conn: sqlite3.Connection,
+    *,
+    src: str | None = None,
+    dst: str | None = None,
+    edge_type: str | None = None,
+) -> list[Edge]:
+    """Read-only: every live edge (``retracted_at IS NULL``) matching the given filters.
+
+    # design note (T5.4, fable-reviewed, human-decided 2026-07-12, rule 0.4):
+    # added outside T5.4's own Files list, same recurring precedent as the
+    # store.py touches in T4.2/T4.4/T4.5/T4.6/T5.1 — the reconcile pipeline's
+    # ``reparented`` op needs to locate the specific live ``composes`` edge
+    # from a task's OLD parent before retracting it and creating the new
+    # one, and no existing store function exposes a filtered edge lookup.
+    #
+    # All filters are optional and ANDed together; omitting all three
+    # returns every live edge (rarely useful, but not rejected — the
+    # caller's problem). Uses the same ``retracted_at IS NULL`` semantics
+    # and row shape as ``neighborhood``/``_edge_row_to_model`` (no new
+    # query pattern invented).
+    """
+    clauses = ["retracted_at IS NULL"]
+    params: list[Any] = []
+    if src is not None:
+        clauses.append("src=?")
+        params.append(src)
+    if dst is not None:
+        clauses.append("dst=?")
+        params.append(dst)
+    if edge_type is not None:
+        clauses.append("edge_type=?")
+        params.append(edge_type)
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        "SELECT id, src, dst, edge_type, facet_binding, provenance, mode, pinned_commit "
+        f"FROM edges WHERE {where}",
+        params,
+    ).fetchall()
+    return [_edge_row_to_model(row) for row in rows]
+
+
 def neighborhood(conn: sqlite3.Connection, node_id: str, hops: int = 1) -> dict[str, Any]:
     """Return the live subgraph reachable from node_id within ``hops`` steps (spec §4.5).
 
@@ -858,9 +1139,7 @@ def _reassign_inbound_edges(conn: sqlite3.Connection, old_dst: str, new_dst: str
     alone). Does not recompute anyone's maturity; callers do that
     afterward for whichever node(s) gained/lost inbound edges.
     """
-    conn.execute(
-        "UPDATE edges SET dst=? WHERE dst=? AND retracted_at IS NULL", (new_dst, old_dst)
-    )
+    conn.execute("UPDATE edges SET dst=? WHERE dst=? AND retracted_at IS NULL", (new_dst, old_dst))
 
 
 def delete_node(
@@ -917,9 +1196,7 @@ def delete_node(
         if not redirect_to and not tombstone:
             raise NeedsRedirectError(node_id)
 
-        conn.execute(
-            "UPDATE nodes SET status='tombstone', updated_at=? WHERE id=?", (now, node_id)
-        )
+        conn.execute("UPDATE nodes SET status='tombstone', updated_at=? WHERE id=?", (now, node_id))
         if redirect_to:
             conn.execute(
                 "INSERT INTO redirects (old_id, successors, created_at) VALUES (?, ?, ?)",
@@ -981,9 +1258,7 @@ def split_node(
             "INSERT INTO redirects (old_id, successors, created_at) VALUES (?, ?, ?)",
             (node_id, canonical_json(successor_ids).decode("utf-8"), now),
         )
-        conn.execute(
-            "UPDATE nodes SET status='tombstone', updated_at=? WHERE id=?", (now, node_id)
-        )
+        conn.execute("UPDATE nodes SET status='tombstone', updated_at=? WHERE id=?", (now, node_id))
         first_successor = successor_ids[0]
         _reassign_inbound_edges(conn, node_id, first_successor)
         _recompute_maturity(conn, first_successor)
@@ -1191,20 +1466,239 @@ def list_tokens(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
-def list_synced_vaults(conn: sqlite3.Connection) -> list[str]:
-    """Return every distinct vault name that has at least one ``sync_files`` row.
+def _mint_unique_sync_root_id(conn: sqlite3.Connection) -> str:
+    """Mint an id not already present in ``sync_roots`` (retry bound 10)."""
+    for _ in range(_MINT_RETRY_BOUND):
+        candidate = ids.mint()
+        row = conn.execute("SELECT 1 FROM sync_roots WHERE id=?", (candidate,)).fetchone()
+        if row is None:
+            return candidate
+    raise IdMintError(f"failed to mint a unique sync-root id after {_MINT_RETRY_BOUND} attempts")
 
-    Invariant: read-only; ``sync_files.vault`` (spec §4.4) is the only
-    vault-shaped column the frozen DDL provides. Task T4.5 needs `GET
-    /vaults` to list "managed vaults" but the spec has no dedicated
-    ``vaults`` table (see the T4.5 SPEC-QUESTION in
-    docs/spec-questions.md) — this derives a vault list from the one
-    spec-sanctioned table that already carries a ``vault`` name, rather
-    than inventing new schema (build-plan rule 2). Empty before M5 wires
-    real file watching (no ``sync_files`` rows exist yet), which matches
-    build-plan T4.5 step 4's "state only; watching arrives in M5".
+
+def register_sync_root(
+    conn: sqlite3.Connection,
+    name: str,
+    root_path: str,
+) -> dict[str, Any]:
+    """Durably register or update one watched filesystem root.
+
+    The registration is operational state required to resume watching after
+    daemon restart, even before any ``sync_files`` rows exist. Upsert is by
+    human-facing name and preserves both the stable id and ``created_at``.
+    """
+    if not name.strip():
+        raise ValueError("sync-root name must not be empty")
+    if not root_path.strip():
+        raise ValueError("sync-root path must not be empty")
+
+    with conn:
+        existing = conn.execute(
+            "SELECT id, created_at FROM sync_roots WHERE name=?", (name,)
+        ).fetchone()
+        if existing is None:
+            sync_root_id = _mint_unique_sync_root_id(conn)
+            created_at = _now()
+            conn.execute(
+                "INSERT INTO sync_roots (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+                (sync_root_id, name, root_path, created_at),
+            )
+        else:
+            sync_root_id, created_at = existing
+            conn.execute(
+                "UPDATE sync_roots SET root_path=? WHERE id=?",
+                (root_path, sync_root_id),
+            )
+    return {
+        "id": sync_root_id,
+        "name": name,
+        "root_path": root_path,
+        "created_at": created_at,
+    }
+
+
+def list_sync_roots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return durable sync-root registrations ordered by name."""
+    rows = conn.execute(
+        "SELECT id, name, root_path, created_at FROM sync_roots ORDER BY name"
+    ).fetchall()
+    return [
+        {"id": row[0], "name": row[1], "root_path": row[2], "created_at": row[3]} for row in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Base store support (task T5.1, spec §4.8 ``base_store.get``/``.put``,
+# §4.4 ``objects``/``sync_files.base_hash``).
+#
+# ``sync/base_store.py`` is the last-agreed-canonical-bytes snapshot used as
+# the "B" input of the §4.8 three-way reconcile. Per build-plan rule 0.4
+# ("every mutation of persistent state goes through kernel/store.py") the
+# raw SQLite writes (an ``objects`` insert + a ``sync_files`` upsert) live
+# here, not in ``base_store.py``.
+#
+# SPEC-QUESTION (T5.1): build-plan T5.1's ``Files`` list only names
+# ``src/akasha/sync/base_store.py`` and its test file, omitting
+# ``kernel/store.py`` — but rule 0.4 forces the raw ``objects``/
+# ``sync_files`` writes here, same precedent as T4.2 ``append_audit``,
+# T4.4 ``vet_node``, T4.5 token helpers, T4.6 ``enqueue_review`` (all
+# resolved "rule 0.4 controls" in docs/archived-questions.md's M4 batch).
+# See docs/spec-questions.md entry for T5.1.
+#
+# SPEC-QUESTION (T5.1): spec §4.4/§4.8 don't pin down a base-snapshot
+# ``objects`` row's byte layout. Build-plan T5.1's Steps line says
+# ``put(...)`` "stores canonical bytes as an object" — narrowest literal
+# reading taken: a base snapshot is stored as the RAW canonical UTF-8
+# bytes of the file text (kind ``"base_snapshot"``), content-addressed by
+# ``object_hash`` of those raw bytes directly — NOT wrapped in a
+# canonical-JSON dict the way node snapshots are (``_insert_object``/
+# ``"node_snapshot"``). This keeps ``sync_files.base_hash`` pointing at an
+# object whose ``bytes`` column *is* exactly the last-agreed canonical
+# file text, so a future diff/patch tool can read it back without any
+# JSON unwrapping step, and it composes cleanly with ``gc_objects``
+# (T1.7), which already treats every non-NULL ``sync_files.base_hash`` as
+# a reachability root purely by hash lookup, independent of the
+# referenced object's ``kind``/content shape. See docs/spec-questions.md
+# entry for T5.1.
+
+
+def _insert_base_snapshot(conn: sqlite3.Connection, canonical_text: str, now: str) -> str:
+    """Content-addressed insert of one base snapshot's raw canonical bytes.
+
+    ``canonical_text`` must already be canonicalized (spec §4.3) by the
+    caller — this function does not canonicalize. Hash is
+    ``object_hash`` of the UTF-8 encoding of ``canonical_text`` directly
+    (not a canonical-JSON-wrapped dict; see the content-shape note above).
+    ``INSERT OR IGNORE`` mirrors ``_insert_object``'s idempotent-reinsert
+    behavior: identical canonical text always hashes identically, so a
+    repeat ``put`` of the same content is a safe no-op, never a mutation of
+    an existing row.
+    """
+    data = canonical_text.encode("utf-8")
+    obj_hash = object_hash(data)
+    conn.execute(
+        "INSERT OR IGNORE INTO objects (hash, kind, bytes, created_at) VALUES (?, ?, ?, ?)",
+        (obj_hash, "base_snapshot", data, now),
+    )
+    return obj_hash
+
+
+def sync_root_exists(conn: sqlite3.Connection, sync_root_id: str) -> bool:
+    """Read-only: True iff ``sync_root_id`` has a durable ``sync_roots`` row."""
+    row = conn.execute("SELECT 1 FROM sync_roots WHERE id=?", (sync_root_id,)).fetchone()
+    return row is not None
+
+
+def write_base_snapshot(
+    conn: sqlite3.Connection,
+    sync_root_id: str,
+    path: str,
+    canonical_text: str,
+    contract_version: int | None = None,
+) -> str:
+    """Durably record ``canonical_text`` as ``path``'s new last-agreed base snapshot.
+
+    Raises ``SyncRootNotFoundError`` if ``sync_root_id`` is not a durably
+    registered sync root (spec §4.10/T4.10 registry) — the base store must
+    never silently associate a snapshot with an unknown root. Inserts the
+    content-addressed ``objects`` row (see ``_insert_base_snapshot``) and
+    upserts ``sync_files`` keyed by ``path`` (its primary key, spec §4.4)
+    so ``base_hash`` and ``sync_root_id`` both move together, inside one
+    transaction. Returns the new base snapshot's ``objects.hash``.
+
+    # design note (T5.4, fable-reviewed, human-decided 2026-07-12): closes
+    # T5.1's logged SPEC-QUESTION on ``sync_files.contract_version``. The
+    # new optional ``contract_version`` keyword lets a caller that actually
+    # parsed the file's front matter (T5.4's reconcile pipeline) pass the
+    # real value through explicitly; omitting it (the default, ``None``)
+    # preserves T5.1's exact original behavior (preserve the existing row's
+    # value across a re-``put``, else default to the literal ``1``) — fully
+    # backward compatible, ``sync/base_store.py::put`` (T5.1) is unchanged.
+    """
+    if not sync_root_exists(conn, sync_root_id):
+        raise SyncRootNotFoundError(sync_root_id)
+    now = _now()
+    with conn:
+        obj_hash = _insert_base_snapshot(conn, canonical_text, now)
+        existing = conn.execute(
+            "SELECT contract_version FROM sync_files WHERE path=?", (path,)
+        ).fetchone()
+        if contract_version is not None:
+            resolved_contract_version = contract_version
+        elif existing is not None:
+            resolved_contract_version = existing[0]
+        else:
+            resolved_contract_version = 1
+        conn.execute(
+            "INSERT INTO sync_files "
+            "(path, sync_root_id, base_hash, contract_version, last_synced_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET "
+            "sync_root_id=excluded.sync_root_id, base_hash=excluded.base_hash, "
+            "contract_version=excluded.contract_version, "
+            "last_synced_at=excluded.last_synced_at",
+            (path, sync_root_id, obj_hash, resolved_contract_version, now),
+        )
+    return obj_hash
+
+
+def list_sync_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Read-only enumerator of every tracked ``sync_files`` row (spec §4.4).
+
+    # design note (T5.4, fable-reviewed, human-decided 2026-07-12, rule 0.4):
+    # added outside T5.4's own Files list, same recurring precedent as the
+    # other store.py touches listed above — ``sync/reconcile.py``'s
+    # ``ProjectionIndex`` (cross-file ``E_DUP_ID``/move detection, spec
+    # §4.7/§3.5's M5 follow-up) needs to enumerate every synced file's
+    # ``(path, sync_root_id, base_hash, contract_version)`` to rebuild its
+    # id -> path ownership map purely from durable state (crash-safe,
+    # rebuildable). Read-only; never used to author truth, only to look up
+    # which base snapshot to re-parse per path.
+    #
+    # design note (T5.7, rule 0.4): ``last_synced_at`` added to the
+    # projected columns (the column already exists in the ``sync_files``
+    # DDL, migration 002 — this is a read-only SELECT-list widening, not a
+    # schema change) so ``GET /sync/status`` can report each file's
+    # last-synced timestamp without a second query. Purely additive;
+    # T5.4's existing callers that only read ``path``/``sync_root_id``/
+    # ``base_hash``/``contract_version`` are unaffected.
     """
     rows = conn.execute(
-        "SELECT DISTINCT vault FROM sync_files ORDER BY vault"
+        "SELECT path, sync_root_id, base_hash, contract_version, last_synced_at "
+        "FROM sync_files ORDER BY path"
     ).fetchall()
-    return [r[0] for r in rows]
+    return [
+        {
+            "path": r[0],
+            "sync_root_id": r[1],
+            "base_hash": r[2],
+            "contract_version": r[3],
+            "last_synced_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+def read_base_snapshot(conn: sqlite3.Connection, sync_root_id: str, path: str) -> str | None:
+    """Return ``path``'s last-agreed canonical base text, or ``None`` if unset.
+
+    Scoped to ``sync_root_id``: a ``sync_files`` row that exists but is
+    associated with a *different* sync root (or has no ``base_hash`` yet)
+    reads as ``None``, same as a wholly fresh path — the base-store
+    association is per-root, not just per-path (spec §4.4: ``path`` is
+    globally unique as the table's primary key, but callers must still be
+    scoped to their own root to avoid cross-root leakage).
+    """
+    row = conn.execute(
+        "SELECT sync_root_id, base_hash FROM sync_files WHERE path=?", (path,)
+    ).fetchone()
+    if row is None:
+        return None
+    row_sync_root_id, base_hash = row
+    if row_sync_root_id != sync_root_id or base_hash is None:
+        return None
+    obj_row = conn.execute("SELECT bytes FROM objects WHERE hash=?", (base_hash,)).fetchone()
+    if obj_row is None:
+        return None
+    data: bytes = obj_row[0]
+    return data.decode("utf-8")

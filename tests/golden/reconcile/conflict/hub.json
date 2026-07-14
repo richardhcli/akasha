@@ -1,0 +1,9 @@
+[
+  {
+    "id": "5uhfv5zu",
+    "node_type": "claim",
+    "body": "Line one",
+    "task_state": null,
+    "hub_edit_body": "Hub changed line"
+  }
+]

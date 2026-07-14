@@ -1,0 +1,406 @@
+"""Filesystem watcher: 500 ms debounce + OneDrive/Dropbox cloud-path detection.
+
+Task T5.3 (spec §4.8 ``on_change(path) after 500 ms debounce``; M5 milestone
+text: "watcher with debounce + cloud-path detection (warn + conservative
+profile when path is under OneDrive/Dropbox markers)"; §6.2 E18 rapid
+modify bursts ⇒ debounce, single cycle; E19 vault under simulated OneDrive
+path ⇒ warning + conservative profile).
+
+Design: pure logic vs. I/O wiring
+-----------------------------------
+Per this task's testability requirement, the module is split into three
+independently testable layers:
+
+1. :func:`detect_cloud_path` — a pure predicate over a path string; no I/O.
+2. :class:`Debouncer` — pure event-coalescing logic. Both the debounce
+   window and the clock are injectable (mirrors ``api/auth.py``'s
+   ``check_rate_limit(..., now=...)`` pattern and ``sync/origin.py``'s
+   ``OriginTracker``): tests drive it with explicit timestamps via the
+   ``at=`` keyword on :meth:`Debouncer.notify`/:meth:`Debouncer.poll`,
+   never a real ``time.sleep``. It knows nothing about ``watchdog`` or
+   SQLite.
+3. :class:`Watcher` — the wiring layer. Loads durable sync roots via
+   ``kernel.store.list_sync_roots`` (T4.10), detects cloud paths per root
+   (step 3), and — only when :meth:`Watcher.start` is called — creates a
+   ``watchdog`` ``Observer`` (via an injectable ``observer_factory``, so
+   tests can substitute a spy instead of a real OS-level observer thread)
+   that feeds raw filesystem events into the ``Debouncer``.
+
+Reconcile routing (step 4)
+----------------------------
+T5.4's reconcile pipeline does not exist yet. The ``Watcher`` never
+imports ``sync.reconcile``; instead its constructor takes an
+``on_cycle: Callable[[str], None]`` callback invoked with the affected
+file path once its debounce window has elapsed with no further activity.
+T5.4 supplies the real callback (its ``on_change(path)`` entry point);
+until then callers (and this task's tests) pass a spy.
+
+Echo suppression (optional wiring)
+------------------------------------
+The ``Watcher`` optionally accepts a T5.2 ``OriginTracker`` plus a
+``content_hash_fn: Callable[[str], str]``. When both are supplied, a raw
+filesystem event first checks ``origin_tracker.is_echo(path, hash)``; a
+matching echo (the daemon's own recent write) is dropped before it ever
+reaches the debouncer, so it never produces a spurious reconcile cycle.
+Without a hash function/tracker (the default), every raw event is
+debounced and forwarded — echo suppression is opt-in, not required for
+this task's DoD.
+
+Cloud-path detection and the conservative profile
+----------------------------------------------------
+``detect_cloud_path`` matches on OneDrive/Dropbox markers appearing as a
+path *segment* (case-insensitive substring of a path component — e.g.
+``OneDrive``, ``OneDrive - Contoso``, ``Dropbox (Personal)`` all match),
+never on marker text that merely appears inside an unrelated component
+name, avoiding false positives such as a hub folder literally named
+``MyOneDriveDoc.md``. ``Watcher.load_roots`` runs this once per
+registered sync root's ``root_path`` (root granularity, per the
+build-plan step "Detect cloud markers in an Obsidian vault path" — a
+vault path *is* a sync root's ``root_path``, not a per-file check); a
+match logs one WARNING via the shared ``akasha`` logger (the same
+logger ``daemon.py::configure_logging`` configures — this module never
+``print``s) and sets that root's ``conservative`` flag to ``True``. The
+flag is exposed on the ``WatchedRoot`` dataclass so T5.4's reconcile
+pipeline can read it (e.g. to be more cautious about certain-repairs
+under a cloud-sync provider's own eventual-consistency window) without
+this module needing to know anything about reconcile policy.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass, field
+from pathlib import PurePath
+from typing import TYPE_CHECKING, Any, Protocol
+
+from akasha.kernel import store
+
+if TYPE_CHECKING:
+    import sqlite3
+    from collections.abc import Callable
+
+    from akasha.sync.origin import OriginTracker
+
+# Spec §4.8: "on_change(path) after 500 ms debounce".
+DEFAULT_DEBOUNCE_SECONDS = 0.5
+
+# Case-insensitive marker substrings checked against each path *segment*
+# (not the whole path) — see module docstring "Cloud-path detection".
+_ONEDRIVE_MARKER = "onedrive"
+_DROPBOX_MARKER = "dropbox"
+
+
+def detect_cloud_path(path: str) -> str | None:
+    """Return ``"OneDrive"``, ``"Dropbox"``, or ``None`` for an ordinary local path.
+
+    Checks every path segment (``PurePath(path).parts``) for a
+    case-insensitive substring match against the known provider markers,
+    so both ``.../OneDrive/vault`` and ``.../OneDrive - Contoso/vault``
+    (a real OneDrive-for-Business folder-naming convention) are detected,
+    while a segment that merely contains the substring as part of an
+    unrelated word (e.g. a file literally named ``dropboxes.md``) is
+    still a match at the segment level by design — the spec only asks for
+    "OneDrive/Dropbox markers", and segment-level substring matching is
+    the narrowest reading that still catches the documented real-world
+    folder-naming variants without requiring an exact-name allowlist the
+    spec never specifies (§ narrowest reading, build-plan rule 0.2).
+    """
+    for part in PurePath(path).parts:
+        lowered = part.lower()
+        if _ONEDRIVE_MARKER in lowered:
+            return "OneDrive"
+        if _DROPBOX_MARKER in lowered:
+            return "Dropbox"
+    return None
+
+
+@dataclass
+class WatchedRoot:
+    """One durable sync root (T4.10 ``sync_roots`` row) plus watcher-local state.
+
+    ``conservative`` is process-local, runtime-only state (not a
+    ``sync_roots`` column — no migration needed for this task): it is
+    recomputed from ``root_path`` every time :meth:`Watcher.load_roots`
+    runs, exactly like ``sync/origin.py``'s in-memory bookkeeping is
+    intentionally non-persistent (see that module's docstring).
+    """
+
+    id: str
+    name: str
+    root_path: str
+    conservative: bool = False
+    cloud_provider: str | None = None
+
+
+class _Scheduler(Protocol):
+    """Minimal surface of a ``watchdog`` ``BaseObserver`` this module needs.
+
+    Declared as a ``Protocol`` (rather than importing ``watchdog.observers
+    .api.BaseObserver`` directly for the type) so :class:`Watcher`'s
+    ``observer_factory`` can be swapped for a lightweight test spy without
+    that spy needing to subclass a real ``watchdog`` class.
+    """
+
+    def schedule(
+        self, event_handler: Any, path: str, *, recursive: bool = ...
+    ) -> Any: ...
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def join(self, timeout: float | None = None) -> None: ...
+
+
+class Debouncer:
+    """Coalesces a burst of raw per-path events into one call per quiet window.
+
+    Poll-based (not ``threading.Timer``-based) by design: :meth:`notify`
+    only records "this path had an event at time T"; :meth:`poll` is the
+    single place a cycle actually fires, and it fires for every pending
+    path whose *most recent* event is at least ``debounce_seconds`` in
+    the past (i.e. no further events arrived during the window — a
+    classic trailing-edge debounce, not a fixed-delay one-shot). This
+    keeps the whole class free of real threads/timers/sleeps, so a test
+    can call :meth:`notify` and :meth:`poll` with explicit ``at=``
+    timestamps and get fully deterministic results (mirrors
+    ``api/auth.py``'s ``check_rate_limit(..., now=...)`` injectable-clock
+    pattern). :class:`Watcher` drives a real :meth:`poll` loop from a
+    background thread in production (see :meth:`Watcher.start`); tests
+    never need that thread.
+
+    Because the record for a path is only cleared once it actually fires
+    in :meth:`poll`, a fresh burst of events arriving *after* a fire is
+    treated as a brand-new window producing its own, later cycle — the
+    debounce resets rather than being a one-shot per path.
+    """
+
+    def __init__(
+        self,
+        on_cycle: Callable[[str], None],
+        *,
+        debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS,
+        now: Callable[[], float] | None = None,
+    ) -> None:
+        self._on_cycle = on_cycle
+        self._debounce_seconds = debounce_seconds
+        self._clock = now if now is not None else _monotonic
+        self._lock = threading.Lock()
+        # path -> timestamp of its most recent event.
+        self._pending: dict[str, float] = {}
+
+    def notify(self, path: str, *, at: float | None = None) -> None:
+        """Record a raw event for ``path``, (re)starting its debounce window."""
+        current = self._current_time(at)
+        with self._lock:
+            self._pending[path] = current
+
+    def poll(self, *, at: float | None = None) -> list[str]:
+        """Fire ``on_cycle`` for every path whose window has quietly elapsed.
+
+        Returns the list of paths that fired this call (empty if none are
+        ready yet), purely as a convenience for assertions in tests —
+        production callers (:class:`Watcher`'s poll loop) can ignore it.
+        """
+        current = self._current_time(at)
+        with self._lock:
+            ready = [
+                path
+                for path, last_event_at in self._pending.items()
+                if current - last_event_at >= self._debounce_seconds
+            ]
+            for path in ready:
+                del self._pending[path]
+        for path in ready:
+            self._on_cycle(path)
+        return ready
+
+    def _current_time(self, at: float | None) -> float:
+        return self._clock() if at is None else at
+
+
+def _monotonic() -> float:
+    import time
+
+    return time.monotonic()
+
+
+class _WatchdogEventHandler:
+    """Bridges raw ``watchdog`` filesystem events into ``Watcher.notify_event``.
+
+    Kept as a tiny, untyped-against-watchdog-internals adapter (duck-typed
+    ``on_any_event(event)``, the method ``watchdog.events
+    .FileSystemEventHandler`` dispatches every event kind to) rather than
+    subclassing ``FileSystemEventHandler`` directly, so this module's pure
+    logic above never has an import-time dependency on ``watchdog``
+    beyond :meth:`Watcher.start`, matching the "pure logic testable
+    without it" design goal.
+    """
+
+    def __init__(self, watcher: Watcher) -> None:
+        self._watcher = watcher
+
+    def on_any_event(self, event: Any) -> None:
+        if getattr(event, "is_directory", False):
+            return
+        self._watcher.notify_event(str(event.src_path))
+        dest_path = getattr(event, "dest_path", "")
+        if dest_path:
+            self._watcher.notify_event(str(dest_path))
+
+
+def _default_observer_factory() -> _Scheduler:
+    from watchdog.observers import Observer
+
+    return Observer()
+
+
+@dataclass
+class Watcher:
+    """Loads durable sync roots, watches them, and debounces raw FS events.
+
+    Constructor / public API (T5.4 wiring contract)
+    ---------------------------------------------------
+    ``Watcher(conn, on_cycle, *, debounce_seconds=0.5, now=None,
+    origin_tracker=None, content_hash_fn=None,
+    observer_factory=<real watchdog Observer>, logger=None)``
+
+    - ``conn``: an open ``sqlite3.Connection`` (read-only use here — only
+      ``kernel.store.list_sync_roots`` is called; no writes, per rule
+      0.4).
+    - ``on_cycle: Callable[[str], None]`` — **the T5.4 reconcile-routing
+      seam.** Called with exactly one file path once that path's 500 ms
+      debounce window has elapsed with no further activity. T5.4 passes
+      its real ``reconcile.on_change`` (or an equivalent adapter);
+      nothing in this module imports ``sync.reconcile``.
+    - ``debounce_seconds`` / ``now``: forwarded to the internal
+      :class:`Debouncer` — see its docstring for the injectable-clock
+      testing contract.
+    - ``origin_tracker`` (T5.2 ``OriginTracker``) + ``content_hash_fn``:
+      optional echo suppression — see module docstring. Both must be
+      supplied together to take effect; either omitted disables
+      suppression (every raw event is debounced and forwarded).
+    - ``observer_factory``: zero-arg callable returning a ``watchdog``
+      ``BaseObserver``-shaped object (``schedule``/``start``/``stop``/
+      ``join``); defaults to a real ``watchdog.observers.Observer``.
+      Overridable so tests can inject a spy instead of a real OS watcher
+      thread.
+    - ``logger``: defaults to ``logging.getLogger("akasha")`` — the same
+      logger ``daemon.py::configure_logging`` sets handlers on, so the
+      E19 cloud-path warning lands wherever the daemon's other logs do.
+
+    Public methods
+    ----------------
+    - ``load_roots() -> list[WatchedRoot]`` — (re)reads
+      ``store.list_sync_roots``, runs :func:`detect_cloud_path` against
+      each ``root_path`` (logging + flagging ``conservative`` on a
+      match), and returns the resulting :class:`WatchedRoot` list. Safe
+      to call without ever starting a real observer (pure DB read + pure
+      predicate) — this is what T5.3's tests exercise for E19.
+    - ``roots -> dict[str, WatchedRoot]`` (property) — the most recently
+      loaded roots, keyed by sync-root id.
+    - ``start() -> None`` — calls ``load_roots()`` if not already loaded,
+      creates an observer via ``observer_factory``, schedules a watch
+      (``recursive=True``) on every root's ``root_path``, and starts it.
+    - ``stop() -> None`` — stops and joins the observer, if one is
+      running.
+    - ``notify_event(path, *, at=None) -> None`` — feed one raw
+      filesystem-change path into the pipeline (applies echo suppression
+      if wired, then forwards to the internal ``Debouncer``). Called by
+      the internal ``watchdog`` handler in production; tests call it
+      directly to simulate raw FS events without a real observer thread.
+    - ``poll(*, at=None) -> list[str]`` — drives the debounce window
+      check; returns the list of paths whose ``on_cycle`` fired this
+      call. Production runs this from a background thread started
+      alongside the observer; tests call it directly with explicit
+      ``at=`` timestamps for deterministic E18 assertions.
+    """
+
+    conn: sqlite3.Connection
+    on_cycle: Callable[[str], None]
+    debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS
+    now: Callable[[], float] | None = None
+    origin_tracker: OriginTracker | None = None
+    content_hash_fn: Callable[[str], str] | None = None
+    observer_factory: Callable[[], _Scheduler] = field(default=_default_observer_factory)
+    logger: logging.Logger = field(default_factory=lambda: logging.getLogger("akasha"))
+
+    def __post_init__(self) -> None:
+        self._debouncer = Debouncer(
+            self.on_cycle, debounce_seconds=self.debounce_seconds, now=self.now
+        )
+        self._roots: dict[str, WatchedRoot] = {}
+        self._observer: _Scheduler | None = None
+
+    @property
+    def roots(self) -> dict[str, WatchedRoot]:
+        return dict(self._roots)
+
+    def load_roots(self) -> list[WatchedRoot]:
+        """Load durable sync roots and run cloud-path detection on each.
+
+        Step 1 (load) + step 3 (cloud detection ⇒ warn + conservative
+        flag) of this task's build-plan Steps. Read-only against SQLite
+        (``kernel.store.list_sync_roots`` — rule 0.4).
+        """
+        rows = store.list_sync_roots(self.conn)
+        loaded: dict[str, WatchedRoot] = {}
+        for row in rows:
+            root_path = row["root_path"]
+            provider = detect_cloud_path(root_path)
+            conservative = provider is not None
+            if conservative:
+                self.logger.warning(
+                    "sync root %r (%s) at %r is under a %s-synced path; "
+                    "enabling conservative reconcile profile",
+                    row["name"],
+                    row["id"],
+                    root_path,
+                    provider,
+                )
+            loaded[row["id"]] = WatchedRoot(
+                id=row["id"],
+                name=row["name"],
+                root_path=root_path,
+                conservative=conservative,
+                cloud_provider=provider,
+            )
+        self._roots = loaded
+        return list(loaded.values())
+
+    def start(self) -> None:
+        """Start watching every loaded (or freshly-loaded) sync root's ``root_path``."""
+        if not self._roots:
+            self.load_roots()
+        observer = self.observer_factory()
+        handler = _WatchdogEventHandler(self)
+        for root in self._roots.values():
+            observer.schedule(handler, root.root_path, recursive=True)
+        observer.start()
+        self._observer = observer
+
+    def stop(self) -> None:
+        """Stop and join the observer thread, if one was started."""
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer.join()
+            self._observer = None
+
+    def notify_event(self, path: str, *, at: float | None = None) -> None:
+        """Feed one raw filesystem-change ``path`` into the debounce pipeline.
+
+        Applies echo suppression first (step: drop events matching a
+        recent daemon write) when both ``origin_tracker`` and
+        ``content_hash_fn`` are configured; otherwise every event is
+        forwarded straight to the debouncer.
+        """
+        if self.origin_tracker is not None and self.content_hash_fn is not None:
+            content_hash = self.content_hash_fn(path)
+            if self.origin_tracker.is_echo(path, content_hash):
+                return
+        self._debouncer.notify(path, at=at)
+
+    def poll(self, *, at: float | None = None) -> list[str]:
+        """Fire ``on_cycle`` for every path whose debounce window has elapsed."""
+        return self._debouncer.poll(at=at)

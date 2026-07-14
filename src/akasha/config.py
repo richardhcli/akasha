@@ -32,10 +32,8 @@ def default_config_path() -> Path:
 def default_db_path() -> Path:
     """Default SQLite database file location.
 
-    Lives alongside ``config.toml`` in the neutral ``tm-daemon`` dir. The
-    spec (§3) fixes the config dir name but never names the DB file; ``store.db``
-    is a neutral, product-name-free filename (rule 0.6). See the T4.4
-    SPEC-QUESTION in docs/spec-questions.md.
+    Lives alongside ``config.toml`` in the neutral ``tm-daemon`` dir.
+    ``store.db`` is the spec-fixed, product-name-free filename (rule 0.6).
     """
     return default_config_dir() / "store.db"
 

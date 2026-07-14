@@ -266,7 +266,7 @@
         "title": "PatchNodeBody",
         "type": "object"
       },
-      "RegisterVaultBody": {
+      "RegisterSyncRootBody": {
         "properties": {
           "name": {
             "title": "Name",
@@ -281,7 +281,7 @@
           "name",
           "root_path"
         ],
-        "title": "RegisterVaultBody",
+        "title": "RegisterSyncRootBody",
         "type": "object"
       },
       "SplitBody": {
@@ -974,6 +974,118 @@
         ]
       }
     },
+    "/v1/sync/rescan": {
+      "post": {
+        "description": "Trigger a full \u00a74.8 reconcile of every managed file; return a convergence summary.\n\nBuilds one fresh ``Reconciler``/``OriginTracker`` pair per request \u2014 a\nmanual rescan has no live filesystem watcher to share state with (T5.6\nwires the long-lived daemon watcher+reconciler pair separately), and\n\u00a74.8's ``on_change`` is idempotent (verified crash-replay-safe by\nT5.5/T5.6), so a fresh tracker is safe: at worst it fails to suppress\none of *this request's own* write-back echoes, which only matters to a\nlive filesystem watcher, not to this synchronous HTTP call.\n\nA path whose file has since been removed from disk (tracked in\n``sync_files`` but no longer present in the vault) is skipped rather\nthan failing the whole rescan -- one stale entry must not 500 an\notherwise-successful convergence of every other file.",
+        "operationId": "sync_rescan_v1_sync_rescan_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Sync Rescan V1 Sync Rescan Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sync Rescan",
+        "tags": [
+          "sync"
+        ]
+      }
+    },
+    "/v1/sync/roots": {
+      "get": {
+        "operationId": "list_sync_roots_v1_sync_roots_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Sync Roots V1 Sync Roots Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Sync Roots",
+        "tags": [
+          "sync-roots"
+        ]
+      },
+      "post": {
+        "operationId": "register_sync_root_v1_sync_roots_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterSyncRootBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Register Sync Root V1 Sync Roots Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register Sync Root",
+        "tags": [
+          "sync-roots"
+        ]
+      }
+    },
+    "/v1/sync/status": {
+      "get": {
+        "description": "Per-sync-root state: files, open violations, pauses, conflicts (spec \u00a74.11).",
+        "operationId": "sync_status_v1_sync_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Sync Status V1 Sync Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sync Status",
+        "tags": [
+          "sync"
+        ]
+      }
+    },
     "/v1/tokens": {
       "get": {
         "operationId": "list_tokens_v1_tokens_get",
@@ -1079,70 +1191,6 @@
         "summary": "Revoke Token",
         "tags": [
           "tokens"
-        ]
-      }
-    },
-    "/v1/vaults": {
-      "get": {
-        "operationId": "list_vaults_v1_vaults_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Vaults V1 Vaults Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Vaults",
-        "tags": [
-          "vaults"
-        ]
-      },
-      "post": {
-        "operationId": "register_vault_v1_vaults_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RegisterVaultBody"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Register Vault V1 Vaults Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Register Vault",
-        "tags": [
-          "vaults"
         ]
       }
     }

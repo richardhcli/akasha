@@ -42,7 +42,7 @@
                                      (served)   (TS, thin client)
 ```
 
-Data flow invariants: the **hub (SQLite) is the writer of record**; the vault is a projection under contract; every surface (CLI, UI, plugin, future MCP) speaks only the localhost API; sync writes to the vault only canonical renders.
+Data flow invariants: the **hub (SQLite) is the writer of record**; each file-backed spoke is a projection under contract; every surface (CLI, UI, plugin, future MCP) speaks only the localhost API; sync writes to managed files only canonical renders.
 
 ---
 
@@ -63,8 +63,8 @@ akasha/
 │   │   └── maturity.py         # §4.6 stage derivation + deletion rules
 │   ├── contract/
 │   │   ├── grammar.py          # §4.7 tokens/regexes, contract version const
-│   │   ├── parser.py           # vault text -> BlockSet
-│   │   ├── render.py           # hub nodes -> canonical vault text
+│   │   ├── parser.py           # managed-file contract text -> BlockSet
+│   │   ├── render.py           # hub nodes -> canonical contract text
 │   │   └── linter.py           # violations, certain-repair, pause&diff
 │   ├── sync/
 │   │   ├── base_store.py       # per-file base snapshots (blob table)
@@ -102,7 +102,7 @@ akasha/
 
 ## 3. Conventions & toolchain
 
-Python 3.12+, managed by `uv`. Lint/format: `ruff` (rule set includes a custom ban on `pickle`, `eval`, `exec`). Types: `pyright --strict` on `src/`. Tests: `pytest`, `hypothesis` for property tests. DB: stdlib `sqlite3`, WAL mode, `PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL`. HTTP: FastAPI + uvicorn, port **7433** default, bind `127.0.0.1` only. Config at `%APPDATA%/tm-daemon/config.toml` (Windows) / `~/.config/tm-daemon/` elsewhere — note neutral dir name per rule 0.6. Logging: structured JSON lines to a rotating file + stderr. Commits: Conventional Commits. CI: GitHub Actions matrix `[windows-latest, ubuntu-latest]`; Windows is the release gate.
+Python 3.12+, managed by `uv`. Lint/format: `ruff` (rule set includes a custom ban on `pickle`, `eval`, `exec`). Types: `pyright --strict` on `src/`. Tests: `pytest`, `hypothesis` for property tests. DB: stdlib `sqlite3`, WAL mode, `PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL`. The daemon uses one shared connection (`check_same_thread=False`, because synchronous FastAPI routes run in a thread pool) at `%APPDATA%/tm-daemon/store.db` on Windows / `~/.config/tm-daemon/store.db` elsewhere. This is the MVP concurrency model for the single-user local daemon. HTTP: FastAPI + uvicorn, port **7433** default, bind `127.0.0.1` only. Config at `%APPDATA%/tm-daemon/config.toml` (Windows) / `~/.config/tm-daemon/config.toml` elsewhere — note neutral dir name per rule 0.6. Logging: structured JSON lines to a rotating file + stderr. Commits: Conventional Commits. CI: GitHub Actions matrix `[windows-latest, ubuntu-latest]`; Windows is the release gate.
 
 ---
 
@@ -115,7 +115,7 @@ Python 3.12+, managed by `uv`. Lint/format: `ruff` (rule set includes a custom b
 - Checksum: `A[(Σ_{i=0..6} (i+1) * idx(c_i)) mod 32]` — weighted to catch transpositions.
 - Validation: length 8, alphabet membership, checksum match. Invalid checksum ⇒ contract violation `E_ID_CHECKSUM`, never a guess.
 - Minting: generate, `SELECT 1 FROM nodes WHERE id=?`, retry on collision (loop bound 10, then error).
-- Vault form: anchor `^tm-<id8>`; the bare id is never shown without the `tm-` prefix in files.
+- Contract anchor form: `^tm-<id8>`; the bare id is never shown without the `tm-` prefix in managed files.
 
 ```python
 def checksum(core: str) -> str:
@@ -163,7 +163,7 @@ Justification edge types = `{supports, contradicts, depends_on, derived_from, ci
 
 Text: UTF-8, Unicode **NFC**, line endings **LF**, no trailing whitespace on any line, exactly one trailing newline, tabs preserved inside code fences only, otherwise expanded to spaces on managed lines. JSON (for hashing objects): `json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")`. Object hash: `sha256` hex of canonical bytes. These rules live in `kernel/canonical.py` and in `docs/contract-v1.md`; **no other module normalizes text.**
 
-### 4.4 SQLite DDL (migrations/001_init.sql — verbatim)
+### 4.4 SQLite DDL (current schema after numbered migrations)
 
 ```sql
 CREATE TABLE objects   (hash TEXT PRIMARY KEY, kind TEXT NOT NULL,
@@ -188,14 +188,16 @@ CREATE TABLE edges     (id TEXT PRIMARY KEY, src TEXT NOT NULL, dst TEXT NOT NUL
 CREATE INDEX ix_edges_dst ON edges(dst) WHERE retracted_at IS NULL;
 CREATE INDEX ix_edges_src ON edges(src) WHERE retracted_at IS NULL;
 CREATE TABLE redirects  (old_id TEXT PRIMARY KEY, successors TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE TABLE review_queue (id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+CREATE TABLE review_queue (id TEXT PRIMARY KEY, node_id TEXT,
                         cause_kind TEXT NOT NULL,  -- facet_break|subtasks_closed|evidence_retracted|recheck|conflict|violation|proposal
                         cause_ref TEXT, facet TEXT, created_at TEXT NOT NULL,
                         resolved_at TEXT, resolution TEXT);  -- still_holds|revised|retracted|dismissed
 CREATE TABLE triggers   (id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
                         condition TEXT NOT NULL, params TEXT NOT NULL DEFAULT '{}',
                         enabled INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE sync_files (path TEXT PRIMARY KEY, vault TEXT NOT NULL,
+CREATE TABLE sync_roots (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                        root_path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+CREATE TABLE sync_files (path TEXT PRIMARY KEY, sync_root_id TEXT NOT NULL REFERENCES sync_roots(id),
                         base_hash TEXT REFERENCES objects(hash),
                         contract_version INTEGER NOT NULL, last_synced_at TEXT);
 CREATE TABLE tokens     (id TEXT PRIMARY KEY, name TEXT NOT NULL,
@@ -205,6 +207,10 @@ CREATE TABLE tokens     (id TEXT PRIMARY KEY, name TEXT NOT NULL,
 CREATE TABLE audit_log  (ts TEXT NOT NULL, token_id TEXT, action TEXT NOT NULL, detail TEXT);
 CREATE VIRTUAL TABLE nodes_fts USING fts5(id UNINDEXED, body);
 ```
+
+`review_queue.node_id` is the affected existing node when one exists. It is `NULL` only for an agent proposal to create a node: the review row's own `id` is the proposal correlation key, and the node id is minted by `create_node` only after human approval. `cause_ref` for `cause_kind='proposal'` is canonical JSON with the complete would-be request: `{"method": ..., "path": ..., "body": ...}`.
+
+`sync_roots` contains durable registrations of watched filesystem roots. In the MVP each root is an Obsidian vault, but “sync root” is the API/schema term; “spoke” names an integration type or client surface, not one registered directory. A registration must survive daemon restart even before it has any `sync_files` rows.
 
 Append-only discipline: `objects` rows are never updated or deleted (except S0 GC, which may delete objects unreachable from any S1+ node or base snapshot). Node "edits" insert a new object + commit and move `head_hash`.
 
@@ -243,13 +249,13 @@ indent      := (2 spaces)*                              ; nesting depth = indent
 
 Semantics: a `task_line` maps to a task node (`- [x]` ⇔ `task_state=done`); an indented task under another task ⇒ `composes(parent→child)` edge; `^tm-new` ⇒ daemon mints an ID and rewrites the line (this rewrite is origin-tagged, not an echo); embeds render the target's current body (read-only in Obsidian by nature). Anything inside fenced code blocks is ignored entirely. Text matching the anchor pattern *not* at end-of-line is plain text.
 
-Violations (linter codes): `E_ID_CHECKSUM` malformed anchor; `E_DUP_ID` same anchor twice in vault (copy without cut); `E_LOST_ANCHOR` managed block's text found (fuzzy ≥ 0.9 similarity to base) but anchor deleted; `E_DELETED_S1` managed block deleted whose node is S1+. **Certain auto-repairs** (silent, logged, undoable): `E_LOST_ANCHOR` where text is byte-identical to base except the anchor ⇒ re-insert anchor; `E_DUP_ID` where one copy is byte-identical to base ⇒ the identical copy keeps the ID, the other gets `^tm-new` minting proposed. Everything else ⇒ review item. **Pause & diff:** if violations affect > 25% of a file's managed blocks in one sync cycle (formatter storm), make no writes, snapshot the file, open one review item with a diff.
+Violations (linter codes): `E_ID_CHECKSUM` malformed anchor; `E_DUP_ID` same anchor twice in a sync root (copy without cut); `E_LOST_ANCHOR` managed block's text found (fuzzy ≥ 0.9 similarity to base) but anchor deleted; `E_DELETED_S1` managed block deleted whose node is S1+. **Certain auto-repairs** (silent, logged, undoable): `E_LOST_ANCHOR` where text is byte-identical to base except the anchor ⇒ re-insert anchor; `E_DUP_ID` where one copy is byte-identical to base ⇒ the identical copy keeps the ID, the other gets `^tm-new` minting proposed. Everything else ⇒ review item. **Pause & diff:** if violations affect > 25% of a file's managed blocks in one sync cycle (formatter storm), make no writes, snapshot the file, open one review item with a diff. A managed file is a lossless container: lines that are not contract constructs pass through write-back verbatim by position; the hub owns only anchored lines.
 
 ### 4.8 Sync engine (sync/reconcile.py) — per-file pipeline
 
 ```
 on_change(path) after 500 ms debounce:
-  V  = canonicalize(read(path))               # vault bytes
+  V  = canonicalize(read(path))               # current managed-file bytes
   B  = base_store.get(path)                   # last agreed bytes (may be None)
   H  = render(hub_state_for(path))            # canonical projection
   if V == B and H == B: return                # quiet
@@ -264,7 +270,7 @@ on_change(path) after 500 ms debounce:
       else: kernel.apply(op)                  # via store API, origin='sync'
   H2 = render(hub_state_for(path))
   write_if_diff(path, H2)                     # canonical write-back
-  base_store.put(path, H2)
+  base_store.put(sync_root_id, path, H2)
 ```
 
 Echo suppression: writes performed by the daemon record `(path, hash)` in `origin.py`; a watcher event whose content hash matches a recorded write is dropped. Startup: run `on_change` for every managed file (idempotent — this is also crash recovery). Conflict semantics: hub keeps both versions as branches on the node's commit DAG; review item `cause_kind=conflict`.
@@ -292,7 +298,7 @@ Registry of pure functions `condition(node, ctx) -> bool`, evaluated (a) after e
 
 ### 4.11 Localhost API (v1) — endpoint table
 
-All under `/v1`, JSON, header `Authorization: Bearer <token>`. Errors: `{"error": {"code": "...", "message": "...", "detail": {}}}`. Agent-class tokens: mutating endpoints are rewritten into proposals (review items, `cause_kind=proposal`) unless the endpoint is marked ∅; rate-limited per token.
+All authenticated application endpoints are under `/v1`, use JSON, and require header `Authorization: Bearer <token>`. The operational `GET /health` endpoint is intentionally root-level and unauthenticated. Errors: `{"error": {"code": "...", "message": "...", "detail": {}}}`. Agent-class tokens: mutating endpoints are rewritten into proposals (review items, `cause_kind=proposal`) unless the endpoint is marked ∅; rate-limited per token. Proposal `cause_ref` stores canonical `{method,path,body}`. Existing-node proposals use that node as `node_id`; edge proposals use the edge's `dst`. Create-node proposals use `node_id=NULL` and mint only when approved.
 
 | Method & path | Purpose | Notes |
 |---|---|---|
@@ -302,13 +308,13 @@ All under `/v1`, JSON, header `Authorization: Bearer <token>`. Errors: `{"error"
 | PATCH /nodes/{id} | commit edit (body/facets, change_class, facets_touched, message) | |
 | DELETE /nodes/{id} | S0 delete; S1+ needs `redirect_to` body | 409 `E_NEEDS_REDIRECT` |
 | GET  /nodes/{id}/history · /neighborhood?hops=1 | commit DAG · 1-hop graph | |
-| POST /nodes/{id}/split · /merge | refactor ops; returns redirect + reassignment queue | |
+| POST /nodes/{id}/split · /merge | refactor ops; returns redirect + reassignment queue | merge: path id survives; body `{"ids":[other_ids...]}` |
 | POST /nodes/{id}/vet | set S4 | human token only ∅ |
 | POST /edges · DELETE /edges/{id} | create (validates facet_binding rule) / retract | |
 | GET  /search?q= | FTS over bodies | |
 | GET  /review?status=open · POST /review/{id}/resolve | queue · resolutions | resolve: human only ∅ |
-| GET  /sync/status · POST /sync/rescan | per-vault state, violations, pauses | |
-| GET/POST /vaults | register/list managed vaults | human only ∅ |
+| GET  /sync/status · POST /sync/rescan | per-sync-root state, violations, pauses | |
+| GET/POST /sync/roots | register/list durable filesystem sync roots | human only ∅ |
 | GET/POST/DELETE /tokens | token management | human only ∅ |
 | GET  /metrics | §7 counters (JSON) | |
 
@@ -316,11 +322,11 @@ The generated OpenAPI JSON is snapshotted at `docs/api-snapshot/openapi.json`; C
 
 ### 4.12 CLI (cli/main.py, typer)
 
-`akasha daemon [--config PATH]` · `akasha new TYPE BODY [--facet name=span ...] [--task]` · `akasha get ID [--as-of ISO]` · `akasha set ID [--body ...] [--class patch|minor|major] [--touch FACET]` · `akasha rm ID [--redirect-to ID...]` · `akasha search Q` · `akasha review [list|resolve ID RESOLUTION]` · `akasha token [create|revoke|list]`. Global flags: `--json` (output schema `cli/v1`, versioned, additive-only), `--dry-run` (mutations return the would-be request), `--token`. Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 conflict/violation/needs-redirect.
+`akasha daemon [--config PATH]` · `akasha new TYPE BODY [--facet name=span ...] [--task]` · `akasha get ID [--as-of ISO]` · `akasha set ID [--body ...] [--class patch|minor|major] [--touch FACET]` · `akasha rm ID [--redirect-to ID...]` · `akasha search Q` · `akasha review [list|resolve ID RESOLUTION]` · `akasha token [create|revoke|list]`. Global flags: `--json` (output schema `cli/v1`, versioned, additive-only), `--dry-run` (mutations return the would-be request), `--token`, `--base-url` (defaults to `http://127.0.0.1:7433`; permits test/non-default daemon endpoints). Omitted `akasha set --class` defaults to `patch`, the least-invalidating class. The review verbs target the §4.11 endpoints even before T7.5 lands them and must fail without a traceback until then. Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 conflict/violation/needs-redirect.
 
 ### 4.13 Web UI (MVP-minimal)
 
-Daemon-served, htmx + vanilla JS, four views: **Node** (body, facets, 1-hop neighborhood, history, stale badge with cause), **Review** (queue with one-click resolutions, daily-cap banner), **Search**, **Sync** (per-vault status, violations, pause&diff inspector). Badge copy uses "vetted by you" language, never "true" (PRD R9). No SPA framework; no build step beyond copying static files.
+Daemon-served, htmx + vanilla JS, four views: **Node** (body, facets, 1-hop neighborhood, history, stale badge with cause), **Review** (queue with one-click resolutions, daily-cap banner), **Search**, **Sync** (per-sync-root status, violations, pause&diff inspector; display “Obsidian vault” in Obsidian-specific copy). Badge copy uses "vetted by you" language, never "true" (PRD R9). No SPA framework; no build step beyond copying static files.
 
 ---
 

@@ -6,14 +6,10 @@ table, so both are open to any authenticated token (``require_auth``);
 agent-token proposal rewriting (task T4.6) is wired via
 ``deps.mutation_gate`` (see ``routes/nodes.py`` for the identical
 precedent). For ``POST /edges`` the review item's ``node_id`` is the
-would-be edge's ``dst`` (the "narrowest defensible target" for a
-create-with-no-prior-row case — same reasoning as T4.6's node-create
-placeholder, except ``dst`` already exists here so no placeholder mint is
-needed); ``DELETE /edges/{id}`` looks up the existing edge's ``dst`` via
-``store.get_edge_dst`` and uses that. Both choices are logged as T4.6
-SPEC-QUESTIONs (docs/spec-questions.md) since §4.11/§4.4 don't pin down
-which side of an edge "is" the review item's node for this closed-enum
-schema.
+would-be edge's ``dst`` because an inbound edge changes that target's
+maturity/review-relevant state. ``DELETE /edges/{id}`` looks up the
+existing edge's ``dst`` via ``store.get_edge_dst`` and uses that. Both ids
+remain recoverable from the canonical proposal payload.
 
 ``POST /edges`` reuses the T1.2 ``Edge`` pydantic ``facet_binding``
 validator via ``store.create_edge`` (never reimplemented here): a
@@ -61,9 +57,7 @@ def create_edge(
     conn: Any = Depends(get_conn),
     ctx: auth.AuthContext = Depends(require_auth),
 ) -> dict[str, Any]:
-    review = mutation_gate(
-        conn, ctx, request, node_id=payload.dst, payload=payload.model_dump()
-    )
+    review = mutation_gate(conn, ctx, request, node_id=payload.dst, payload=payload.model_dump())
     if review is not None:
         response.status_code = 202
         return {"proposed": True, "review": review}

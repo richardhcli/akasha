@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from akasha.contract import linter, parser
 from akasha.kernel import ids
-from akasha.kernel.ids import vault_anchor
+from akasha.kernel.ids import contract_anchor
 
 
 def _id() -> str:
@@ -138,7 +138,7 @@ def test_e_lost_anchor_certain_repair_when_text_byte_identical() -> None:
     repair = result.repairs[0]
     assert repair.id == id_
     assert repair.before == "Water boils at 100C"
-    assert repair.after == f"Water boils at 100C {vault_anchor(id_)}"
+    assert repair.after == f"Water boils at 100C {contract_anchor(id_)}"
     assert not any(r.code == "E_LOST_ANCHOR" for r in result.review_items)
 
 
@@ -177,7 +177,7 @@ def test_e_lost_anchor_task_line_certain_repair() -> None:
     result = linter.lint(base, vault, vault_text)
 
     assert _repair_actions(result) == ["reinsert_anchor"]
-    assert result.repairs[0].after == f"- [ ] Buy milk {vault_anchor(id_)}"
+    assert result.repairs[0].after == f"- [ ] Buy milk {contract_anchor(id_)}"
 
 
 # --- E_DELETED_S1 -------------------------------------------------------------

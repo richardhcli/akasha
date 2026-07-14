@@ -55,9 +55,7 @@ class ApiError(Exception):
         super().__init__(message)
 
 
-def _envelope(
-    status_code: int, code: str, message: str, detail: dict[str, Any]
-) -> JSONResponse:
+def _envelope(status_code: int, code: str, message: str, detail: dict[str, Any]) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message, "detail": detail}},
@@ -106,9 +104,7 @@ def require_auth(
     header = request.headers.get("authorization")
     parts = header.split(None, 1) if header else []
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise ApiError(
-            401, "E_AUTH", "missing or malformed 'Authorization: Bearer <token>' header"
-        )
+        raise ApiError(401, "E_AUTH", "missing or malformed 'Authorization: Bearer <token>' header")
     try:
         ctx = auth.authenticate(conn, parts[1])
     except auth.RateLimitExceededError as exc:
@@ -117,18 +113,14 @@ def require_auth(
         raise ApiError(401, exc.code, str(exc)) from exc
 
     # Audit every authenticated *mutating* request exactly once (T4.2).
-    auth.record_mutation(
-        conn, request.method, f"{request.method} {request.url.path}", ctx
-    )
+    auth.record_mutation(conn, request.method, f"{request.method} {request.url.path}", ctx)
     return ctx
 
 
 def require_human(ctx: auth.AuthContext = Depends(require_auth)) -> auth.AuthContext:
     """Reject agent-class tokens on human-only (∅) endpoints (spec §4.11)."""
     if ctx.token_class != "human":
-        raise ApiError(
-            403, "E_HUMAN_ONLY", "this endpoint accepts human-class tokens only"
-        )
+        raise ApiError(403, "E_HUMAN_ONLY", "this endpoint accepts human-class tokens only")
     return ctx
 
 
@@ -137,7 +129,7 @@ def mutation_gate(
     ctx: auth.AuthContext,
     request: Request,
     *,
-    node_id: str,
+    node_id: str | None,
     payload: Any = None,
 ) -> dict[str, Any] | None:
     """Agent-token proposal rewrite for non-∅ mutating endpoints (task T4.6, spec §4.11).
@@ -158,13 +150,10 @@ def mutation_gate(
       normal mutation response (routes use this to short-circuit before
       calling the mutating ``store`` function).
 
-    ``node_id`` becomes the review item's ``node_id`` (``NOT NULL`` in the
-    frozen §4.4 schema): for a route targeting an *existing* node/edge this
-    is that target's id (for ``DELETE /edges/{id}`` the target's ``dst`` —
-    see the T4.6 SPEC-QUESTION in ``docs/spec-questions.md``); for
-    ``POST /nodes`` (create — no existing node yet) the caller must pass a
-    freshly-minted placeholder id from ``store.mint_unassigned_node_id``
-    (also a T4.6 SPEC-QUESTION, same file).
+    ``node_id`` becomes the review item's affected node for a route targeting
+    an existing node/edge (edge proposals use ``dst``). For ``POST /nodes``,
+    pass ``None``: an unapproved proposal does not reserve a node identity;
+    the review row id correlates it until T7.5 mints the real node on approval.
 
     Never call this from a ∅ (human-only) endpoint — those depend on
     ``require_human`` instead, which rejects agent tokens outright (403

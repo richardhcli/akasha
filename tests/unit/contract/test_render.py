@@ -45,10 +45,7 @@ def test_paragraph_rendering() -> None:
     )
     out = render(bs)
     assert out == (
-        "---\n"
-        f"tm: {grammar.CONTRACT_VERSION}\n"
-        "---\n"
-        f"Water boils at 100C at sea level ^tm-{id_}\n"
+        f"---\ntm: {grammar.CONTRACT_VERSION}\n---\nWater boils at 100C at sea level ^tm-{id_}\n"
     )
 
 
@@ -201,6 +198,48 @@ def test_front_matter_absent_when_unmanaged() -> None:
     out = render(bs)
     assert not out.startswith("---")
     assert out == f"Unmanaged claim ^tm-{id_}\n"
+
+
+# --- lossless container (task T5.8-2, human-decided 2026-07-13, fable-designed) ----
+
+
+def test_raw_lines_interleaved_verbatim_by_position() -> None:
+    id_ = _id()
+    bs = BlockSet(
+        managed=True,
+        contract_version=grammar.CONTRACT_VERSION,
+        blocks={
+            id_: Block(id=id_, kind="paragraph", text="A claim", line_no=2),
+        },
+        raw_lines={1: "Some prose above", 3: "Trailing prose below"},
+    )
+    out = render(bs)
+    body = out.split("---\n", 2)[-1]
+    assert body == f"Some prose above\nA claim ^tm-{id_}\nTrailing prose below\n"
+
+
+def test_non_canonical_front_matter_emitted_verbatim() -> None:
+    bs = BlockSet(
+        managed=True,
+        contract_version=grammar.CONTRACT_VERSION,
+        front_matter=["---", "title: My Note", f"tm: {grammar.CONTRACT_VERSION}", "---"],
+    )
+    out = render(bs)
+    assert out.startswith(f"---\ntitle: My Note\ntm: {grammar.CONTRACT_VERSION}\n---\n")
+
+
+def test_embed_sharing_a_raw_lines_line_no_is_not_re_emitted() -> None:
+    """An embed already inline in a raw (multi-embed/prose) line is not duplicated."""
+    embed_id = _id()
+    bs = BlockSet(
+        managed=True,
+        contract_version=grammar.CONTRACT_VERSION,
+        embeds=[Embed(path="Note", id=embed_id, line_no=1)],
+        raw_lines={1: f"prose with ![[Note#^tm-{embed_id}]] inline"},
+    )
+    out = render(bs)
+    body = out.split("---\n", 2)[-1]
+    assert body == f"prose with ![[Note#^tm-{embed_id}]] inline\n"
 
 
 # --- canonical idempotence ------------------------------------------------------

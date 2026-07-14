@@ -1,9 +1,9 @@
 """ID minting, checksum, and validation (build-plan task T2.1, spec §4.1).
 
 An akasha id is an 8-char lowercase base32 string: 7 random "core" chars
-(from ``secrets``) followed by 1 weighted-checksum char. Vault anchors wrap
-the id as ``^tm-<id8>``; the bare id is never shown without that prefix in
-files (spec §4.1).
+(from ``secrets``) followed by 1 weighted-checksum char. Contract anchors
+wrap the id as ``^tm-<id8>``; the bare id is never shown without that prefix
+in managed files (spec §4.1).
 
 Minting here is pure (no DB access) — collision-retry against
 ``nodes.id`` is the store layer's job (T1.x), not this module's.
@@ -65,6 +65,6 @@ def validate(id_: str) -> None:
         raise IdError(f"id {id_!r} checksum mismatch: expected {expected!r}, got {check!r}")
 
 
-def vault_anchor(id_: str) -> str:
-    """Vault anchor form for an id: ``^tm-<id8>`` (spec §4.1)."""
+def contract_anchor(id_: str) -> str:
+    """Managed-file contract anchor for an id: ``^tm-<id8>`` (spec §4.1)."""
     return "^tm-" + id_

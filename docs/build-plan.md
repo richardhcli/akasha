@@ -8,7 +8,7 @@
 ## How to use this plan (read before doing anything)
 
 1. **Do tasks strictly in ID order** within a phase, and never start a task whose `Depends on` tasks are not all `DONE`. When in doubt, stop and ask; do not improvise ordering.
-2. **One task = one focused change.** Touch only the files listed under `Files`. If you feel you must touch a file not listed, that is a signal the task is misunderstood — stop and add a `# SPEC-QUESTION:` note in `docs/spec-questions.md` instead of guessing.
+2. **One task = one focused change.** Touch only the files listed under `Files`. If you feel you must touch a file not listed, that is a signal the task is misunderstood — stop and add a `# SPEC-QUESTION:` note in `docs/spec-questions.md` instead of guessing. Rule 5 is the sole precedence exception: when an API/TMS task necessarily persists state and its Files list accidentally omits `kernel/store.py`, add only the minimal store helper and record/correct the omission; never write SQLite from the higher layer.
 3. **Never invent** schema, endpoints, ID formats, or grammar beyond the spec (spec rule 0.2). Implement the narrowest reading of any ambiguity.
 4. **Never edit golden files, fixtures, or acceptance tests to make code pass** (spec rule 0.3). If a golden file looks wrong, that is a `# SPEC-QUESTION:`, not an edit.
 5. **All persistent writes go through `kernel/store.py`** (spec rule 0.4); no other module writes SQLite.
@@ -134,7 +134,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Depends on** — T0.1.
 - **Files** — `src/akasha/kernel/ids.py`, `tests/unit/test_ids.py`.
 - **Spec** — §4.1 (verbatim `checksum` function; alphabet `A`; 7 core + 1 checksum; validation raises `E_ID_CHECKSUM`; mint retries collision, loop bound 10).
-- **Steps** — (1) Define `A = "abcdefghijklmnopqrstuvwxyz234567"`. (2) Copy the `checksum(core)` function verbatim from §4.1. (3) `mint()` uses `secrets` for 7 core chars, appends checksum. (4) `validate(id)` checks length 8, alphabet membership, checksum match; on mismatch signal `E_ID_CHECKSUM` (never guess). (5) `vault_anchor(id) -> "^tm-"+id`. (6) DB-collision retry belongs to the store (T1.x), not here — expose a pure `mint()`.
+- **Steps** — (1) Define `A = "abcdefghijklmnopqrstuvwxyz234567"`. (2) Copy the `checksum(core)` function verbatim from §4.1. (3) `mint()` uses `secrets` for 7 core chars, appends checksum. (4) `validate(id)` checks length 8, alphabet membership, checksum match; on mismatch signal `E_ID_CHECKSUM` (never guess). (5) `contract_anchor(id) -> "^tm-"+id`. (6) DB-collision retry belongs to the store (T1.x), not here — expose a pure `mint()`.
 - **Verify** — `uv run pytest tests/unit/test_ids.py`
 - **DoD** — tests prove: minted IDs validate; a hand-crafted bad-checksum string raises `E_ID_CHECKSUM`; checksum matches §4.1 on ≥3 known vectors; anchor form is `^tm-<id8>`.
 
@@ -339,7 +339,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 ### T4.2 — Audit log
 - **Goal** — Append `(ts, token_id, action, detail)` to `audit_log` on every mutating action.
 - **Depends on** — T4.1.
-- **Files** — `src/akasha/api/auth.py` or middleware, `tests/unit/api/test_audit.py`.
+- **Files** — `src/akasha/api/auth.py` or middleware, `src/akasha/kernel/store.py` (minimal append helper required by rule 5), `tests/unit/api/test_audit.py`.
 - **Spec** — §4.4 `audit_log`, §4.11.
 - **Steps** — (1) Middleware/decorator records each mutation. (2) Never log secrets. (3) Append-only.
 - **Verify** — `uv run pytest tests/unit/api/test_audit.py`
@@ -363,19 +363,19 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Verify** — `uv run pytest tests/integration/test_api.py -k nodes`
 - **DoD** — CRUD + as_of + history + neighborhood work; S1+ delete without redirect → 409 `E_NEEDS_REDIRECT`; vet from an agent token is rejected.
 
-### T4.5 — Edge, search, token, vault routes
-- **Goal** — `POST/DELETE /edges`, `GET /search`, `GET/POST/DELETE /tokens`, `GET/POST /vaults`.
+### T4.5 — Edge, search, token, sync-root routes
+- **Goal** — `POST/DELETE /edges`, `GET /search`, `GET/POST/DELETE /tokens`, `GET/POST /sync/roots`.
 - **Depends on** — T4.4, T1.4.
-- **Files** — `src/akasha/api/routes/{edges.py,search.py,tokens.py}`, `tests/integration/test_api.py`.
-- **Spec** — §4.11 (`/edges` validates facet_binding rule; `/tokens` and `/vaults` human-only ∅; `/search` FTS).
-- **Steps** — (1) `POST /edges` validates facet_binding (T1.2). (2) `/search` returns FTS hits. (3) `/tokens` and `/vaults` are human-only ∅. (4) `/vaults` registers/lists managed vaults (state only; watching arrives in M5).
-- **Verify** — `uv run pytest tests/integration/test_api.py -k "edges or search or tokens or vaults"`
-- **DoD** — edge creation enforces facet_binding; search returns hits; token/vault mutation from an agent token is rejected.
+- **Files** — `src/akasha/api/routes/{edges.py,search.py,tokens.py,sync_roots.py}`, `src/akasha/kernel/store.py` (minimal token/sync-root helpers required by rule 5), `tests/integration/test_api.py`.
+- **Spec** — §4.11 (`/edges` validates facet_binding rule; `/tokens` and `/sync/roots` human-only ∅; `/search` FTS).
+- **Steps** — (1) `POST /edges` validates facet_binding (T1.2). (2) `/search` returns FTS hits. (3) `/tokens` and `/sync/roots` are human-only ∅. (4) `/sync/roots` registers/lists durable filesystem roots; watching arrives in M5.
+- **Verify** — `uv run pytest tests/integration/test_api.py -k "edges or search or tokens or sync_roots"`
+- **DoD** — edge creation enforces facet_binding; search returns hits; token/sync-root mutation from an agent token is rejected.
 
 ### T4.6 — Agent-token proposal rewriting
 - **Goal** — Agent-class mutations to non-∅ endpoints become review items `cause_kind=proposal`.
 - **Depends on** — T4.4, T4.5.
-- **Files** — `src/akasha/api/routes/*` (shared dependency), `tests/integration/test_api.py::test_agent_writes_become_proposals`.
+- **Files** — `src/akasha/api/routes/*` (shared dependency), `src/akasha/api/deps.py`, `src/akasha/kernel/store.py` (minimal review helper required by rule 5), `tests/integration/test_api.py::test_agent_writes_become_proposals`.
 - **Spec** — §4.11 (agent mutations rewritten to proposals unless ∅), §8 (reserve `cause_kind=proposal`).
 - **Steps** — (1) A shared dependency intercepts agent-class mutations on non-∅ endpoints. (2) Instead of mutating, enqueue a review item `cause_kind=proposal`. (3) Human tokens mutate directly. (4) ∅ endpoints reject agent tokens outright.
 - **Verify** — `uv run pytest tests/integration/test_api.py::test_agent_writes_become_proposals`
@@ -408,20 +408,38 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Verify** — `uv run pytest tests/integration/test_daemon_lock.py`
 - **DoD** — second daemon instance refuses to start while the first holds the lock; docs file exists with XML + NSSM sections.
 
+### T4.10 — Durable sync-root registry + terminology refinement
+- **Goal** — Replace ephemeral `/vaults` registration with durable `/sync/roots` state and precise hub/spoke/sync-root terminology.
+- **Depends on** — T4.9.
+- **Files** — `migrations/002_refine_m4_contract.sql`, `src/akasha/api/routes/{vaults.py,sync_roots.py}`, `src/akasha/api/app.py`, `src/akasha/kernel/store.py`, `tests/unit/kernel/test_schema.py`, `tests/integration/test_api.py`, `docs/api-snapshot/openapi.json`.
+- **Spec** — §4.4 `sync_roots`/`sync_files`, §4.11 `/sync/roots`, vision §7.8–§7.9 (registered watched roots survive daemon restart).
+- **Steps** — (1) Add the forward schema refinement and preserve existing rows. (2) Persist registration only through store helpers. (3) remove the in-memory registry and old `/vaults` route. (4) Regenerate OpenAPI. (5) Prove a registration is visible from a newly-created app/connection after restart.
+- **Verify** — `uv run pytest tests/unit/kernel/test_schema.py tests/integration/test_api.py -k "schema or sync_roots" && uv run pytest tests/integration/test_openapi_snapshot.py`
+- **DoD** — `/v1/sync/roots` is human-only, durable before any file sync, and the old `/v1/vaults` route is absent.
+
+### T4.11 — Create-proposal identity refinement
+- **Goal** — Make create-node proposals subjectless until approval; never reserve a node id for an unapproved proposal.
+- **Depends on** — T4.10, T4.6.
+- **Files** — `migrations/002_refine_m4_contract.sql`, `src/akasha/kernel/store.py`, `src/akasha/api/deps.py`, `src/akasha/api/routes/nodes.py`, `tests/unit/kernel/test_schema.py`, `tests/integration/test_api.py`, `docs/api-snapshot/openapi.json`.
+- **Spec** — §4.4 nullable `review_queue.node_id`; §4.11 canonical proposal envelope and mint-on-approval rule.
+- **Steps** — (1) Permit `node_id=NULL` only where no existing node exists. (2) Remove unassigned node-id minting. (3) Agent `POST /nodes` queues `{method,path,body}` with no node mutation or reservation. (4) Keep existing-node and edge proposals associated with their affected node (`dst` for edges). (5) T7.5 approval invokes `create_node`, which mints the real id.
+- **Verify** — `uv run pytest tests/unit/kernel/test_schema.py tests/integration/test_api.py::test_agent_writes_become_proposals`
+- **DoD** — create proposal has `node_id=NULL`, canonical recoverable payload, and no `nodes` row; all other proposal targets remain unchanged.
+
 ---
 
-## M5 — Sync engine (Depends on: M4)
+## M5 — Sync engine (Depends on: M4, T4.10)
 
 **Milestone DoD (spec):** `make battery` — the scripted edit battery §6.2 passes 100% with 0 silent guesses; `test_crash_recovery_idempotent` converges on restart.
 
 ### T5.1 — Base store (per-file snapshots)
 - **Goal** — Store/retrieve the last-agreed canonical bytes per file (`base_store.py`).
-- **Depends on** — T1.1 (objects table), T2.2.
+- **Depends on** — T1.1 (objects table), T2.2, T4.10.
 - **Files** — `src/akasha/sync/base_store.py`, `tests/unit/sync/test_base_store.py`.
 - **Spec** — §4.8 (`B = base_store.get(path)`), §4.4 (`objects` blob table; `sync_files.base_hash`).
-- **Steps** — (1) `put(path, bytes)` stores canonical bytes as an object and updates `sync_files.base_hash`. (2) `get(path)` returns last-agreed bytes or None. (3) Never store non-canonical bytes.
+- **Steps** — (1) `put(sync_root_id, path, bytes)` validates the durable sync root, stores canonical bytes as an object, and upserts `sync_files(sync_root_id, base_hash, ...)`. (2) `get(path)` returns last-agreed bytes or None. (3) Never store non-canonical bytes.
 - **Verify** — `uv run pytest tests/unit/sync/test_base_store.py`
-- **DoD** — put/get round-trips canonical bytes; a fresh path returns None.
+- **DoD** — put/get round-trips canonical bytes and retains its sync-root association; a fresh path returns None; an unknown sync-root id is rejected.
 
 ### T5.2 — Origin / echo-suppression (`origin.py`)
 - **Goal** — Record daemon writes so watcher events matching them are dropped.
@@ -437,7 +455,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Depends on** — T5.2.
 - **Files** — `src/akasha/sync/watcher.py`, `tests/unit/sync/test_watcher.py`.
 - **Spec** — §4.8 (500 ms debounce), M5 (cloud-path detection under OneDrive/Dropbox markers ⇒ warn + conservative profile), §6.2 E18/E19.
-- **Steps** — (1) Debounce rapid bursts into a single cycle (500 ms). (2) Detect cloud markers in the vault path; when present, log a warning and enable a conservative profile flag. (3) Route change events to reconcile.
+- **Steps** — (1) Load all durable sync roots and watch their `root_path`s. (2) Debounce rapid bursts into a single cycle (500 ms). (3) Detect cloud markers in an Obsidian vault path; when present, log a warning and enable a conservative profile flag. (4) Route change events to reconcile.
 - **Verify** — `uv run pytest tests/unit/sync/test_watcher.py`
 - **DoD** — a burst of N events yields one cycle (E18); a simulated OneDrive path sets the warning + conservative flag (E19).
 
@@ -446,7 +464,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Depends on** — T5.1, T5.2, T5.3, T3.5, T1.3.
 - **Files** — `src/akasha/sync/reconcile.py`, `tests/unit/sync/test_reconcile.py`.
 - **Spec** — §4.8 (full pseudocode: quiet/hub-only shortcuts; `diff_blocks` op kinds modified|created|deleted|moved|checkbox_toggled|reparented; pause threshold; apply certain-repairs; conflict on both-sides edit; canonical write-back; `base_store.put`).
-- **Steps** — (1) Implement the pipeline verbatim to the pseudocode order. (2) `diff_blocks(base, vault)` keyed by anchor id producing the six op kinds. (3) Apply ops only via the store API with `origin='sync'`. (4) Both-sides edit ⇒ conflict queue (T5.5). (5) Canonical write-back + `base_store.put`. (6) **Zero silent guesses** — anything uncertain becomes a review item.
+- **Steps** — (1) Implement the pipeline verbatim to the pseudocode order. (2) `diff_blocks(base, current)` keyed by anchor id producing the six op kinds. (3) Apply ops only via the store API with `origin='sync'`. (4) Both-sides edit ⇒ conflict queue (T5.5). (5) Canonical write-back + `base_store.put(sync_root_id, path, bytes)`. (6) **Zero silent guesses** — anything uncertain becomes a review item.
 - **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py`
 - **DoD** — golden reconcile cases (`tests/golden/reconcile/<case>/`) produce the `expected.md` and `expected_ops.json`; quiet and hub-only shortcuts short-circuit; no op is applied outside the store API.
 
@@ -472,8 +490,8 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Goal** — `GET /sync/status`, `POST /sync/rescan` (deferred from M4).
 - **Depends on** — T5.4, T4.3.
 - **Files** — `src/akasha/api/routes/sync.py`, `tests/integration/test_api.py` (sync cases), `docs/api-snapshot/openapi.json` (regenerate in same PR).
-- **Spec** — §4.11 (`/sync/status`, `/sync/rescan`: per-vault state, violations, pauses).
-- **Steps** — (1) `/sync/status` returns per-vault state, violation list, pause info. (2) `/sync/rescan` triggers a full reconcile. (3) Regenerate the OpenAPI snapshot in the same change (T4.7 gate).
+- **Spec** — §4.11 (`/sync/status`, `/sync/rescan`: per-sync-root state, violations, pauses).
+- **Steps** — (1) `/sync/status` returns per-sync-root state, violation list, pause info. (2) `/sync/rescan` triggers a full reconcile. (3) Regenerate the OpenAPI snapshot in the same change (T4.7 gate).
 - **Verify** — `uv run pytest tests/integration/test_api.py -k sync && uv run pytest tests/integration/test_openapi_snapshot.py`
 - **DoD** — status reports violations/pauses; rescan converges; snapshot gate green.
 
@@ -581,10 +599,10 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 
 ### T7.5 — Review queue: resolutions + daily cap (`review.py`)
 - **Goal** — `enqueue_review`, `resolve_review`, and the ordered daily active-queue cap of 10.
-- **Depends on** — T7.1, T1.6.
+- **Depends on** — T7.1, T1.6, T4.11.
 - **Files** — `src/akasha/tms/review.py`, `tests/integration/test_tms.py`.
 - **Spec** — §4.9 resolutions (`still_holds`, `revised` [new commit, itself classified], `retracted`, `dismissed` [violations only]); daily cap 10 ordered by (staleness age, inbound-edge count, user flag).
-- **Steps** — (1) Implement the four resolutions; `revised` submits a new commit that is itself classified (may re-trigger invalidation). (2) `dismissed` only for violation items. (3) Enforce the daily active cap of 10 with the specified ordering.
+- **Steps** — (1) Implement the four resolutions; `revised` submits a new commit that is itself classified (may re-trigger invalidation). (2) `dismissed` only for violation items. (3) On approval of a create-node proposal (`cause_kind=proposal`, `node_id=NULL`), parse the canonical `{method,path,body}` envelope, call `create_node`, and return the newly minted id; never mint before approval. (4) Enforce the daily active cap of 10 with the specified ordering.
 - **Verify** — `uv run pytest tests/integration/test_tms.py -k review`
 - **DoD** — each resolution behaves per spec; `revised` re-classifies its commit; the active queue never exceeds 10 and is ordered correctly.
 
@@ -640,11 +658,11 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **DoD** — resolutions work one-click; cap banner appears when 10 active items exist.
 
 ### T8.4 — Search + Sync views
-- **Goal** — Search view (FTS) and Sync view (per-vault status, violations, pause&diff inspector).
+- **Goal** — Search view (FTS) and Sync view (per-sync-root status, violations, pause&diff inspector).
 - **Depends on** — T8.1, T4.5, T5.7.
 - **Files** — `src/akasha/ui/templates/{search.html,sync.html}`, `src/akasha/ui/static/app.js`.
 - **Spec** — §4.13 (Search, Sync views incl. pause&diff inspector).
-- **Steps** — (1) Search box over `/search`. (2) Sync view lists per-vault status + violations + a pause&diff inspector.
+- **Steps** — (1) Search box over `/search`. (2) Sync view lists per-sync-root status + violations + a pause&diff inspector; Obsidian-specific labels may say “vault”.
 - **Verify** — Playwright step: run a search; open the sync view and inspect a paused file.
 - **DoD** — search returns hits; sync view renders violations and the pause&diff inspector.
 

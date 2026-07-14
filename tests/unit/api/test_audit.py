@@ -28,9 +28,7 @@ def _audit_rows(conn: sqlite3.Connection) -> list[tuple]:
 
 
 def _ctx(token_id: str = "abc23456") -> auth.AuthContext:
-    return auth.AuthContext(
-        token_id=token_id, name="t", token_class="human", rate_per_min=None
-    )
+    return auth.AuthContext(token_id=token_id, name="t", token_class="human", rate_per_min=None)
 
 
 # --- store.append_audit: the append-only primitive -------------------------

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -9,25 +10,34 @@ from fastapi.testclient import TestClient
 
 from akasha.api import auth
 from akasha.api.app import create_app
-from akasha.api.routes import vaults as vaults_routes
+from akasha.contract.parser import parse
+from akasha.contract.render import render
 from akasha.kernel import store
+from akasha.kernel.canonical import canonicalize_text
+from akasha.kernel.ids import contract_anchor
+from akasha.sync import base_store
 
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limit_state():
     auth._call_log.clear()
-    vaults_routes._reset_registry()
     yield
     auth._call_log.clear()
-    vaults_routes._reset_registry()
 
 
 def _insert_token(conn: sqlite3.Connection, token_id: str, secret: str, cls: str) -> None:
     conn.execute(
         "INSERT INTO tokens (id, name, class, secret_hash, rate_per_min, created_at, "
         "revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (token_id, token_id, cls, auth.hash_secret(secret), None,
-         "2026-01-01T00:00:00.000000+00:00", None),
+        (
+            token_id,
+            token_id,
+            cls,
+            auth.hash_secret(secret),
+            None,
+            "2026-01-01T00:00:00.000000+00:00",
+            None,
+        ),
     )
     conn.commit()
 
@@ -52,8 +62,9 @@ def api(tmp_path):
 
 
 def _create(client, headers, node_type="claim", body="hello world", **kw):
-    return client.post("/v1/nodes", json={"node_type": node_type, "body": body, **kw},
-                       headers=headers)
+    return client.post(
+        "/v1/nodes", json={"node_type": node_type, "body": body, **kw}, headers=headers
+    )
 
 
 def test_nodes_create_and_get_includes_maturity(api):
@@ -148,10 +159,12 @@ def test_nodes_split_returns_redirect(api):
     node = _create(client, h, body="whole").json()
     resp = client.post(
         f"/v1/nodes/{node['id']}/split",
-        json={"parts": [
-            {"node_type": "claim", "body": "part one"},
-            {"node_type": "claim", "body": "part two"},
-        ]},
+        json={
+            "parts": [
+                {"node_type": "claim", "body": "part one"},
+                {"node_type": "claim", "body": "part two"},
+            ]
+        },
         headers=h,
     )
     assert resp.status_code == 200
@@ -315,9 +328,7 @@ def test_edges_delete_soft_retracts_and_drops_from_neighborhood(api):
     assert resp.status_code == 200
     assert resp.json()["retracted"] is True
 
-    row = conn.execute(
-        "SELECT retracted_at FROM edges WHERE id=?", (created["id"],)
-    ).fetchone()
+    row = conn.execute("SELECT retracted_at FROM edges WHERE id=?", (created["id"],)).fetchone()
     assert row is not None  # soft retract: row still present, never DELETEd
     assert row[0] is not None  # retracted_at is set
 
@@ -334,10 +345,16 @@ def test_edges_delete_missing_returns_404(api):
 
 def test_edges_require_auth_missing_token_401(api):
     client = api["client"]
-    resp = client.post("/v1/edges", json={
-        "src": "aaaaaaaa", "dst": "bbbbbbbb", "edge_type": "composes",
-        "facet_binding": None, "provenance": "human",
-    })
+    resp = client.post(
+        "/v1/edges",
+        json={
+            "src": "aaaaaaaa",
+            "dst": "bbbbbbbb",
+            "edge_type": "composes",
+            "facet_binding": None,
+            "provenance": "human",
+        },
+    )
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "E_AUTH"
 
@@ -376,9 +393,7 @@ def test_search_requires_auth_missing_token_401(api):
 
 def test_tokens_human_can_create_list_revoke(api):
     client, h = api["client"], api["human"]
-    created = client.post(
-        "/v1/tokens", json={"name": "ci-bot", "token_class": "agent"}, headers=h
-    )
+    created = client.post("/v1/tokens", json={"name": "ci-bot", "token_class": "agent"}, headers=h)
     assert created.status_code == 201
     body = created.json()
     assert body["name"] == "ci-bot"
@@ -391,8 +406,7 @@ def test_tokens_human_can_create_list_revoke(api):
     ids = [t["id"] for t in listed.json()["tokens"]]
     assert body["id"] in ids
     # never exposes a secret on list
-    assert all("secret_hash" not in t and "bearer_token" not in t
-                for t in listed.json()["tokens"])
+    assert all("secret_hash" not in t and "bearer_token" not in t for t in listed.json()["tokens"])
 
     revoked = client.delete(f"/v1/tokens/{body['id']}", headers=h)
     assert revoked.status_code == 200
@@ -432,16 +446,12 @@ def test_tokens_agent_rejected_on_every_verb(api):
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
     # POST (create)
-    resp = client.post(
-        "/v1/tokens", json={"name": "x", "token_class": "agent"}, headers=agent
-    )
+    resp = client.post("/v1/tokens", json={"name": "x", "token_class": "agent"}, headers=agent)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
     # DELETE (revoke) — use a real token id created by a human so the 403
     # can't be confused with a 404
-    real = client.post(
-        "/v1/tokens", json={"name": "y", "token_class": "human"}, headers=h
-    ).json()
+    real = client.post("/v1/tokens", json={"name": "y", "token_class": "human"}, headers=h).json()
     resp = client.delete(f"/v1/tokens/{real['id']}", headers=agent)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
@@ -454,42 +464,73 @@ def test_tokens_require_auth_missing_token_401(api):
     assert resp.json()["error"]["code"] == "E_AUTH"
 
 
-# --- T4.5: /vaults ---------------------------------------------------------
+# --- T4.10: /sync/roots ----------------------------------------------------
 
 
-def test_vaults_human_can_register_and_list(api):
+def test_sync_roots_human_can_register_and_list(api):
     client, h = api["client"], api["human"]
     resp = client.post(
-        "/v1/vaults", json={"name": "notes", "root_path": "/home/user/notes"}, headers=h
+        "/v1/sync/roots",
+        json={"name": "notes", "root_path": "/home/user/notes"},
+        headers=h,
     )
     assert resp.status_code == 201
+    assert resp.json()["id"]
     assert resp.json()["name"] == "notes"
     assert resp.json()["root_path"] == "/home/user/notes"
 
-    listed = client.get("/v1/vaults", headers=h)
+    listed = client.get("/v1/sync/roots", headers=h)
     assert listed.status_code == 200
-    names = [v["name"] for v in listed.json()["vaults"]]
+    names = [root["name"] for root in listed.json()["sync_roots"]]
     assert "notes" in names
 
 
-def test_vaults_agent_rejected_on_get_and_post(api):
+def test_sync_roots_survive_connection_restart(tmp_path):
+    db_path = tmp_path / "restart.db"
+    conn = store.connect(db_path, check_same_thread=False)
+    store.run_migrations(conn)
+    secret = auth.mint_secret()
+    _insert_token(conn, "humanroot", secret, "human")
+    headers = {"Authorization": f"Bearer {auth.format_bearer_token('humanroot', secret)}"}
+    with TestClient(create_app(conn=conn)) as client:
+        response = client.post(
+            "/v1/sync/roots",
+            json={"name": "durable", "root_path": "/home/user/durable"},
+            headers=headers,
+        )
+        assert response.status_code == 201
+    conn.close()
+
+    reopened = store.connect(db_path, check_same_thread=False)
+    try:
+        roots = store.list_sync_roots(reopened)
+        assert [(root["name"], root["root_path"]) for root in roots] == [
+            ("durable", "/home/user/durable")
+        ]
+    finally:
+        reopened.close()
+
+
+def test_sync_roots_agent_rejected_on_get_and_post(api):
     client, agent = api["client"], api["agent"]
-    resp = client.get("/v1/vaults", headers=agent)
+    resp = client.get("/v1/sync/roots", headers=agent)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
 
-    resp = client.post(
-        "/v1/vaults", json={"name": "x", "root_path": "/tmp/x"}, headers=agent
-    )
+    resp = client.post("/v1/sync/roots", json={"name": "x", "root_path": "/tmp/x"}, headers=agent)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
 
 
-def test_vaults_require_auth_missing_token_401(api):
+def test_sync_roots_require_auth_missing_token_401(api):
     client = api["client"]
-    resp = client.get("/v1/vaults")
+    resp = client.get("/v1/sync/roots")
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "E_AUTH"
+
+
+def test_old_vaults_route_is_absent(api):
+    assert api["client"].get("/v1/vaults").status_code == 404
 
 
 # --- T4.6: agent-token proposal rewriting -----------------------------------
@@ -523,7 +564,8 @@ def test_agent_writes_become_proposals(api):
     assert row[0] == review["id"]
     assert row[2] == "proposal"  # cause_kind exactly 'proposal'
     assert row[5] == review["created_at"]  # created_at persisted
-    assert row[1] == review["node_id"]  # node_id persisted
+    assert row[1] is None
+    assert review["node_id"] is None
 
     # the proposed request is recoverable from cause_ref (canonical JSON)
     import json
@@ -540,9 +582,7 @@ def test_human_post_nodes_mutates_directly_no_proposal(api):
     resp = _create(client, h, body="a human-created claim")
     assert resp.status_code == 201
     node = resp.json()
-    assert conn.execute(
-        "SELECT 1 FROM nodes WHERE id=?", (node["id"],)
-    ).fetchone() is not None
+    assert conn.execute("SELECT 1 FROM nodes WHERE id=?", (node["id"],)).fetchone() is not None
     assert len(_review_rows(conn)) == 0
 
 
@@ -601,7 +641,7 @@ def test_agent_post_edges_becomes_proposal_and_does_not_mutate(api):
     assert resp.status_code == 202
     review = resp.json()["review"]
     assert review["cause_kind"] == "proposal"
-    assert review["node_id"] == dst["id"]  # narrowest-defensible target (T4.6 SPEC-QUESTION)
+    assert review["node_id"] == dst["id"]
 
     nb = client.get(f"/v1/nodes/{dst['id']}/neighborhood", headers=h).json()
     assert len(nb["edges"]) == 0  # no edge was actually created
@@ -631,9 +671,7 @@ def test_agent_delete_edges_becomes_proposal_and_does_not_mutate(api):
     assert review["cause_kind"] == "proposal"
     assert review["node_id"] == dst["id"]
 
-    row = conn.execute(
-        "SELECT retracted_at FROM edges WHERE id=?", (edge["id"],)
-    ).fetchone()
+    row = conn.execute("SELECT retracted_at FROM edges WHERE id=?", (edge["id"],)).fetchone()
     assert row[0] is None  # never retracted
 
 
@@ -648,16 +686,12 @@ def test_agent_rejected_outright_on_every_empty_endpoint_no_proposal(api):
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
 
     # POST /tokens
-    resp = client.post(
-        "/v1/tokens", json={"name": "x", "token_class": "agent"}, headers=agent
-    )
+    resp = client.post("/v1/tokens", json={"name": "x", "token_class": "agent"}, headers=agent)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
 
-    # POST /vaults
-    resp = client.post(
-        "/v1/vaults", json={"name": "x", "root_path": "/tmp/x"}, headers=agent
-    )
+    # POST /sync/roots
+    resp = client.post("/v1/sync/roots", json={"name": "x", "root_path": "/tmp/x"}, headers=agent)
     assert resp.status_code == 403
     assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
 
@@ -671,10 +705,12 @@ def test_agent_split_and_merge_also_become_proposals(api):
 
     resp = client.post(
         f"/v1/nodes/{whole['id']}/split",
-        json={"parts": [
-            {"node_type": "claim", "body": "part one"},
-            {"node_type": "claim", "body": "part two"},
-        ]},
+        json={
+            "parts": [
+                {"node_type": "claim", "body": "part one"},
+                {"node_type": "claim", "body": "part two"},
+            ]
+        },
         headers=agent,
     )
     assert resp.status_code == 202
@@ -694,3 +730,136 @@ def test_agent_split_and_merge_also_become_proposals(api):
     assert client.get(f"/v1/nodes/{other['id']}", headers=h).status_code == 200
 
     assert len(_review_rows(conn)) == 2
+
+
+# --- T5.7: GET /sync/status · POST /sync/rescan -----------------------------
+
+
+def _managed(body: str) -> str:
+    return canonicalize_text(f"---\ntm: 1\n---\n{body}")
+
+
+def test_sync_status_reports_seeded_roots_and_files(api, tmp_path):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    root = client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    ).json()
+    path = str(tmp_path / "note.md")
+    base_store.put(conn, root["id"], path, _managed("hello\n"))
+
+    resp = client.get("/v1/sync/status", headers=h)
+    assert resp.status_code == 200
+    body = resp.json()
+    [entry] = [r for r in body["sync_roots"] if r["id"] == root["id"]]
+    assert entry["name"] == "vault"
+    assert entry["root_path"] == str(tmp_path)
+    assert [f["path"] for f in entry["files"]] == [path]
+    assert entry["files"][0]["contract_version"] == 1
+    assert entry["violations"] == []
+    assert entry["pauses"] == []
+    assert entry["conflicts"] == []
+
+
+def test_sync_status_splits_violations_pauses_and_conflicts_by_root(api, tmp_path):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    root = client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    ).json()
+    path = str(tmp_path / "note.md")
+    base_store.put(conn, root["id"], path, _managed("hello\n"))
+
+    # A plain (non-pause) violation.
+    store.enqueue_review(
+        conn,
+        None,
+        "violation",
+        cause_ref=json.dumps({"path": path, "code": "E_DUP_ID", "line_nos": [1], "message": "x"}),
+    )
+    # A pause: same cause_kind='violation', but cause_ref carries pause=true
+    # (spec/M3 follow-up -- never a distinct cause_kind, never branched on
+    # via a borrowed ViolationCode).
+    store.enqueue_review(
+        conn,
+        None,
+        "violation",
+        cause_ref=json.dumps({"path": path, "pause": True, "diff": "--- a\n+++ b\n"}),
+    )
+    # A conflict.
+    node = _create(client, h).json()
+    store.enqueue_review(
+        conn,
+        node["id"],
+        "conflict",
+        cause_ref=json.dumps({"path": path, "vault_text": "x", "base_text": "y"}),
+    )
+
+    resp = client.get("/v1/sync/status", headers=h)
+    assert resp.status_code == 200
+    body = resp.json()
+    [entry] = [r for r in body["sync_roots"] if r["id"] == root["id"]]
+
+    assert len(entry["violations"]) == 1
+    assert entry["violations"][0]["cause_kind"] == "violation"
+    assert entry["violations"][0]["path"] == path
+
+    assert len(entry["pauses"]) == 1
+    assert entry["pauses"][0]["path"] == path
+
+    assert len(entry["conflicts"]) == 1
+    assert entry["conflicts"][0]["cause_kind"] == "conflict"
+    assert entry["conflicts"][0]["node_id"] == node["id"]
+
+    assert body["unresolved"] == []  # every review correlated to a known root
+
+
+def test_sync_rescan_converges_a_real_vault_edit_and_returns_summary(api, tmp_path):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    root = client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    ).json()
+    node = _create(client, h, body="line one").json()
+    x = node["id"]
+    base_text = render(parse(_managed(f"line one {contract_anchor(x)}\n")))
+    path = tmp_path / "note.md"
+    path.write_text(_managed(f"line two {contract_anchor(x)}\n"), encoding="utf-8")
+    base_store.put(conn, root["id"], str(path), base_text)
+
+    resp = client.post("/v1/sync/rescan", headers=h)
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["files_reconciled"] == 1
+    assert summary["files_missing"] == 0
+    assert summary["reviews_open"] == 0
+
+    # Real store effects, not just an HTTP 200: the vault-side edit landed
+    # as a new commit on the hub node, and the base snapshot advanced to
+    # match the converged (canonical) file.
+    hist = client.get(f"/v1/nodes/{x}/history", headers=h).json()["history"]
+    assert len(hist) == 2
+    got = client.get(f"/v1/nodes/{x}", headers=h).json()
+    assert got["body"].strip() == "line two"
+    final_on_disk = path.read_text(encoding="utf-8")
+    assert store.read_base_snapshot(conn, root["id"], str(path)) == final_on_disk
+
+
+def test_sync_status_and_rescan_require_auth_missing_token_401(api):
+    client = api["client"]
+    resp = client.get("/v1/sync/status")
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "E_AUTH"
+
+    resp = client.post("/v1/sync/rescan")
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "E_AUTH"
+
+
+def test_sync_status_and_rescan_allow_agent_tokens(api):
+    """``/sync/*`` carries no ∅ marker in the spec table -- agents may call it too."""
+    client, agent = api["client"], api["agent"]
+    resp = client.get("/v1/sync/status", headers=agent)
+    assert resp.status_code == 200
+    assert resp.json()["sync_roots"] == []
+
+    resp = client.post("/v1/sync/rescan", headers=agent)
+    assert resp.status_code == 200
+    assert resp.json() == {"files_reconciled": 0, "files_missing": 0, "reviews_open": 0}

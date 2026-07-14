@@ -56,9 +56,7 @@ def test_create_edge_accepts_justification_edge_with_wildcard_facet_binding(tmp_
     assert edge.dst == b.id
     assert edge.facet_binding == "*"
 
-    row = conn.execute(
-        "SELECT retracted_at FROM edges WHERE id=?", (edge.id,)
-    ).fetchone()
+    row = conn.execute("SELECT retracted_at FROM edges WHERE id=?", (edge.id,)).fetchone()
     assert row is not None
     assert row[0] is None
 
@@ -131,9 +129,7 @@ def test_retract_edge_sets_retracted_at_and_drops_from_neighborhood(tmp_path):
 
     store.retract_edge(conn, edge.id)
 
-    row = conn.execute(
-        "SELECT retracted_at FROM edges WHERE id=?", (edge.id,)
-    ).fetchone()
+    row = conn.execute("SELECT retracted_at FROM edges WHERE id=?", (edge.id,)).fetchone()
     assert row[0] is not None  # row still present, never deleted
 
     result = store.neighborhood(conn, a.id, hops=1)

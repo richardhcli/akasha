@@ -1,6 +1,6 @@
-"""Parser: vault text -> ``BlockSet`` (build-plan task T3.2, spec §4.7).
+"""Parser: managed-file contract text -> ``BlockSet`` (task T3.2, spec §4.7).
 
-This module turns the raw text of a single vault file into the anchored
+This module turns one managed file's raw text into the anchored
 block/task structure described by the contract grammar v1
 (``akasha.contract.grammar``). It is line-oriented and reuses every
 token/regex from ``grammar.py`` verbatim — no pattern is redefined here.
@@ -89,12 +89,26 @@ class NewRequest(BaseModel):
 
 
 class BlockSet(BaseModel):
-    """Parsed structure of one vault file (spec §4.7).
+    """Parsed structure of one managed file (spec §4.7).
 
     ``blocks`` is keyed by anchor id and holds both paragraph and task
-    blocks in a single namespace (ids are globally unique per vault
+    blocks in a single namespace (ids are globally unique per sync root
     regardless of block kind); iteration order follows insertion order,
     which mirrors document order since ``parse()`` walks top-to-bottom.
+
+    Lossless-container fields (task T5.8-2, human-decided 2026-07-13,
+    fable-designed): a managed file is a lossless container -- lines that
+    are not contract constructs (prose, blanks, fenced examples, unknown/
+    malformed anchors, an un-minted ``^tm-new`` line) survive write-back
+    verbatim by position. ``raw_lines`` holds those verbatim lines,
+    1-indexed by source ``line_no`` (mirrors ``Block.line_no``'s
+    convention). ``front_matter`` holds the file's verbatim front-matter
+    lines (including both ``"---"`` delimiters) ONLY when they differ from
+    the canonical 3-line ``["---", "tm: <version>", "---"]`` form (e.g. an
+    extra ``title:``/``tags:`` key); ``None`` means "canonical, derive it
+    from ``contract_version``/``grammar.CONTRACT_VERSION`` at render time".
+    Both fields are additive -- every pre-existing ``BlockSet(...)``
+    construction remains valid with their defaults (``{}``/``None``).
     """
 
     managed: bool
@@ -103,6 +117,8 @@ class BlockSet(BaseModel):
     embeds: list[Embed] = []
     refs: list[Ref] = []
     new_requests: list[NewRequest] = []
+    raw_lines: dict[int, str] = {}
+    front_matter: list[str] | None = None
 
 
 # --- front matter ------------------------------------------------------------
@@ -151,14 +167,27 @@ def _parent_for_depth(stack: list[tuple[int, str]], depth: int) -> str | None:
 
 
 def parse(text: str) -> BlockSet:
-    """Parse vault file text into a :class:`BlockSet` (spec §4.7).
+    """Parse managed-file text into a :class:`BlockSet` (spec §4.7).
 
     ``text`` is split on ``"\\n"``; no canonicalization is performed here.
     Files lacking a front-matter `tm: <version>` line matching
-    ``grammar.CONTRACT_VERSION`` are unmanaged: returns an empty
-    ``BlockSet(managed=False)`` rather than raising.
+    ``grammar.CONTRACT_VERSION`` are unmanaged: returns an empty (except for
+    ``raw_lines``, see below) ``BlockSet(managed=False)`` rather than
+    raising.
+
+    Lossless-container classification (task T5.8-2, human-decided
+    2026-07-13, fable-designed): every source line is either a recognized
+    contract construct (a ``Block``, a standalone ``Embed``/``Ref`` token,
+    or a ``^tm-new`` :class:`NewRequest`) or a verbatim ``raw_lines`` entry
+    -- never silently dropped. The one exception is the single trailing
+    ``""`` artifact ``str.split("\\n")`` produces when ``text`` ends with a
+    newline (or is itself ``""``): that element is not a logical line and
+    is never captured, which keeps ``render(parse(D)) == D`` exact for
+    already-canonical (single-trailing-newline) ``D``.
     """
-    lines = text.split("\n")
+    raw_split = text.split("\n")
+    lines = raw_split[:-1] if raw_split and raw_split[-1] == "" else raw_split
+
     front_matter_lines, body_start = _front_matter_bounds(lines)
     version = _contract_version(front_matter_lines)
 
@@ -170,12 +199,19 @@ def parse(text: str) -> BlockSet:
     # anything else (including a present-but-mismatched `tm:` key) is
     # treated as unmanaged rather than guessing at a migration path.
     if version != grammar.CONTRACT_VERSION:
-        return BlockSet(managed=False)
+        return BlockSet(managed=False, raw_lines=dict(enumerate(lines, start=1)))
+
+    canonical_front_matter = ["---", f"tm: {version}", "---"]
+    front_matter_verbatim = lines[0:body_start]
+    front_matter: list[str] | None = (
+        None if front_matter_verbatim == canonical_front_matter else front_matter_verbatim
+    )
 
     blocks: dict[str, Block] = {}
     embeds: list[Embed] = []
     refs: list[Ref] = []
     new_requests: list[NewRequest] = []
+    raw_lines: dict[int, str] = {}
     task_stack: list[tuple[int, str]] = []
     in_fence = False
 
@@ -185,14 +221,17 @@ def parse(text: str) -> BlockSet:
 
         if grammar.FENCE_RE.match(line):
             in_fence = not in_fence
+            raw_lines[line_no] = line
             continue
         if in_fence:
+            raw_lines[line_no] = line
             continue
 
         task_m = grammar.TASK_LINE_RE.match(line)
         par_m = None if task_m else grammar.MANAGED_PAR_RE.match(line)
         new_m = None if (task_m or par_m) else grammar.NEW_LINE_RE.match(line)
 
+        matched_structural = True
         if task_m:
             depth = grammar.indent_depth(task_m.group("indent"))
             state: Literal["open", "done"] = "done" if task_m.group("state") == "x" else "open"
@@ -239,6 +278,36 @@ def parse(text: str) -> BlockSet:
                         shape="paragraph",
                     )
                 )
+            # An un-minted ^tm-new marker also survives as a raw line (spec
+            # T5.8-2 rule 5): render() never emits NewRequests, so without
+            # this the line would vanish on write-back if, for any reason,
+            # it isn't rewritten to a real anchor before the final parse.
+            raw_lines[line_no] = line
+        else:
+            matched_structural = False
+
+        if not matched_structural:
+            # Rule 6: a line that is EXACTLY one standalone embed/ref token
+            # becomes that Embed/Ref only -- not a raw line -- so render()'s
+            # existing block-free standalone-embed/ref reconstruction (and
+            # Direction-2 round-trip equality) is preserved verbatim.
+            embed_full = grammar.EMBED_RE.fullmatch(line)
+            ref_full = grammar.REF_RE.fullmatch(line)
+            if embed_full:
+                embeds.append(
+                    Embed(path=embed_full.group("path"), id=embed_full.group("id"), line_no=line_no)
+                )
+                continue
+            if ref_full:
+                refs.append(
+                    Ref(path=ref_full.group("path"), id=ref_full.group("id"), line_no=line_no)
+                )
+                continue
+            # Rule 7: everything else (blanks, prose, mid-line-anchor text,
+            # prose with inline wiki-links, multi-embed lines) survives
+            # verbatim as a raw line; inline embed/ref link metadata is
+            # still recorded via the finditer capture below.
+            raw_lines[line_no] = line
 
         for em in grammar.EMBED_RE.finditer(line):
             embeds.append(Embed(path=em.group("path"), id=em.group("id"), line_no=line_no))
@@ -252,4 +321,6 @@ def parse(text: str) -> BlockSet:
         embeds=embeds,
         refs=refs,
         new_requests=new_requests,
+        raw_lines=raw_lines,
+        front_matter=front_matter,
     )

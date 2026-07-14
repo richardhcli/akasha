@@ -28,7 +28,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from akasha.api import deps
-from akasha.api.routes import edges, nodes, search, tokens, vaults
+from akasha.api.routes import edges, nodes, search, sync, sync_roots, tokens
 from akasha.config import Config, default_db_path, load_config
 from akasha.contract.grammar import CONTRACT_VERSION
 from akasha.kernel import store
@@ -49,9 +49,7 @@ def app_version() -> str:
         return "0.0.0+unknown"
 
 
-def create_app(
-    config: Config | None = None, conn: sqlite3.Connection | None = None
-) -> FastAPI:
+def create_app(config: Config | None = None, conn: sqlite3.Connection | None = None) -> FastAPI:
     """Build the daemon's FastAPI app, wiring ``/health`` and the ``/v1`` routes.
 
     ``config`` defaults to ``load_config()`` (per-OS default location); the
@@ -61,9 +59,8 @@ def create_app(
     ``conn`` is the single shared WAL connection the routes use
     (``app.state.conn``). Tests inject a migrated tmp-file connection; when
     omitted, the factory opens ``config.db_path`` (default
-    ``tm-daemon/store.db``) with ``check_same_thread=False`` — see the T4.4
-    SPEC-QUESTION on the DB path and the shared-connection tradeoff — and
-    runs migrations. All SQLite writes still route through ``kernel/store.py``
+    ``tm-daemon/store.db``) with ``check_same_thread=False`` and runs
+    migrations. All SQLite writes still route through ``kernel/store.py``
     (rule 0.4).
     """
     cfg = config if config is not None else load_config()
@@ -84,13 +81,11 @@ def create_app(
     app.include_router(edges.router)
     app.include_router(search.router)
     app.include_router(tokens.router)
-    app.include_router(vaults.router)
+    app.include_router(sync_roots.router)
+    app.include_router(sync.router)
 
-    # SPEC-QUESTION (T4.3): §4.11's intro says "All under /v1" but the endpoint
-    # table cell for health writes the literal path "/health" (and health
-    # checks are conventionally unversioned + unauthenticated). Narrowest
-    # reading: mount at the literal "/health" the table shows; the versioned
-    # routers (T4.4+) mount under "/v1". Logged in docs/spec-questions.md.
+    # Operational liveness is intentionally root-level and unauthenticated;
+    # authenticated application resources are versioned under /v1.
     @app.get("/health")
     def health() -> dict[str, str | int]:  # pyright: ignore[reportUnusedFunction]
         # No auth dependency here: /health is explicitly unauthenticated

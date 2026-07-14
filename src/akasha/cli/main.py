@@ -23,9 +23,9 @@ is a thin dispatch to ``akasha.daemon.serve``.
 Global flags: ``--json`` (versioned ``cli/v1`` output, additive-only),
 ``--dry-run`` (mutating verbs print the would-be request and exit 0
 without sending it), ``--token`` (bearer). ``--base-url`` is this client's
-own (spec-silent) wiring detail for pointing at a non-default daemon —
-not one of the spec's named verbs/flags, needed only so the CLI can be
-pointed at a test daemon; defaults to the spec's ``127.0.0.1:7433``.
+documented wiring override for pointing at a non-default daemon; it also
+supports live integration tests and defaults to the spec's
+``127.0.0.1:7433``.
 
 Exit codes (spec §4.12): 0 ok · 1 error · 2 usage · 3 not found · 4
 conflict/violation/needs-redirect. Click/typer already exits 2 on its own
@@ -34,16 +34,10 @@ only needs to map *server* responses (via ``_exit_code_for``) plus a
 handful of client-side "usage" checks (e.g. a malformed ``--facet``
 value) that typer's own parser cannot validate.
 
-SPEC-QUESTION (T4.8): ``review list``/``review resolve`` call
-``GET /v1/review`` / ``POST /v1/review/{id}/resolve`` exactly as spec'd,
-but those routes do not exist yet (M7/T7.5) — the daemon currently 404s
-with FastAPI's own (non-envelope) 404 body, not the spec §4.11
-``{"error": {...}}`` shape. Narrowest reading taken: treat any
-HTTP 404 (envelope or not) as "not found" -> exit 3, via the same
-``_parse_error_body`` fallback used for any non-JSON error body. This
-verb is implemented against the *documented* endpoint shape and will
-start round-tripping for real the moment T7.5 lands the routes; no
-CLI-side change should be needed then. Logged in docs/spec-questions.md.
+``review list``/``review resolve`` call the documented future
+``GET /v1/review`` / ``POST /v1/review/{id}/resolve`` endpoints. Until
+T7.5 lands them, any HTTP 404 (envelope or not) maps to exit 3 without a
+traceback; no CLI-side contract change is expected when the routes arrive.
 """
 
 from __future__ import annotations
@@ -370,9 +364,7 @@ def search(ctx: typer.Context, q: str) -> None:
 
 
 @review_app.command("list")
-def review_list(
-    ctx: typer.Context, status: str = typer.Option("open", "--status")
-) -> None:
+def review_list(ctx: typer.Context, status: str = typer.Option("open", "--status")) -> None:
     """GET /v1/review?status=."""
     state = _state(ctx)
     result = _request(state, "GET", "/v1/review", params={"status": status})

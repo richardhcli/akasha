@@ -136,11 +136,7 @@ def test_nested_task_dedent_back_to_sibling_of_ancestor() -> None:
     root_a = _id()
     child = _id()
     root_b = _id()
-    body = (
-        f"- [ ] Root A ^tm-{root_a}\n"
-        f"  - [ ] Child of A ^tm-{child}\n"
-        f"- [ ] Root B ^tm-{root_b}\n"
-    )
+    body = f"- [ ] Root A ^tm-{root_a}\n  - [ ] Child of A ^tm-{child}\n- [ ] Root B ^tm-{root_b}\n"
     bs = parser.parse(_managed(body))
 
     assert bs.blocks[child].parent_id == root_a
@@ -246,12 +242,7 @@ def test_fenced_code_ignores_anchor_task_and_embed_patterns() -> None:
 def test_fenced_code_with_language_tag_still_ignored() -> None:
     fenced_id = _id()
     real_id = _id()
-    body = (
-        "```python\n"
-        f"x = 1  # ^tm-{fenced_id}\n"
-        "```\n"
-        f"Real paragraph ^tm-{real_id}\n"
-    )
+    body = f"```python\nx = 1  # ^tm-{fenced_id}\n```\nReal paragraph ^tm-{real_id}\n"
     bs = parser.parse(_managed(body))
     assert fenced_id not in bs.blocks
     assert real_id in bs.blocks
@@ -266,3 +257,105 @@ def test_anchor_mid_line_is_plain_text_not_a_block() -> None:
     bs = parser.parse(_managed(body))
     assert bs.blocks == {}
     assert bs.new_requests == []
+
+
+# --- lossless container (task T5.8-2, human-decided 2026-07-13, fable-designed) ----
+
+
+def test_prose_line_captured_as_raw_line() -> None:
+    body = "Just some free-form prose, no anchor here.\n"
+    bs = parser.parse(_managed(body))
+    assert bs.blocks == {}
+    assert bs.raw_lines == {4: "Just some free-form prose, no anchor here."}
+
+
+def test_blank_lines_captured_as_raw_lines() -> None:
+    id_ = _id()
+    body = f"\nSome text ^tm-{id_}\n\n"
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines[4] == ""
+    assert bs.raw_lines[6] == ""
+    assert id_ in bs.blocks
+
+
+def test_fenced_content_survives_as_raw_lines_including_fake_anchor() -> None:
+    fake_id = _id()
+    real_id = _id()
+    body = (
+        "```\n"
+        f"- [ ] fenced task ^tm-{fake_id}\n"
+        "```\n"
+        f"Real claim ^tm-{real_id}\n"
+    )
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines[4] == "```"
+    assert bs.raw_lines[5] == f"- [ ] fenced task ^tm-{fake_id}"
+    assert bs.raw_lines[6] == "```"
+    assert fake_id not in bs.blocks
+    assert real_id in bs.blocks
+    assert bs.embeds == []  # the fenced fake anchor is not a block/embed
+
+
+def test_extra_front_matter_keys_captured_verbatim() -> None:
+    text = "---\ntitle: My Note\ntm: 1\ntags: foo\n---\nA claim ^tm-{}\n".format(
+        ids.mint()
+    )
+    bs = parser.parse(text)
+    assert bs.managed is True
+    assert bs.front_matter == ["---", "title: My Note", "tm: 1", "tags: foo", "---"]
+
+
+def test_canonical_front_matter_is_not_captured() -> None:
+    id_ = _id()
+    bs = parser.parse(_managed(f"A claim ^tm-{id_}\n"))
+    assert bs.front_matter is None
+
+
+def test_new_line_marker_survives_as_raw_line() -> None:
+    body = "A brand new claim ^tm-new\n"
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines[4] == "A brand new claim ^tm-new"
+    assert len(bs.new_requests) == 1
+
+
+def test_inline_ref_inside_prose_line_still_recorded() -> None:
+    ref_id = _id()
+    body = f"See [[Another Note#^tm-{ref_id}]] for context.\n"
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines[4] == f"See [[Another Note#^tm-{ref_id}]] for context."
+    assert len(bs.refs) == 1
+    assert bs.refs[0].id == ref_id
+    assert bs.refs[0].line_no == 4
+
+
+def test_multi_embed_line_recorded_and_kept_as_raw() -> None:
+    embed_a = _id()
+    embed_b = _id()
+    body = f"![[A#^tm-{embed_a}]] and ![[B#^tm-{embed_b}]] side by side\n"
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines[4] == f"![[A#^tm-{embed_a}]] and ![[B#^tm-{embed_b}]] side by side"
+    assert {e.id for e in bs.embeds} == {embed_a, embed_b}
+
+
+def test_standalone_embed_line_not_captured_as_raw() -> None:
+    embed_id = _id()
+    body = f"![[Some Note#^tm-{embed_id}]]\n"
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines == {}
+    assert len(bs.embeds) == 1
+
+
+def test_standalone_ref_line_not_captured_as_raw() -> None:
+    ref_id = _id()
+    body = f"[[Some Note#^tm-{ref_id}]]\n"
+    bs = parser.parse(_managed(body))
+    assert bs.raw_lines == {}
+    assert len(bs.refs) == 1
+
+
+def test_unmanaged_file_raw_lines_is_total() -> None:
+    id_ = _id()
+    text = f"Some claim ^tm-{id_}\nMore prose\n"
+    bs = parser.parse(text)
+    assert bs.managed is False
+    assert bs.raw_lines == {1: f"Some claim ^tm-{id_}", 2: "More prose"}

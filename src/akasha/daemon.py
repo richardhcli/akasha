@@ -71,8 +71,7 @@ class AlreadyRunningError(RuntimeError):
     def __init__(self, lock_path: Path) -> None:
         self.lock_path = lock_path
         super().__init__(
-            "another akasha daemon instance is already running "
-            f"(lock held at {lock_path})"
+            f"another akasha daemon instance is already running (lock held at {lock_path})"
         )
 
 
@@ -183,10 +182,24 @@ def serve(config: Config) -> None:
     another instance already holds the lock -- the CLI (T4.8/`cli/main.py`)
     is responsible for catching it and mapping it to a clean exit rather
     than a traceback.
+
+    Before serving any request, runs the task T5.6 startup reconcile
+    (spec §4.8: "Startup: run ``on_change`` for every managed file
+    (idempotent -- this is also crash recovery)") against the app's shared
+    connection (``app.state.conn``). This runs INSIDE the single-instance
+    lock, after it is acquired -- so two daemon processes can never
+    reconcile the same vault concurrently -- and BEFORE ``uvicorn.run``
+    starts handling requests, matching the build-plan's "on daemon start,
+    reconcile every managed file" ordering. ``sync``/``reconcile`` are
+    imported lazily here (matching this module's existing deferred-import
+    style for ``uvicorn``/``create_app``) so the CLI's other verbs stay
+    light.
     """
     import uvicorn
 
     from akasha.api.app import create_app
+    from akasha.sync import reconcile
+    from akasha.sync.origin import OriginTracker
 
     config_dir = _config_dir(config)
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -197,6 +210,8 @@ def serve(config: Config) -> None:
         logger.info(f"daemon starting on {config.bind}:{config.port}")
         try:
             app = create_app(config)
+            summary = reconcile.reconcile_all(app.state.conn, OriginTracker())
+            logger.info(f"startup reconcile complete: {json.dumps(summary)}")
             uvicorn.run(app, host=config.bind, port=config.port, log_level="warning")
         finally:
             logger.info("daemon shutting down")

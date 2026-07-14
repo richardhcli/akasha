@@ -56,7 +56,7 @@ class SplitBody(BaseModel):
 class MergeBody(BaseModel):
     # Other node ids to merge into the path ``{node_id}`` survivor. The full
     # merge_nodes(ids) list is [path id, *ids]; survivor is the path id
-    # (store.merge_nodes keeps ids[0]). See the T4.4 SPEC-QUESTION on shape.
+    # (store.merge_nodes keeps ids[0]).
     ids: list[str]
 
 
@@ -102,13 +102,7 @@ def create_node(
     ctx: auth.AuthContext = Depends(require_auth),
 ) -> dict[str, Any]:
     if ctx.token_class == "agent":
-        # No existing node yet: mint a collision-free, not-persisted
-        # placeholder id for review_queue.node_id (NOT NULL) — see the
-        # T4.6 SPEC-QUESTION on store.mint_unassigned_node_id.
-        placeholder_id = store.mint_unassigned_node_id(conn)
-        review = mutation_gate(
-            conn, ctx, request, node_id=placeholder_id, payload=payload.model_dump()
-        )
+        review = mutation_gate(conn, ctx, request, node_id=None, payload=payload.model_dump())
         assert review is not None  # ctx.token_class == "agent" guarantees this
         return _proposal_response(response, review)
     try:
@@ -178,9 +172,7 @@ def delete_node(
     if review is not None:
         return _proposal_response(response, review)
     try:
-        store.delete_node(
-            conn, node_id, redirect_to=body.redirect_to, tombstone=body.tombstone
-        )
+        store.delete_node(conn, node_id, redirect_to=body.redirect_to, tombstone=body.tombstone)
     except NeedsRedirectError as exc:
         raise ApiError(409, exc.code, str(exc), {"node_id": exc.node_id}) from exc
     except NodeNotFoundError as exc:

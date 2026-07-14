@@ -30,6 +30,8 @@ This module performs no database access and imports nothing from
 
 from __future__ import annotations
 
+from typing import Any
+
 from akasha.kernel.model import ChangeClass, Facet
 
 
@@ -85,3 +87,53 @@ def default_change_class(old_facets: list[Facet], new_facets: list[Facet]) -> Ch
         if new_f.version > old_f.version:
             return "major"  # version-bumped
     return "patch"
+
+
+def conflict_branch_message(path: str) -> str:
+    """The fixed ``commits.message`` a conflict-branch commit carries (task T5.5).
+
+    Pure string formatting only -- no DB access. ``sync/reconcile.py``'s
+    conflict handler passes the result straight to
+    ``kernel/store.py::record_conflict_branch``'s ``message`` kwarg; a
+    branch commit is always identifiable by this exact prefix
+    (``message.startswith("conflict-branch:")``), which
+    ``tests/integration/test_conflict.py`` asserts on directly.
+    """
+    return f"conflict-branch: {path}"
+
+
+def conflict_cause_ref(
+    *,
+    path: str,
+    vault_text: str | None,
+    vault_task_state: str | None,
+    base_text: str | None,
+    branch_commit: str | None,
+) -> dict[str, Any]:
+    """Build the (not-yet-serialized) dict for a conflict review's ``cause_ref`` (task T5.5).
+
+    Pure function -- the caller (``sync/reconcile.py``'s conflict handler)
+    is responsible for ``kernel.canonical.canonical_json()``-encoding the
+    returned dict into deterministic bytes; this module never touches JSON
+    encoding or the DB itself (mirrors ``facets_touched``/
+    ``default_change_class``'s pure-function discipline above).
+    Deterministic bytes are required so
+    ``kernel/store.py::find_open_reviews``'s exact-``cause_ref``-match gate
+    can dedup a replayed conflict (task T5.6 crash-replay) without a
+    second review item or a second branch. Extends T5.4's
+    ``_default_conflict_handler`` cause_ref shape (``path``, ``vault_text``,
+    ``vault_task_state``, ``base_text``) with the new ``branch_commit`` key
+    -- the existing three keys are preserved verbatim so
+    ``tests/unit/sync/test_reconcile.py``'s pre-existing conflict test stays
+    green. ``branch_commit`` is ``None`` for a deleted-op conflict (the
+    vault removed the anchor; there is no vault version left to branch --
+    see ``sync/reconcile.py::conflict_branch_handler``'s docstring and the
+    logged SPEC-QUESTION).
+    """
+    return {
+        "path": path,
+        "vault_text": vault_text,
+        "vault_task_state": vault_task_state,
+        "base_text": base_text,
+        "branch_commit": branch_commit,
+    }

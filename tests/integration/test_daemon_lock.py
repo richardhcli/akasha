@@ -97,9 +97,7 @@ def test_cli_daemon_verb_exits_cleanly_and_non_zero_when_lock_held(
 
 
 def test_autostart_docs_file_exists_with_xml_and_nssm_sections() -> None:
-    docs_path = (
-        Path(__file__).resolve().parents[2] / "docs" / "autostart-windows.md"
-    )
+    docs_path = Path(__file__).resolve().parents[2] / "docs" / "autostart-windows.md"
     assert docs_path.exists()
     text = docs_path.read_text(encoding="utf-8")
 

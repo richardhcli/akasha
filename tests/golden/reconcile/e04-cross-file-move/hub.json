@@ -1,0 +1,8 @@
+[
+  {"id": "6mvyqsqb", "node_type": "claim", "body": "Shared text", "task_state": null},
+  {"id": "2kw7sr3j", "node_type": "claim", "body": "citing text", "task_state": null},
+  {"id": "ikynqdew", "node_type": "claim", "body": "padding 0", "task_state": null},
+  {"id": "dr4e3tdx", "node_type": "claim", "body": "padding 1", "task_state": null},
+  {"id": "ldg67htf", "node_type": "claim", "body": "padding 2", "task_state": null},
+  {"id": "jqbf32qt", "node_type": "claim", "body": "padding 3", "task_state": null}
+]

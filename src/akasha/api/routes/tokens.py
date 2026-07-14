@@ -53,9 +53,7 @@ def create_token(
     _ctx: auth.AuthContext = Depends(require_human),
 ) -> dict[str, Any]:
     if payload.token_class not in ("human", "agent"):
-        raise ApiError(
-            400, "E_INVALID", "token_class must be 'human' or 'agent'"
-        )
+        raise ApiError(400, "E_INVALID", "token_class must be 'human' or 'agent'")
     raw_secret = auth.mint_secret()
     token = store.create_token(
         conn,

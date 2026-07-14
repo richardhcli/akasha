@@ -17,7 +17,7 @@ EBNF reproduced verbatim from mvp-spec.md §4.7::
     ref         := "[[" path "#^tm-" id8 "]]"               ; inline reference
     indent      := (2 spaces)*                              ; nesting depth = indent/2
 
-All line-level patterns operate on a single logical line of vault text (no
+All line-level patterns operate on a single logical line of managed-file text (no
 trailing ``\\n``, per the canonical LF/one-trailing-newline rules in
 kernel/canonical.py — this module does not itself split files into lines).
 

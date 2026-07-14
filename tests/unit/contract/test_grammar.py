@@ -64,9 +64,7 @@ def test_anchor_mid_line_is_not_a_real_anchor() -> None:
 
 
 def test_id8_alphabet_and_length_reused_from_ids_module() -> None:
-    assert grammar.ID8_PATTERN == f"[{ids.A}]{{{ids.ID_LEN}}}" or grammar.ID8_RE.match(
-        ids.mint()
-    )
+    assert grammar.ID8_PATTERN == f"[{ids.A}]{{{ids.ID_LEN}}}" or grammar.ID8_RE.match(ids.mint())
 
 
 def test_malformed_checksum_is_syntactically_matched_but_semantically_rejected() -> None:

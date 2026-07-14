@@ -6,7 +6,7 @@ from akasha.contract import linter, parser
 from akasha.contract.linter import LintResult, PauseDecision, Violation
 from akasha.contract.parser import Block, BlockSet
 from akasha.kernel import ids
-from akasha.kernel.ids import vault_anchor
+from akasha.kernel.ids import contract_anchor
 
 
 def _id() -> str:
@@ -111,7 +111,7 @@ def test_pause_threshold_ignores_none_ids() -> None:
 def test_pause_and_diff_triggers_with_one_review_item_and_nonempty_diff() -> None:
     """>25% affected ⇒ PauseDecision with snapshot + exactly one review item + diff."""
     id_list = [_id() for _ in range(25)]
-    base_lines = [f"claim {k} {vault_anchor(i)}" for k, i in enumerate(id_list)]
+    base_lines = [f"claim {k} {contract_anchor(i)}" for k, i in enumerate(id_list)]
     base_text = _managed("\n".join(base_lines) + "\n")
     # Strip anchors from first 7 blocks (28% E_LOST_ANCHOR).
     vault_lines = list(base_lines)
@@ -154,11 +154,11 @@ def test_pause_and_diff_is_deterministic() -> None:
     # 2/5 = 40% > 25%.
     result = _result_affecting(id_list, 2)
     base_text = _managed(
-        "\n".join(f"claim {k} {vault_anchor(i)}" for k, i in enumerate(id_list)) + "\n"
+        "\n".join(f"claim {k} {contract_anchor(i)}" for k, i in enumerate(id_list)) + "\n"
     )
     vault_text = _managed(
         "\n".join(
-            (f"claim {k}" if k < 2 else f"claim {k} {vault_anchor(i)}")
+            (f"claim {k}" if k < 2 else f"claim {k} {contract_anchor(i)}")
             for k, i in enumerate(id_list)
         )
         + "\n"

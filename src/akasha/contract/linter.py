@@ -36,7 +36,7 @@ from pydantic import BaseModel
 from akasha.contract import grammar
 from akasha.contract.parser import Block, BlockSet
 from akasha.kernel import ids
-from akasha.kernel.ids import vault_anchor
+from akasha.kernel.ids import contract_anchor
 from akasha.kernel.model import Maturity
 
 # --- public constants ---------------------------------------------------------
@@ -59,9 +59,7 @@ _S1_PLUS: frozenset[str] = frozenset({"S1", "S2", "S3", "S4"})
 
 # Task line without a trailing anchor — used to recover comparable text from
 # unanchored vault lines when hunting for E_LOST_ANCHOR.
-_UNANCHORED_TASK_RE = re.compile(
-    r"^(?P<indent>(?: {2})*)- \[(?P<state>[x ])\] (?P<text>\S.*?)\s*$"
-)
+_UNANCHORED_TASK_RE = re.compile(r"^(?P<indent>(?: {2})*)- \[(?P<state>[x ])\] (?P<text>\S.*?)\s*$")
 
 MaturityLookup = Mapping[str, Maturity] | Callable[[str], Maturity | None]
 
@@ -124,8 +122,8 @@ def _canonical_block_line(block: Block) -> str:
     if block.kind == "task":
         indent = grammar.INDENT_UNIT * block.depth
         mark = "x" if block.task_state == "done" else " "
-        return f"{indent}- [{mark}] {block.text} {vault_anchor(block.id)}"
-    return f"{block.text} {vault_anchor(block.id)}"
+        return f"{indent}- [{mark}] {block.text} {contract_anchor(block.id)}"
+    return f"{block.text} {contract_anchor(block.id)}"
 
 
 def _block_body_without_anchor(block: Block) -> str:
@@ -269,27 +267,21 @@ def _detect_dup_id(
         base_block = base.blocks.get(id_)
         if base_block is None:
             # No base to compare against — cannot be certain which copy to keep.
-            review_items.append(
-                ReviewItem(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg)
-            )
+            review_items.append(ReviewItem(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg))
             continue
 
         canonical = _canonical_block_line(base_block)
-        identical_idxs = [
-            i for i, (_, line) in enumerate(copies) if line.rstrip("\r") == canonical
-        ]
+        identical_idxs = [i for i, (_, line) in enumerate(copies) if line.rstrip("\r") == canonical]
 
         if not identical_idxs:
             # Ambiguous: no copy is byte-identical to base → review, no guess.
-            review_items.append(
-                ReviewItem(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg)
-            )
+            review_items.append(ReviewItem(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg))
             continue
 
         # Certain: first byte-identical copy keeps the id; every other copy
         # is proposed for ^tm-new (including other identical copies).
         keeper = identical_idxs[0]
-        anchor = vault_anchor(id_)
+        anchor = contract_anchor(id_)
         for i, (line_no, line) in enumerate(copies):
             if i == keeper:
                 continue
@@ -359,9 +351,7 @@ def _detect_lost_and_deleted(
                 best_ratio = 1.0
                 exact = True
                 break
-            ratio = SequenceMatcher(
-                None, _comparable_text(body), base_block.text
-            ).ratio()
+            ratio = SequenceMatcher(None, _comparable_text(body), base_block.text).ratio()
             if ratio >= LOST_ANCHOR_SIMILARITY and ratio > best_ratio:
                 best_idx = i
                 best_ratio = ratio
@@ -371,8 +361,7 @@ def _detect_lost_and_deleted(
             used_candidate_idxs.add(best_idx)
             line_no, line = candidates[best_idx]
             msg = (
-                f"anchor for id {base_id!r} missing; vault text similarity "
-                f"{best_ratio:.3f} to base"
+                f"anchor for id {base_id!r} missing; vault text similarity {best_ratio:.3f} to base"
             )
             violations.append(
                 Violation(code="E_LOST_ANCHOR", id=base_id, line_nos=[line_no], message=msg)
@@ -380,7 +369,7 @@ def _detect_lost_and_deleted(
             if exact:
                 # Certain repair: re-insert the anchor.
                 body = line.rstrip("\r")
-                after = f"{body} {vault_anchor(base_id)}"
+                after = f"{body} {contract_anchor(base_id)}"
                 repairs.append(
                     Repair(
                         code="E_LOST_ANCHOR",
@@ -394,9 +383,7 @@ def _detect_lost_and_deleted(
             else:
                 # Fuzzy but not exact → review, never guess.
                 review_items.append(
-                    ReviewItem(
-                        code="E_LOST_ANCHOR", id=base_id, line_nos=[line_no], message=msg
-                    )
+                    ReviewItem(code="E_LOST_ANCHOR", id=base_id, line_nos=[line_no], message=msg)
                 )
             continue
 
@@ -407,9 +394,7 @@ def _detect_lost_and_deleted(
                 f"managed block {base_id!r} deleted from vault and maturity "
                 f"is {stage} (S1+); requires review"
             )
-            violations.append(
-                Violation(code="E_DELETED_S1", id=base_id, line_nos=[], message=msg)
-            )
+            violations.append(Violation(code="E_DELETED_S1", id=base_id, line_nos=[], message=msg))
             review_items.append(
                 ReviewItem(code="E_DELETED_S1", id=base_id, line_nos=[], message=msg)
             )
@@ -423,8 +408,8 @@ def _detect_lost_and_deleted(
 
 def lint(
     base: BlockSet,
-    vault: BlockSet,
-    vault_text: str,
+    current: BlockSet,
+    file_text: str,
     maturity: MaturityLookup | None = None,
 ) -> LintResult:
     """Detect §4.7 contract violations and emit certain-repair / review records.
@@ -433,10 +418,10 @@ def lint(
     ----------
     base:
         Last-agreed :class:`BlockSet` (may be empty / unmanaged).
-    vault:
-        Current vault :class:`BlockSet` from ``parse(vault_text)``.
-    vault_text:
-        Raw vault file text (needed because ``BlockSet.blocks`` collapses
+    current:
+        Current managed-file :class:`BlockSet` from ``parse(file_text)``.
+    file_text:
+        Raw managed-file text (needed because ``BlockSet.blocks`` collapses
         duplicate ids and drops unanchored lines).
     maturity:
         Callable ``id -> Maturity | None`` or ``Mapping[str, Maturity]`` used
@@ -456,25 +441,25 @@ def lint(
     result = LintResult()
 
     # Unmanaged files are never parsed for management; only the advisory.
-    if not vault.managed:
-        for v, r in _detect_unmanaged_anchors(vault_text):
+    if not current.managed:
+        for v, r in _detect_unmanaged_anchors(file_text):
             result.violations.append(v)
             result.review_items.append(r)
         return result
 
-    vault_lines = _iter_non_fence_lines(vault_text)
+    current_lines = _iter_non_fence_lines(file_text)
 
-    for v, r in _detect_id_checksum(vault_lines):
+    for v, r in _detect_id_checksum(current_lines):
         result.violations.append(v)
         result.review_items.append(r)
 
-    dup_v, dup_repairs, dup_review = _detect_dup_id(vault_lines, base)
+    dup_v, dup_repairs, dup_review = _detect_dup_id(current_lines, base)
     result.violations.extend(dup_v)
     result.repairs.extend(dup_repairs)
     result.review_items.extend(dup_review)
 
     lost_v, lost_repairs, lost_review = _detect_lost_and_deleted(
-        vault_lines, base, vault, maturity
+        current_lines, base, current, maturity
     )
     result.violations.extend(lost_v)
     result.repairs.extend(lost_repairs)
@@ -527,13 +512,13 @@ def pause_and_diff(
     result: LintResult,
     base: BlockSet,
     base_text: str,
-    vault_text: str,
+    current_text: str,
 ) -> PauseDecision | None:
     """If the formatter-storm guard fires, return a pause decision; else None.
 
-    When paused, the decision carries a snapshot of ``vault_text`` and exactly
+    When paused, the decision carries a snapshot of ``current_text`` and exactly
     one :class:`ReviewItem` whose ``message`` is a ``difflib.unified_diff`` of
-    ``base_text`` → ``vault_text``. No writes, no side effects.
+    ``base_text`` → ``current_text``. No writes, no side effects.
 
     # SPEC-QUESTION (narrowest reading, see docs/spec-questions.md):
     # §4.7 says "open one review item with a diff" but does not name a
@@ -548,7 +533,7 @@ def pause_and_diff(
     diff_text = "".join(
         unified_diff(
             base_text.splitlines(keepends=True),
-            vault_text.splitlines(keepends=True),
+            current_text.splitlines(keepends=True),
             fromfile="base",
             tofile="vault",
         )
@@ -561,4 +546,4 @@ def pause_and_diff(
         line_nos=[],
         message=diff_text,
     )
-    return PauseDecision(snapshot=vault_text, review_item=review_item)
+    return PauseDecision(snapshot=current_text, review_item=review_item)

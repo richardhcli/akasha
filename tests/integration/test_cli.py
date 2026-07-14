@@ -176,9 +176,7 @@ def test_set_round_trip_changes_body(daemon):
 
 
 def test_set_touch_facet_is_forwarded(daemon):
-    node = json.loads(
-        _run(daemon, "new", "definition", "term", "--facet", "name=span text").output
-    )
+    node = json.loads(_run(daemon, "new", "definition", "term", "--facet", "name=span text").output)
     result = _run(
         daemon, "set", node["id"], "--body", "term v2", "--class", "major", "--touch", "name"
     )

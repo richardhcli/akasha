@@ -55,7 +55,14 @@ EXPECTED_TABLE_COLUMNS = {
         "resolution",
     ],
     "triggers": ["id", "node_id", "condition", "params", "enabled"],
-    "sync_files": ["path", "vault", "base_hash", "contract_version", "last_synced_at"],
+    "sync_roots": ["id", "name", "root_path", "created_at"],
+    "sync_files": [
+        "path",
+        "sync_root_id",
+        "base_hash",
+        "contract_version",
+        "last_synced_at",
+    ],
     "tokens": [
         "id",
         "name",
@@ -81,6 +88,74 @@ def test_001_init_applied(tmp_path):
     conn = store.connect(tmp_path / "test.db")
     applied = store.run_migrations(conn)
     assert "001_init.sql" in applied
+    assert "002_refine_m4_contract.sql" in applied
+
+
+def test_refined_nullability_and_foreign_key_contract(tmp_path):
+    conn = _run_migrations(tmp_path)
+    review_columns = {
+        row[1]: row for row in conn.execute("PRAGMA table_info(review_queue)").fetchall()
+    }
+    assert review_columns["node_id"][3] == 0  # nullable for create-node proposals
+
+    foreign_keys = conn.execute("PRAGMA foreign_key_list(sync_files)").fetchall()
+    assert any(
+        row[2] == "sync_roots" and row[3] == "sync_root_id" and row[4] == "id"
+        for row in foreign_keys
+    )
+
+
+def test_002_preserves_existing_sync_and_review_rows(tmp_path):
+    staged = tmp_path / "migrations"
+    staged.mkdir()
+    for filename in ("000_placeholder.sql", "001_init.sql"):
+        (staged / filename).write_text(
+            (store.MIGRATIONS_DIR / filename).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    conn = store.connect(tmp_path / "upgrade.db")
+    store.run_migrations(conn, staged)
+    with conn:
+        conn.execute(
+            "INSERT INTO objects (hash, kind, bytes, created_at) VALUES (?, ?, ?, ?)",
+            ("base", "base_snapshot", b"bytes", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO sync_files "
+            "(path, vault, base_hash, contract_version, last_synced_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("note.md", "notes", "base", 1, "2026-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO review_queue "
+            "(id, node_id, cause_kind, cause_ref, facet, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("review1", "node1", "proposal", "{}", None, "2026-01-01T00:00:00+00:00"),
+        )
+
+    filename = "002_refine_m4_contract.sql"
+    (staged / filename).write_text(
+        (store.MIGRATIONS_DIR / filename).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    assert store.run_migrations(conn, staged) == [filename]
+
+    assert conn.execute("SELECT path, sync_root_id, base_hash FROM sync_files").fetchone() == (
+        "note.md",
+        "notes",
+        "base",
+    )
+    assert conn.execute("SELECT id, name, root_path FROM sync_roots").fetchone() == (
+        "notes",
+        "notes",
+        "notes",
+    )
+    assert conn.execute("SELECT id, node_id, cause_kind FROM review_queue").fetchone() == (
+        "review1",
+        "node1",
+        "proposal",
+    )
 
 
 def test_all_tables_present_with_matching_columns(tmp_path):

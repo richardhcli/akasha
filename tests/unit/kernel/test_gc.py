@@ -25,9 +25,7 @@ def _fresh_conn(tmp_path):
 def test_gc_removes_orphaned_object_left_by_s0_hard_delete(tmp_path):
     conn = _fresh_conn(tmp_path)
     a = store.create_node(conn, "claim", "claim a", author="alice")
-    orphan_hash = conn.execute(
-        "SELECT head_hash FROM nodes WHERE id=?", (a.id,)
-    ).fetchone()[0]
+    orphan_hash = conn.execute("SELECT head_hash FROM nodes WHERE id=?", (a.id,)).fetchone()[0]
     # object exists pre-GC
     assert conn.execute("SELECT 1 FROM objects WHERE hash=?", (orphan_hash,)).fetchone()
 
@@ -54,9 +52,7 @@ def test_gc_never_removes_object_referenced_by_s1_plus_node(tmp_path):
 
     # also create an orphan to make sure the GC actually collects something
     orphan = store.create_node(conn, "claim", "claim orphan", author="alice")
-    orphan_head = conn.execute(
-        "SELECT head_hash FROM nodes WHERE id=?", (orphan.id,)
-    ).fetchone()[0]
+    orphan_head = conn.execute("SELECT head_hash FROM nodes WHERE id=?", (orphan.id,)).fetchone()[0]
     store.delete_node(conn, orphan.id)
 
     deleted = store.gc_objects(conn)
@@ -82,7 +78,12 @@ def test_gc_never_removes_base_snapshot_object(tmp_path):
             (base_hash, "node_snapshot", obj_bytes, now),
         )
         conn.execute(
-            "INSERT INTO sync_files (path, vault, base_hash, contract_version, last_synced_at) "
+            "INSERT INTO sync_roots (id, name, root_path, created_at) VALUES (?, ?, ?, ?)",
+            ("default", "default", "/tmp/default", now),
+        )
+        conn.execute(
+            "INSERT INTO sync_files "
+            "(path, sync_root_id, base_hash, contract_version, last_synced_at) "
             "VALUES (?, ?, ?, ?, ?)",
             ("notes/foo.md", "default", base_hash, 1, now),
         )

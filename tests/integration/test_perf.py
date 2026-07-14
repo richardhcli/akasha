@@ -34,9 +34,7 @@ def test_neighborhood_p95() -> None:
         # --- Setup: seed a 10,000-node graph via the store API (NOT timed) ---
         node_ids: list[str] = []
         for _ in range(_N_NODES):
-            node = store.create_node(
-                conn, "claim", "perf-seed node body", author="perf-bench"
-            )
+            node = store.create_node(conn, "claim", "perf-seed node body", author="perf-bench")
             node_ids.append(node.id)
 
         n_edges = _N_NODES * _AVG_OUT_DEGREE

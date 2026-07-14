@@ -203,15 +203,11 @@ def test_store_invariants_over_random_operation_sequences(data: st.DataObject) -
 
         # Invariant 3: as-of correctness, checked once per sequence (if any
         # node accrued more than one commit).
-        multi_commit_nodes = [
-            nid for nid in live_node_ids if len(store.history(conn, nid)) >= 2
-        ]
+        multi_commit_nodes = [nid for nid in live_node_ids if len(store.history(conn, nid)) >= 2]
         if multi_commit_nodes:
             node_id = data.draw(st.sampled_from(multi_commit_nodes), label="as_of_node")
             commits = store.history(conn, node_id)
-            idx = data.draw(
-                st.integers(min_value=0, max_value=len(commits) - 2), label="as_of_idx"
-            )
+            idx = data.draw(st.integers(min_value=0, max_value=len(commits) - 2), label="as_of_idx")
             older, newer = commits[idx], commits[idx + 1]
             if older["ts"] < newer["ts"]:
                 as_of_ts = _midpoint_ts(older["ts"], newer["ts"])

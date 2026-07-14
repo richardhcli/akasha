@@ -107,9 +107,7 @@ def test_delete_node_s0_hard_deletes_node_commits_and_incident_edges(tmp_path):
     store.delete_node(conn, a.id)
 
     assert conn.execute("SELECT 1 FROM nodes WHERE id=?", (a.id,)).fetchone() is None
-    assert conn.execute("SELECT COUNT(*) FROM commits WHERE node_id=?", (a.id,)).fetchone()[
-        0
-    ] == 0
+    assert conn.execute("SELECT COUNT(*) FROM commits WHERE node_id=?", (a.id,)).fetchone()[0] == 0
     assert conn.execute("SELECT 1 FROM edges WHERE id=?", (edge.id,)).fetchone() is None
     assert conn.execute("SELECT 1 FROM nodes_fts WHERE id=?", (a.id,)).fetchone() is None
     # b (which had the incident edge) is untouched and has no dangling edge left
@@ -162,8 +160,7 @@ def test_delete_node_s1_plus_with_redirect_to_tombstones_and_reassigns_inbound(t
     assert _live_edges_touching(conn, b.id) == []
     # successor's maturity was recomputed (gained an inbound edge)
     assert (
-        conn.execute("SELECT maturity FROM nodes WHERE id=?", (successor.id,)).fetchone()[0]
-        == "S1"
+        conn.execute("SELECT maturity FROM nodes WHERE id=?", (successor.id,)).fetchone()[0] == "S1"
     )
 
 
@@ -273,9 +270,7 @@ def test_merge_nodes_tombstones_retired_and_reassigns_inbound(tmp_path):
 
     status_row = conn.execute("SELECT status FROM nodes WHERE id=?", (retired.id,)).fetchone()
     assert status_row == ("tombstone",)
-    survivor_status = conn.execute(
-        "SELECT status FROM nodes WHERE id=?", (survivor.id,)
-    ).fetchone()
+    survivor_status = conn.execute("SELECT status FROM nodes WHERE id=?", (survivor.id,)).fetchone()
     assert survivor_status == ("live",)
 
     assert _live_edges_touching(conn, retired.id) == []
@@ -285,8 +280,7 @@ def test_merge_nodes_tombstones_retired_and_reassigns_inbound(tmp_path):
     assert new_edge_row == (survivor.id, None)
 
     assert (
-        conn.execute("SELECT maturity FROM nodes WHERE id=?", (survivor.id,)).fetchone()[0]
-        == "S1"
+        conn.execute("SELECT maturity FROM nodes WHERE id=?", (survivor.id,)).fetchone()[0] == "S1"
     )
 
 

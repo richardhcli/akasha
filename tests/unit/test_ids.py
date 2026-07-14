@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from akasha.kernel.ids import A, IdError, checksum, mint, validate, vault_anchor
+from akasha.kernel.ids import A, IdError, checksum, contract_anchor, mint, validate
 
 # Known checksum vectors, computed independently from the spec formula
 # checksum(core) = A[sum((i+1) * A.index(c) for i, c in enumerate(core)) % 32]
@@ -71,14 +71,14 @@ def test_validate_bad_alphabet_char_raises() -> None:
     assert exc_info.value.code == "E_ID_CHECKSUM"
 
 
-def test_vault_anchor_form() -> None:
+def test_contract_anchor_form() -> None:
     core, check = KNOWN_VECTORS[0]
     id_ = core + check
-    assert vault_anchor(id_) == f"^tm-{id_}"
+    assert contract_anchor(id_) == f"^tm-{id_}"
 
 
-def test_vault_anchor_of_minted_id() -> None:
+def test_contract_anchor_of_minted_id() -> None:
     id_ = mint()
-    anchor = vault_anchor(id_)
+    anchor = contract_anchor(id_)
     assert anchor.startswith("^tm-")
     assert anchor[len("^tm-") :] == id_

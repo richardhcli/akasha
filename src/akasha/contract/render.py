@@ -1,4 +1,4 @@
-"""Renderer: ``BlockSet`` → canonical vault text (build-plan task T3.3, spec §4.7).
+"""Renderer: ``BlockSet`` → canonical contract text (build-plan task T3.3, spec §4.7).
 
 Deterministic inverse of :func:`akasha.contract.parser.parse`: projects hub
 block/task/embed/ref structure into the Obsidian contract sublanguage.
@@ -19,19 +19,20 @@ from collections.abc import Callable
 from akasha.contract import grammar
 from akasha.contract.parser import Block, BlockSet, Embed, Ref
 from akasha.kernel.canonical import canonicalize_text
-from akasha.kernel.ids import vault_anchor
+from akasha.kernel.ids import contract_anchor
 
 # Tie-break when several items share a ``line_no``: blocks first (they may
 # already carry inline embed/ref wiki-links in ``text``), then standalone
-# embeds, then standalone refs.
+# embeds, then standalone refs, then raw (non-contract-construct) lines.
 _KIND_BLOCK = 0
 _KIND_EMBED = 1
 _KIND_REF = 2
+_KIND_RAW = 3
 
 
 def _render_paragraph(block: Block) -> str:
     """``managed_par := text SP anchor EOL`` (spec §4.7)."""
-    return f"{block.text} {vault_anchor(block.id)}"
+    return f"{block.text} {contract_anchor(block.id)}"
 
 
 def _render_task(block: Block) -> str:
@@ -39,7 +40,7 @@ def _render_task(block: Block) -> str:
     indent = grammar.INDENT_UNIT * block.depth
     # Narrowest reading: missing task_state ⇒ open (``" "`` checkbox).
     mark = "x" if block.task_state == "done" else " "
-    return f"{indent}- [{mark}] {block.text} {vault_anchor(block.id)}"
+    return f"{indent}- [{mark}] {block.text} {contract_anchor(block.id)}"
 
 
 def _render_block(block: Block) -> str:
@@ -50,12 +51,12 @@ def _render_block(block: Block) -> str:
 
 def _render_embed(embed: Embed) -> str:
     """``embed := "![[" path "#^tm-" id8 "]]"`` (spec §4.7)."""
-    return f"![[{embed.path}#{vault_anchor(embed.id)}]]"
+    return f"![[{embed.path}#{contract_anchor(embed.id)}]]"
 
 
 def _render_ref(ref: Ref) -> str:
     """``ref := "[[" path "#^tm-" id8 "]]"`` (spec §4.7)."""
-    return f"[[{ref.path}#{vault_anchor(ref.id)}]]"
+    return f"[[{ref.path}#{contract_anchor(ref.id)}]]"
 
 
 def render(
@@ -63,7 +64,7 @@ def render(
     *,
     resolve_body: Callable[[str], str] | None = None,
 ) -> str:
-    """Project a :class:`BlockSet` to canonical vault markdown (spec §4.7).
+    """Project a :class:`BlockSet` to canonical managed-file markdown (spec §4.7).
 
     When ``block_set.managed`` is true, emits a YAML front-matter block with
     ``tm: <CONTRACT_VERSION>`` (or ``block_set.contract_version`` when set).
@@ -74,8 +75,17 @@ def render(
     Embeds/refs that share a ``line_no`` with a block are treated as inline
     (already present in that block's ``text``) and are not re-emitted.
 
+    Lossless container (spec §4.7, T5.8-2): ``block_set.raw_lines`` -- every
+    non-contract-construct line ``parse()`` captured (prose, blanks, fenced
+    examples, unknown/malformed anchors) -- is interleaved back in at its
+    original ``line_no``, verbatim; a raw line sharing a ``line_no`` with a
+    block is skipped (already inline in that block's text, same rule as
+    embeds/refs). ``block_set.front_matter`` (when not ``None``) replaces
+    the canonical 3-line ``tm:`` front matter verbatim (e.g. a file with
+    extra ``title:``/``tags:`` keys).
+
     For each embed, if ``resolve_body`` is supplied it is called with the
-    embed target id (read-only body lookup). The vault form remains the
+    embed target id (read-only body lookup). The contract form remains the
     wiki-link ``![[path#^tm-id8]]`` — Obsidian expands the transclusion at
     display time (spec §4.7: "embeds render the target's current body
     (read-only in Obsidian by nature)"). ``^tm-new`` requests are hub-side
@@ -93,9 +103,19 @@ def render(
             if block_set.contract_version is not None
             else grammar.CONTRACT_VERSION
         )
-        lines.extend(["---", f"tm: {version}", "---"])
+        lines.extend(
+            block_set.front_matter
+            if block_set.front_matter is not None
+            else ["---", f"tm: {version}", "---"]
+        )
 
+    # Lossless-container write-back (task T5.8-2, human-decided 2026-07-13,
+    # fable-designed): a raw line sharing a block's line_no is skipped just
+    # like a co-located embed/ref (it is understood to already be part of
+    # that block's own inline text); every other raw line becomes its own
+    # output line, in position, verbatim.
     block_line_nos = {block.line_no for block in block_set.blocks.values()}
+    skip_line_nos = block_line_nos | set(block_set.raw_lines.keys())
     items: list[tuple[int, int, int, str]] = []
     # (line_no, kind_tie, seq, rendered) — seq preserves insertion order
     # among equal (line_no, kind) for stability.
@@ -107,18 +127,22 @@ def render(
 
     for embed in block_set.embeds:
         # Resolve target body when a resolver is provided (pure DI for the
-        # hub read); vault bytes stay the wiki-link form.
+        # hub read); managed-file bytes stay the wiki-link form.
         if resolve_body is not None:
             resolve_body(embed.id)
-        if embed.line_no in block_line_nos:
+        if embed.line_no in skip_line_nos:
             continue
         items.append((embed.line_no, _KIND_EMBED, seq, _render_embed(embed)))
         seq += 1
 
     for ref in block_set.refs:
-        if ref.line_no in block_line_nos:
+        if ref.line_no in skip_line_nos:
             continue
         items.append((ref.line_no, _KIND_REF, seq, _render_ref(ref)))
+        seq += 1
+
+    for line_no, raw_text in block_set.raw_lines.items():
+        items.append((line_no, _KIND_RAW, seq, raw_text))
         seq += 1
 
     items.sort(key=lambda t: (t[0], t[1], t[2]))
