@@ -1,4 +1,5 @@
 import { Plugin } from "obsidian";
+import createNodeFromSelection from "./commands";
 import {
   DEFAULT_SETTINGS,
   TmHubSettingTab,
@@ -12,6 +13,12 @@ export default class TmHubPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new TmHubSettingTab(this.app, this));
+
+    this.addCommand({
+      id: "tm-create-node-from-selection",
+      name: "Create node from selection",
+      editorCallback: (editor) => createNodeFromSelection(editor),
+    });
 
     const statusBar = new StatusBar(this, this.addStatusBarItem());
     await statusBar.refresh();
