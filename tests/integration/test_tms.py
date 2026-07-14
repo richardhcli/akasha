@@ -185,3 +185,92 @@ def test_edges_create_facet_span_satisfies_justification_binding_requirement(api
 
     dst_node = client.get(f"/v1/nodes/{dst['id']}", headers=h).json()
     assert any(f["facet_id"] == edge["facet_binding"] for f in dst_node["facets"])
+
+
+# --- T7.4: all_subtasks_closed flags supertask for review (never auto-closes) ---
+
+
+def test_supertask_flag(api):
+    """When every composes-child task is done, enqueue subtasks_closed once; never auto-close."""
+    from akasha.tms import triggers
+
+    client, h, conn = api["client"], api["human"], api["conn"]
+
+    # (1) supertask + 3 open subtasks linked by composes edges.
+    supertask = _create_node(client, h, node_type="task", body="supertask", task_state="open")
+    children = [
+        _create_node(client, h, node_type="task", body=f"child-{i}", task_state="open")
+        for i in range(3)
+    ]
+    for child in children:
+        resp = client.post(
+            "/v1/edges",
+            json={
+                "src": supertask["id"],
+                "dst": child["id"],
+                "edge_type": "composes",
+                "facet_binding": None,
+                "provenance": "human",
+            },
+            headers=h,
+        )
+        assert resp.status_code == 201
+
+    # (2) close 2 of 3 children — one remains open.
+    for child in children[:2]:
+        store.commit_node(
+            conn,
+            child["id"],
+            task_state="done",
+            change_class="patch",
+            facets_touched=[],
+            author="test",
+        )
+
+    # (3) not yet flagged while a child is still open.
+    result = triggers.evaluate(
+        conn, supertask["id"], triggers.TriggerContext(now="2026-07-14")
+    )
+    assert result == []
+    assert (
+        store.find_open_reviews(
+            conn, node_id=supertask["id"], cause_kind="subtasks_closed"
+        )
+        == []
+    )
+
+    # (4) close the last remaining open child.
+    store.commit_node(
+        conn,
+        children[2]["id"],
+        task_state="done",
+        change_class="patch",
+        facets_touched=[],
+        author="test",
+    )
+
+    # (5) fires once: enqueue subtasks_closed; supertask stays open.
+    result = triggers.evaluate(
+        conn, supertask["id"], triggers.TriggerContext(now="2026-07-14")
+    )
+    assert len(result) == 1
+    assert result[0]["cause_kind"] == "subtasks_closed"
+    assert result[0]["node_id"] == supertask["id"]
+    open_reviews = store.find_open_reviews(
+        conn, node_id=supertask["id"], cause_kind="subtasks_closed"
+    )
+    assert len(open_reviews) == 1
+    assert store.get_node(conn, supertask["id"]).task_state == "open"
+
+    # (6) idempotent: second evaluate enqueues nothing.
+    result = triggers.evaluate(
+        conn, supertask["id"], triggers.TriggerContext(now="2026-07-14")
+    )
+    assert result == []
+    open_reviews_again = store.find_open_reviews(
+        conn, node_id=supertask["id"], cause_kind="subtasks_closed"
+    )
+    assert len(open_reviews_again) == 1
+
+    # (7) sole lasting side effect is the review row — task_state still open.
+    assert store.get_node(conn, supertask["id"]).task_state == "open"
