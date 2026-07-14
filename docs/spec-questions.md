@@ -23,7 +23,7 @@ full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 and M6 (1 entry: T6.5, 2026-07-14).
 
-**Open questions: 4** (M7 in progress — logged 2026-07-14, resolve or
+**Open questions: 6** (M7 in progress — logged 2026-07-14, resolve or
 archive at M7 close).
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
@@ -45,3 +45,13 @@ archive at M7 close).
 - **Where:** `src/akasha/tms/triggers.py` (module docstring + `run_daily_tick`, inline `# SPEC-QUESTION:`).
 - **Narrowest reading taken:** spec 4.10 gives `recheck_after` "params: an ISO date, period" but 4.4's DDL has no column/table for a per-node recheck schedule, and T7.3's Files list is `tms/triggers.py` only (no migration allowed). Adopted: the date/period ride transiently in a caller-supplied `TriggerContext` per `evaluate`/`run_daily_tick` call rather than inventing new persisted state; `run_daily_tick(conn, contexts)` is a thin iterate-and-evaluate wrapper. Sourcing which nodes are due and their schedules (where `recheck_date`/`period` live between ticks) is left to whichever later task wires this into the daemon's daily-tick driver.
 - **Resolution:** open -- resolve when the daily-tick daemon driver lands (needs a decision on persisting recheck schedules, possibly a migration).
+
+## T7.5 -- daily-cap ordering references a "user flag" with no backing DDL column
+- **Where:** `src/akasha/tms/review.py` (`active_queue`, inline `# SPEC-QUESTION:`).
+- **Narrowest reading taken:** spec 4.9's daily cap orders by "(staleness age, inbound-edge count, user flag)" but `review_queue`'s DDL (4.4) has no user-flag/priority column. Implemented the sort key as `(created_at ASC, inbound_edge_count DESC)` with the user-flag tiebreaker treated as absent/constant (nothing to read). The cap is READ-SIDE only (`enqueue_review` stays unbounded — a write-side cap would silently drop TMS signals, violating zero-silent-guesses).
+- **Resolution:** open -- a future task adding a user-flag/priority affordance (UI flag on a review) would need a migration + a third sort key.
+
+## T7.5 -- resolution enum has no member for create-node-proposal approval
+- **Where:** `src/akasha/tms/review.py` (`approve_proposal` / `_PROPOSAL_APPROVAL_RESOLUTION`, inline `# SPEC-QUESTION:`).
+- **Narrowest reading taken:** the `resolution` enum is `still_holds|revised|retracted|dismissed` (4.4) — none semantically means "a create-node proposal was approved and its node minted." `approve_proposal` records `still_holds` ("accepted as proposed, no revision") when it mints + resolves. This is a genuine semantic gap (not merely a missing column); a dedicated `approved` value would need a migration + enum change.
+- **Resolution:** open -- worth a human decision on whether proposal approval deserves a distinct resolution value.

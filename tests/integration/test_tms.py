@@ -274,3 +274,376 @@ def test_supertask_flag(api):
 
     # (7) sole lasting side effect is the review row — task_state still open.
     assert store.get_node(conn, supertask["id"]).task_state == "open"
+
+
+# --- T7.5: review resolutions + daily active-queue cap -----------------------
+
+
+def _trigger_facet_break(conn, client, headers, *, subscriber_body="subscriber"):
+    """Major commit on a facet-bound target → open facet_break on the subscriber.
+
+    Returns (subscriber_id, target_id, review_row, target_facet_id).
+    """
+    from akasha.kernel.model import Facet
+
+    target_facet = ids.mint()
+    target = store.create_node(
+        conn,
+        "definition",
+        "target definition",
+        facets=[Facet(facet_id=target_facet, name="tdef", span="tdef", version=1)],
+    )
+    sub = _create_node(client, headers, body=subscriber_body)
+    store.create_edge(
+        conn,
+        src=sub["id"],
+        dst=target.id,
+        edge_type="supports",
+        facet_binding=target_facet,
+        provenance="human",
+    )
+    store.commit_node(
+        conn,
+        target.id,
+        facets=[Facet(facet_id=target_facet, name="tdef-broken", span="tdef", version=2)],
+        change_class="major",
+        facets_touched=[target_facet],
+        author="test",
+    )
+    reviews = store.find_open_reviews(conn, node_id=sub["id"], cause_kind="facet_break")
+    assert len(reviews) == 1
+    return sub["id"], target.id, reviews[0], target_facet
+
+
+def test_review_still_holds_resolves_item(api):
+    from akasha.tms import review
+
+    client, h, conn = api["client"], api["human"], api["conn"]
+    sub_id, _target_id, item, _facet = _trigger_facet_break(conn, client, h)
+
+    result = review.resolve_review(conn, item["id"], "still_holds")
+    assert result["resolved_at"] is not None
+    assert result["resolution"] == "still_holds"
+    assert store.find_open_reviews(conn, node_id=sub_id, cause_kind="facet_break") == []
+    persisted = store.get_review(conn, item["id"])
+    assert persisted["resolved_at"] is not None
+    assert persisted["resolution"] == "still_holds"
+
+
+def test_review_retracted_resolves_item(api):
+    from akasha.tms import review
+
+    client, h, conn = api["client"], api["human"], api["conn"]
+    sub_id, _target_id, item, _facet = _trigger_facet_break(
+        conn, client, h, subscriber_body="to retract"
+    )
+
+    result = review.resolve_review(conn, item["id"], "retracted")
+    assert result["resolved_at"] is not None
+    assert result["resolution"] == "retracted"
+    assert store.find_open_reviews(conn, node_id=sub_id, cause_kind="facet_break") == []
+    persisted = store.get_review(conn, item["id"])
+    assert persisted["resolution"] == "retracted"
+
+
+def test_review_revised_reclassifies_and_cascades(api):
+    """Three-node chain: major on C → review on B; revised on B cascades to A."""
+    from akasha.kernel.model import Facet
+    from akasha.tms import review
+
+    conn = api["conn"]
+    facet_c = ids.mint()
+    facet_b = ids.mint()
+
+    node_c = store.create_node(
+        conn,
+        "definition",
+        "node C",
+        facets=[Facet(facet_id=facet_c, name="fc", span="fc", version=1)],
+    )
+    node_b = store.create_node(
+        conn,
+        "claim",
+        "node B",
+        facets=[Facet(facet_id=facet_b, name="fb", span="fb", version=1)],
+    )
+    node_a = store.create_node(conn, "claim", "node A")
+
+    store.create_edge(
+        conn,
+        src=node_b.id,
+        dst=node_c.id,
+        edge_type="supports",
+        facet_binding=facet_c,
+        provenance="human",
+    )
+    store.create_edge(
+        conn,
+        src=node_a.id,
+        dst=node_b.id,
+        edge_type="supports",
+        facet_binding=facet_b,
+        provenance="human",
+    )
+
+    # Break C's facet → open facet_break on B (the review we will resolve).
+    store.commit_node(
+        conn,
+        node_c.id,
+        facets=[Facet(facet_id=facet_c, name="fc-broken", span="fc", version=2)],
+        change_class="major",
+        facets_touched=[facet_c],
+        author="test",
+    )
+    reviews_b = store.find_open_reviews(conn, node_id=node_b.id, cause_kind="facet_break")
+    assert len(reviews_b) == 1
+    review_b_id = reviews_b[0]["id"]
+    assert store.find_open_reviews(conn, node_id=node_a.id, cause_kind="facet_break") == []
+
+    # revised → commit_node on B (major touching A's binding) then resolve.
+    result = review.resolve_review(
+        conn,
+        review_b_id,
+        "revised",
+        new_body="node B revised after cascade",
+        change_class="major",
+        facets_touched=[facet_b],
+        author="test",
+        message="reclassify after review",
+    )
+    assert result["resolution"] == "revised"
+    assert result["resolved_at"] is not None
+    closed = store.get_review(conn, review_b_id)
+    assert closed["resolution"] == "revised"
+    assert closed["resolved_at"] is not None
+    assert store.find_open_reviews(conn, node_id=node_b.id, cause_kind="facet_break") == []
+
+    # Cascade observable: A now has a NEW open facet_break from B's major commit.
+    reviews_a = store.find_open_reviews(conn, node_id=node_a.id, cause_kind="facet_break")
+    assert len(reviews_a) >= 1
+
+
+def test_review_dismissed_allowed_for_violation(api):
+    from akasha.tms import review
+
+    conn = api["conn"]
+    node = store.create_node(conn, "claim", "violation subject")
+    item = store.enqueue_review(conn, node.id, "violation", cause_ref="E_TEST")
+
+    result = review.resolve_review(conn, item["id"], "dismissed")
+    assert result["resolved_at"] is not None
+    assert result["resolution"] == "dismissed"
+    persisted = store.get_review(conn, item["id"])
+    assert persisted["resolution"] == "dismissed"
+    assert persisted["resolved_at"] is not None
+
+
+def test_review_dismissed_rejected_for_non_violation(api):
+    from akasha.tms import review
+
+    conn = api["conn"]
+    node = store.create_node(conn, "claim", "facet break subject")
+    item = store.enqueue_review(conn, node.id, "facet_break", cause_ref="commit-x", facet="*")
+
+    with pytest.raises(review.DismissalNotAllowedError):
+        review.resolve_review(conn, item["id"], "dismissed")
+
+    still_open = store.find_open_reviews(conn, node_id=node.id, cause_kind="facet_break")
+    assert len(still_open) == 1
+    assert still_open[0]["id"] == item["id"]
+    assert still_open[0]["resolved_at"] is None
+    persisted = store.get_review(conn, item["id"])
+    assert persisted["resolved_at"] is None
+    assert persisted["resolution"] is None
+
+
+def test_review_proposal_approval_mints_once(api):
+    from akasha.kernel.canonical import canonical_json
+    from akasha.tms import review
+
+    conn = api["conn"]
+    envelope = {
+        "method": "POST",
+        "path": "/v1/nodes",
+        "body": {"node_type": "claim", "body": "a proposed node"},
+    }
+    cause_ref = canonical_json(envelope).decode("utf-8")
+    item = store.enqueue_review(conn, None, "proposal", cause_ref=cause_ref)
+    nodes_before = conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+
+    node_id = review.approve_proposal(conn, item["id"])
+    node = store.get_node(conn, node_id)
+    # canonicalize_text appends a trailing newline (spec §4.3).
+    assert node.body == "a proposed node\n"
+    assert node.node_type == "claim"
+
+    persisted = store.get_review(conn, item["id"])
+    assert persisted["node_id"] == node_id
+    assert persisted["resolved_at"] is not None
+    # SPEC-QUESTION (T7.5): enum has no 'approved'; implementation uses still_holds.
+    assert persisted["resolution"] == "still_holds"
+
+    nodes_after_first = conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+    assert nodes_after_first == nodes_before + 1
+    matching = conn.execute(
+        "SELECT count(*) FROM nodes WHERE id=?", (node_id,)
+    ).fetchone()[0]
+    assert matching == 1
+    # Exactly one node carries this body (idempotency baseline before 2nd approve).
+    body_matches = [
+        n_id
+        for (n_id,) in conn.execute("SELECT id FROM nodes").fetchall()
+        if store.get_node(conn, n_id).body == "a proposed node\n"
+    ]
+    assert body_matches == [node_id]
+
+    with pytest.raises(store.ReviewAlreadyResolvedError):
+        review.approve_proposal(conn, item["id"])
+    nodes_after_second = conn.execute("SELECT count(*) FROM nodes").fetchone()[0]
+    assert nodes_after_second == nodes_after_first
+
+
+def test_review_active_queue_daily_cap(api):
+    import time
+
+    from akasha.kernel.canonical import canonical_json
+    from akasha.tms import review
+
+    conn = api["conn"]
+
+    # Two nodes with deliberately different live inbound-edge counts.
+    high = store.create_node(conn, "claim", "high-inbound")
+    low = store.create_node(conn, "claim", "low-inbound")
+    sources = [store.create_node(conn, "claim", f"src-{i}") for i in range(2)]
+    for src in sources:
+        store.create_edge(
+            conn,
+            src=src.id,
+            dst=high.id,
+            edge_type="supports",
+            facet_binding="*",
+            provenance="human",
+        )
+    assert len(store.find_live_edges(conn, dst=high.id)) == 2
+    assert len(store.find_live_edges(conn, dst=low.id)) == 0
+
+    # Enqueue high then low close together so inbound count is the tiebreaker.
+    high_item = store.enqueue_review(conn, high.id, "recheck", cause_ref="high")
+    time.sleep(0.002)
+    low_item = store.enqueue_review(conn, low.id, "recheck", cause_ref="low")
+
+    # Fill out to 15 open rows (13 more), including one NULL-node_id proposal.
+    for i in range(12):
+        n = store.create_node(conn, "claim", f"filler-{i}")
+        store.enqueue_review(conn, n.id, "recheck", cause_ref=f"filler-{i}")
+        time.sleep(0.002)
+
+    proposal_ref = canonical_json(
+        {"method": "POST", "path": "/v1/nodes", "body": {"node_type": "claim", "body": "p"}}
+    ).decode("utf-8")
+    proposal = store.enqueue_review(conn, None, "proposal", cause_ref=proposal_ref)
+
+    open_all = store.find_open_reviews(conn)
+    assert len(open_all) == 15
+
+    queue = review.active_queue(conn)
+    assert len(queue) == 10
+
+    # Oldest-first among equal inbound: high was enqueued before low; both
+    # start with the earliest timestamps among the 15, and high has more
+    # inbound edges so it must appear before low.
+    ids_in_queue = [r["id"] for r in queue]
+    assert high_item["id"] in ids_in_queue
+    assert low_item["id"] in ids_in_queue
+    assert ids_in_queue.index(high_item["id"]) < ids_in_queue.index(low_item["id"])
+
+    # created_at non-decreasing when inbound counts are equal is implied by
+    # the sort key; check the full queue is sorted by (created_at, -inbound).
+    def inbound_of(row: dict) -> int:
+        if row["node_id"] is None:
+            return 0
+        return len(store.find_live_edges(conn, dst=row["node_id"]))
+
+    for earlier, later in zip(queue, queue[1:], strict=False):
+        key_e = (earlier["created_at"], -inbound_of(earlier))
+        key_l = (later["created_at"], -inbound_of(later))
+        assert key_e <= key_l
+
+    # NULL-node_id proposal must not crash ordering and must count as inbound=0
+    # (must not jump ahead of older, equal-inbound rows via the dst=None landmine).
+    proposal_in_full = next(r for r in open_all if r["id"] == proposal["id"])
+    assert proposal_in_full["node_id"] is None
+    # Proposal is the newest of the 15; with inbound=0 it should be outside
+    # the top-10 window (or at worst last among equals — never first).
+    if proposal["id"] in ids_in_queue:
+        assert ids_in_queue.index(proposal["id"]) > 0
+    assert queue[0]["id"] != proposal["id"]
+
+
+def test_review_active_queue_orders_by_inbound_count_on_created_at_tie(api, monkeypatch):
+    """Freeze created_at so inbound-edge count is the ONLY discriminator.
+
+    Without this tie, ``created_at`` alone (distinct per row) would make the
+    ordering assertions pass even if the inbound-count tiebreaker were never
+    implemented, or if the ``find_live_edges(dst=None)``-returns-everything
+    landmine silently gave a NULL-node_id proposal a leaked nonzero inbound
+    count instead of the required 0.
+    """
+    from akasha.kernel.canonical import canonical_json
+    from akasha.tms import review
+
+    conn = api["conn"]
+    monkeypatch.setattr(store, "_now", lambda: "2026-07-14T00:00:00.000000+00:00")
+
+    high = store.create_node(conn, "claim", "hi")  # will get 2 live inbound edges
+    low = store.create_node(conn, "claim", "lo")  # 0 live inbound edges
+    for i in range(2):
+        s = store.create_node(conn, "claim", f"tiebreak-src-{i}")
+        store.create_edge(
+            conn,
+            src=s.id,
+            dst=high.id,
+            edge_type="supports",
+            facet_binding="*",
+            provenance="human",
+        )
+    # Extra edges UNRELATED to high/low so the DB's total live-edge count (5)
+    # exceeds high's own inbound count (2). This makes the ``dst=None``
+    # landmine (which returns EVERY live edge, not zero) distinguishable: a
+    # leaked count of 5 would wrongly outrank high's real count of 2, whereas
+    # the correct NULL-node_id handling always yields 0.
+    other_a = store.create_node(conn, "claim", "other-a")
+    other_b = store.create_node(conn, "claim", "other-b")
+    for i in range(3):
+        s = store.create_node(conn, "claim", f"noise-src-{i}")
+        store.create_edge(
+            conn,
+            src=s.id,
+            dst=other_a.id if i % 2 == 0 else other_b.id,
+            edge_type="supports",
+            facet_binding="*",
+            provenance="human",
+        )
+    assert len(store.find_live_edges(conn, dst=high.id)) == 2
+    assert len(store.find_live_edges(conn, dst=low.id)) == 0
+
+    r_low = store.enqueue_review(conn, low.id, "recheck", cause_ref="lo")
+    r_high = store.enqueue_review(conn, high.id, "recheck", cause_ref="hi")
+    proposal_ref = canonical_json(
+        {"method": "POST", "path": "/v1/nodes", "body": {"node_type": "claim", "body": "p"}}
+    ).decode("utf-8")
+    r_prop = store.enqueue_review(conn, None, "proposal", cause_ref=proposal_ref)
+
+    rows = [r_low, r_high, r_prop]
+    assert len({r["created_at"] for r in rows}) == 1  # confirm the tie is real
+
+    queue_ids = [r["id"] for r in review.active_queue(conn)]
+
+    # tie on created_at => inbound count decides: high (2) before low (0).
+    assert queue_ids.index(r_high["id"]) < queue_ids.index(r_low["id"])
+
+    # landmine guard: a NULL-node_id proposal must count as inbound=0, not
+    # leak every live edge via find_live_edges(dst=None). If it leaked, the
+    # proposal would sort ahead of `high` on this tie; it must not.
+    assert queue_ids.index(r_high["id"]) < queue_ids.index(r_prop["id"])
+

@@ -71,6 +71,22 @@ class IdMintError(Exception):
     """Raised when minting a unique node id fails after the retry bound (spec §4.1)."""
 
 
+class ReviewNotFoundError(Exception):
+    """Raised when a ``review_queue`` id has no matching row (task T7.5)."""
+
+    def __init__(self, review_id: str) -> None:
+        self.review_id = review_id
+        super().__init__(f"review {review_id!r} not found")
+
+
+class ReviewAlreadyResolvedError(Exception):
+    """Raised when resolving or approving an already-resolved review (task T7.5)."""
+
+    def __init__(self, review_id: str) -> None:
+        self.review_id = review_id
+        super().__init__(f"review {review_id!r} is already resolved")
+
+
 class NeedsRedirectError(Exception):
     """Raised by ``delete_node`` when an S1+ node is deleted without
     ``redirect_to`` or ``tombstone=True`` (spec §4.5/§4.6: "Deletion: S0 ->
@@ -315,6 +331,132 @@ def find_open_reviews(
         }
         for r in rows
     ]
+
+
+def get_review(conn: sqlite3.Connection, review_id: str) -> dict[str, Any]:
+    """Read-only: one ``review_queue`` row by id (task T7.5).
+
+    Returns the row as a plain dict (same shape as ``find_open_reviews`` /
+    ``enqueue_review``). Raises ``ReviewNotFoundError`` if ``review_id``
+    does not exist. Includes resolved rows (unlike ``find_open_reviews``),
+    so resolution/approval paths can reject already-resolved items.
+    """
+    row = conn.execute(
+        "SELECT id, node_id, cause_kind, cause_ref, facet, created_at, resolved_at, resolution "
+        "FROM review_queue WHERE id=?",
+        (review_id,),
+    ).fetchone()
+    if row is None:
+        raise ReviewNotFoundError(review_id)
+    return {
+        "id": row[0],
+        "node_id": row[1],
+        "cause_kind": row[2],
+        "cause_ref": row[3],
+        "facet": row[4],
+        "created_at": row[5],
+        "resolved_at": row[6],
+        "resolution": row[7],
+    }
+
+
+_VALID_RESOLUTIONS = frozenset({"still_holds", "revised", "retracted", "dismissed"})
+
+
+def resolve_review_within_transaction(
+    conn: sqlite3.Connection,
+    review_id: str,
+    resolution: str,
+) -> dict[str, Any]:
+    """Body of ``resolve_review``, without opening its own transaction (task T7.5).
+
+    Invariant: identical to ``resolve_review`` but assumes the caller already
+    holds an open ``with conn:`` block — mirrors ``enqueue_review`` /
+    ``enqueue_review_within_transaction``. sqlite3's ``with conn:`` commits
+    on every block exit, so nested wrappers must never open a second one.
+    """
+    if resolution not in _VALID_RESOLUTIONS:
+        raise ValueError(
+            f"invalid resolution {resolution!r}; must be one of {_VALID_RESOLUTIONS}"
+        )
+    row = get_review(conn, review_id)
+    if row["resolved_at"] is not None:
+        raise ReviewAlreadyResolvedError(review_id)
+    now = _now()
+    conn.execute(
+        "UPDATE review_queue SET resolved_at=?, resolution=? WHERE id=?",
+        (now, resolution, review_id),
+    )
+    row["resolved_at"] = now
+    row["resolution"] = resolution
+    return row
+
+
+def resolve_review(
+    conn: sqlite3.Connection,
+    review_id: str,
+    resolution: str,
+) -> dict[str, Any]:
+    """Mark a review_queue row resolved (spec §4.5, §4.9; task T7.5).
+
+    Sets ``resolved_at=now()`` and ``resolution`` inside a single
+    transaction. Raises ``ReviewNotFoundError`` if missing,
+    ``ReviewAlreadyResolvedError`` if already resolved, ``ValueError`` if
+    ``resolution`` is not one of ``still_holds|revised|retracted|dismissed``.
+    Policy (e.g. ``dismissed`` only for ``violation``) lives in
+    ``tms.review.resolve_review``, not here.
+    """
+    with conn:
+        return resolve_review_within_transaction(conn, review_id, resolution)
+
+
+def finalize_proposal_approval_within_transaction(
+    conn: sqlite3.Connection,
+    review_id: str,
+    node_id: str,
+    resolution: str,
+) -> dict[str, Any]:
+    """Body of ``finalize_proposal_approval``, without its own transaction (task T7.5).
+
+    Records the minted ``node_id`` onto a create-node proposal review and
+    marks it resolved in one write set. Assumes the caller holds an open
+    ``with conn:`` (same nesting rule as ``enqueue_review_within_transaction``).
+    """
+    if resolution not in _VALID_RESOLUTIONS:
+        raise ValueError(
+            f"invalid resolution {resolution!r}; must be one of {_VALID_RESOLUTIONS}"
+        )
+    row = get_review(conn, review_id)
+    if row["resolved_at"] is not None:
+        raise ReviewAlreadyResolvedError(review_id)
+    now = _now()
+    conn.execute(
+        "UPDATE review_queue SET node_id=?, resolved_at=?, resolution=? WHERE id=?",
+        (node_id, now, resolution, review_id),
+    )
+    row["node_id"] = node_id
+    row["resolved_at"] = now
+    row["resolution"] = resolution
+    return row
+
+
+def finalize_proposal_approval(
+    conn: sqlite3.Connection,
+    review_id: str,
+    node_id: str,
+    resolution: str,
+) -> dict[str, Any]:
+    """Attach minted node_id to a proposal review and resolve it (task T7.5).
+
+    Single transaction: ``UPDATE review_queue SET node_id=?, resolved_at=?,
+    resolution=?``. Used by ``tms.review.approve_proposal`` after
+    ``create_node`` has already minted (create_node is its own top-level
+    transaction; this must not wrap it).
+    """
+    with conn:
+        return finalize_proposal_approval_within_transaction(
+            conn, review_id, node_id, resolution
+        )
 
 
 def _mint_unique_token_id(conn: sqlite3.Connection) -> str:
