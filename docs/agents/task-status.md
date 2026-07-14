@@ -199,7 +199,7 @@ milestone **M6 (Obsidian plugin)** and **M7 (TMS loop)** both unblock on M5.
 | Task | Goal | Status | Notes |
 |---|---|---|---|
 | T6.1 | Plugin scaffold + build in CI | DONE | Cursor-built TS scaffold (id `tm-hub`, rebrand-clean); `npm ci && npm run build` → `main.js` (verify exit 0, re-run independently); ci.yml `plugin-build` job (setup-node@v4/node20, working-dir plugin-obsidian, mirrors local). CI-green pending first push. |
-| T6.2 | Settings (URL + token) | TODO | |
+| T6.2 | Settings (URL + token) | DONE | Cursor-built `settings.ts` (TmHubSettings/DEFAULT_SETTINGS url=127.0.0.1:7433, TmHubSettingTab: URL + password token) + `main.ts` loadData/saveData persistence, addSettingTab, `apiFetch` w/ Bearer. Local gate: build exit 0 + `tsc --noEmit` exit 0 (persist-across-reload is manual, deferred to T6.5 TESTPLAN). |
 | T6.3 | Status bar (sync state + violation count) | TODO | |
 | T6.4 | Command: create node from selection | TODO | |
 | T6.5 | Clipboard cut/copy carrying anchors + TESTPLAN | TODO | |
