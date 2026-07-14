@@ -149,6 +149,22 @@ Anchors are plain markdown. Native cut/copy must retain the trailing
 `^tm-<id8>` text. After both files are saved, the daemon’s three-way
 reconcile decides MOVE vs duplicate.
 
+> **Load-bearing dependency (verify here — this is the whole point of T6.5).**
+> This scenario relies on Obsidian pasting a duplicated `^tm-<id8>` as
+> **literal text**, i.e. NOT stripping or regenerating the block id on paste.
+> Obsidian only auto-appends a block id when you create a `[[note#^…` block
+> reference against an id-less block; it does not rewrite existing `^id`
+> body text on paste (this is why duplicate block ids can exist at all).
+> `src/clipboard.ts` therefore ships pure anchor helpers plus an **inert**
+> `registerClipboard(plugin)` wiring point and relies on that native
+> retention (spec-question T6.5, archived resolved MVP-accept).
+> **If step 4a/4b below shows Obsidian STRIPPING or CHANGING the pasted
+> `^tm-<id8>`, this assumption is wrong:** T6.5 then needs an active paste
+> handler and `registerClipboard(this)` must be wired into `main.ts`
+> (`main.ts` is outside T6.5’s Files list → that is a new build-plan task,
+> not an in-place edit). Record the observed behavior against the
+> spec-question either way.
+
 ### 4a. CUT scenario (cross-file move)
 
 This corresponds to battery test **E04** (golden/reconcile/e04-cross-file-move/,
