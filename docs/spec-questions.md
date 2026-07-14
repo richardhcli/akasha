@@ -23,8 +23,8 @@ full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 and M6 (1 entry: T6.5, 2026-07-14).
 
-**Open questions: 6** (M7 in progress — logged 2026-07-14, resolve or
-archive at M7 close).
+**Open questions: 7** (M7 complete — logged 2026-07-14; several need a
+product/spec decision before archiving, see below).
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
 - **Where:** `src/akasha/tms/invalidate.py` (`_composes_touched_facet`, inline `# SPEC-QUESTION:`).
@@ -55,3 +55,8 @@ archive at M7 close).
 - **Where:** `src/akasha/tms/review.py` (`approve_proposal` / `_PROPOSAL_APPROVAL_RESOLUTION`, inline `# SPEC-QUESTION:`).
 - **Narrowest reading taken:** the `resolution` enum is `still_holds|revised|retracted|dismissed` (4.4) — none semantically means "a create-node proposal was approved and its node minted." `approve_proposal` records `still_holds` ("accepted as proposed, no revision") when it mints + resolves. This is a genuine semantic gap (not merely a missing column); a dedicated `approved` value would need a migration + enum change.
 - **Resolution:** open -- worth a human decision on whether proposal approval deserves a distinct resolution value.
+
+## T7.6 -- split reassignment queue has no `cause_kind` enum member
+- **Where:** `src/akasha/kernel/store.py` (`split_node`, per-inbound-edge `enqueue_review_within_transaction` call, inline `# SPEC-QUESTION:`); consumed by `src/akasha/tms/review.py` `resolve_reassignment`.
+- **Narrowest reading taken:** `review_queue.cause_kind` is a closed enum (4.4): `facet_break|subtasks_closed|evidence_retracted|recheck|conflict|violation|proposal` -- none means "an inbound edge needs human reassignment after a split." Reusing any existing member is UNSAFE (each is load-bearing elsewhere: `recheck` gates triggers idempotence, `violation` makes an item dismissible, `proposal` routes to the mint path -- all in modules T7.6 must not touch), so overloading one would suppress a real review or mis-route resolution. Chose a new, clearly-flagged value `"reassignment"` (`enqueue_review` does no runtime enum validation, and there is no DB CHECK constraint -- verified -- so it is mechanically safe) pending a spec amendment to add it to the closed enum. `resolve_reassignment` records the outcome as `"still_holds"` (the resolution enum likewise has no "reassigned" member -- mirrors the `approve_proposal` precedent, cf. the other T7.5 entry).
+- **Resolution:** open -- needs a spec amendment to add `reassignment` to the `cause_kind` enum (and possibly a `reassigned` resolution value). This is the same class of gap as the T7.5 proposal-approval-resolution question.

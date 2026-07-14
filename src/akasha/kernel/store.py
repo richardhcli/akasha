@@ -1509,6 +1509,15 @@ def split_node(
         if row is None:
             raise NodeNotFoundError(node_id)
 
+        # Capture live inbound edges BEFORE eager reassignment so we can
+        # enqueue one reassignment review per edge (task T7.6). The auto-
+        # reassign-to-first-successor below is kept as the safe default —
+        # an inbound edge must never be left pointing at a tombstone.
+        inbound_before = conn.execute(
+            "SELECT id, src FROM edges WHERE dst=? AND retracted_at IS NULL",
+            (node_id,),
+        ).fetchall()
+
         successor_ids: list[str] = []
         for part in parts:
             new_node = _create_node_tx(
@@ -1530,6 +1539,30 @@ def split_node(
         first_successor = successor_ids[0]
         _reassign_inbound_edges(conn, node_id, first_successor)
         _recompute_maturity(conn, first_successor)
+
+        # Additive reassignment queue on top of the eager default (T7.6).
+        for edge_id, edge_src in inbound_before:
+            cause_ref = canonical_json(
+                {
+                    "kind": "reassignment",
+                    "edge_id": edge_id,
+                    "old_id": node_id,
+                    "successors": successor_ids,
+                }
+            ).decode("utf-8")
+            # SPEC-QUESTION (T7.6): the review_queue.cause_kind closed enum
+            # (facet_break|subtasks_closed|evidence_retracted|recheck|conflict|
+            # violation|proposal, spec mvp-spec.md sec 4.4) has no member for
+            # 'an inbound edge needs human reassignment after a split'; every
+            # existing member is unsuitable because each is already used as an
+            # idempotence-gate filter or resolution-path selector elsewhere in
+            # the codebase that this task must not touch; narrowest reading
+            # that does not silently overload a loaded existing member is to
+            # introduce a new, clearly-flagged value 'reassignment' pending a
+            # spec amendment.
+            enqueue_review_within_transaction(
+                conn, edge_src, "reassignment", cause_ref=cause_ref
+            )
 
     return {node_id: successor_ids}
 
@@ -1606,6 +1639,10 @@ def merge_nodes(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[str]
     does not exist (checked before any write). All inside a single
     transaction.
 
+    Deliberately enqueues no reassignment review — unlike split, merge has
+    a single unambiguous survivor, so no inbound edge needs human
+    reassignment (narrowest reading of task T7.6).
+
     # SPEC-QUESTION (T1.6): spec §4.5 lists ``merge_nodes(ids) ->
     # redirect`` but never specifies survivor-selection. Narrowest
     # reading used here: the first id in the list wins. See
@@ -1622,6 +1659,9 @@ def merge_nodes(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[str]
 
         survivor = ids[0]
         redirect_map: dict[str, list[str]] = {}
+        # Deliberately enqueues no reassignment review -- unlike split, merge
+        # has a single unambiguous survivor, so no inbound edge needs human
+        # reassignment (narrowest reading of task T7.6).
         for old_id in ids[1:]:
             conn.execute(
                 "INSERT INTO redirects (old_id, successors, created_at) VALUES (?, ?, ?)",
@@ -1636,6 +1676,58 @@ def merge_nodes(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[str]
         _recompute_maturity(conn, survivor)
 
     return redirect_map
+
+
+def resolve_redirect_chain(conn: sqlite3.Connection, node_id: str) -> str:
+    """Follow ``redirects`` transitively to the current live terminal (spec §4.5, §4.11).
+
+    Invariant: starting from ``node_id``, repeatedly look up
+    ``redirects.successors`` for the current id; when a row exists, advance
+    to ``successors[0]`` (mirrors the eager-reassignment convention of
+    always following the FIRST successor by default). When no row exists,
+    the current id is the terminal/live id — return it. Multi-hop matters
+    because a node picked as a successor at one split/merge may itself be
+    split/merged again later, so a single-hop redirect lookup would resolve
+    to an already-tombstoned id. Terminates even on a pathological cycle:
+    a ``seen`` set of visited ids stops the walk (return current) rather
+    than looping forever. Read-only; never opens ``with conn:``.
+    """
+    current = node_id
+    seen: set[str] = {current}
+    while True:
+        row = conn.execute(
+            "SELECT successors FROM redirects WHERE old_id=?", (current,)
+        ).fetchone()
+        if row is None:
+            return current
+        successors = json.loads(row[0])
+        nxt = successors[0]
+        if nxt in seen:
+            return current
+        seen.add(nxt)
+        current = nxt
+
+
+def reassign_edge(conn: sqlite3.Connection, edge_id: str, new_dst: str) -> None:
+    """Re-point one live edge's ``dst`` to ``new_dst`` (spec §4.5; task T7.6).
+
+    Invariant: the sole write path used by ``tms.review.resolve_reassignment``
+    to apply a human-chosen successor after a split (rule 0.4: only
+    ``store.py`` issues the raw ``UPDATE``). Raises ``EdgeNotFoundError`` if
+    ``edge_id`` is missing or already retracted. After the update, recomputes
+    maturity for both the old and new destinations (both nodes' inbound-edge
+    sets just changed). Own top-level transaction.
+    """
+    with conn:
+        row = conn.execute(
+            "SELECT dst FROM edges WHERE id=? AND retracted_at IS NULL", (edge_id,)
+        ).fetchone()
+        if row is None:
+            raise EdgeNotFoundError(edge_id)
+        old_dst = row[0]
+        conn.execute("UPDATE edges SET dst=? WHERE id=?", (new_dst, edge_id))
+        _recompute_maturity(conn, old_dst)
+        _recompute_maturity(conn, new_dst)
 
 
 # --- Tokens (task T4.5, spec §4.4 ``tokens`` DDL / §4.11 ``/tokens``) ------

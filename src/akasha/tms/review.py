@@ -189,3 +189,51 @@ def approve_proposal(conn: sqlite3.Connection, review_id: str) -> str:
         conn, review_id, node.id, _PROPOSAL_APPROVAL_RESOLUTION
     )
     return node.id
+
+
+def resolve_reassignment(
+    conn: sqlite3.Connection, review_id: str, chosen_successor: str
+) -> dict[str, Any]:
+    """Resolve a T7.6 split-reassignment review by re-pointing its edge (spec §4.5, §4.11).
+
+    Invariant: the review must be open, ``cause_kind=='reassignment'``, and
+    its ``cause_ref`` envelope must be ``{kind, edge_id, old_id, successors}``
+    with ``kind=='reassignment'``. ``chosen_successor`` must be one of the
+    recorded successors. The edge is re-pointed not at ``chosen_successor``
+    directly but at ``store.resolve_redirect_chain(chosen_successor)`` —
+    the successor may itself have been split/merged again since the review
+    was enqueued (multi-hop A→B→C). Then marks the review resolved.
+    """
+    row = store.get_review(conn, review_id)
+    _require_open(row)
+
+    if not row["cause_ref"]:
+        raise ValueError(f"reassignment review {review_id!r} has empty cause_ref")
+
+    envelope = json.loads(row["cause_ref"])
+    if envelope.get("kind") != "reassignment" or row["cause_kind"] != "reassignment":
+        raise ValueError(f"review {review_id!r} is not a T7.6 reassignment review")
+
+    successors = envelope["successors"]
+    if chosen_successor not in successors:
+        raise ValueError(
+            f"chosen_successor {chosen_successor!r} is not among valid "
+            f"successors {successors!r} for review {review_id!r}"
+        )
+
+    edge_id = envelope["edge_id"]
+    # Multi-hop A->B->C: chosen_successor may itself have been split/merged
+    # again since this review was enqueued — always resolve transitively
+    # before re-pointing (exactly the case the T7.6 property test proves).
+    live_target = store.resolve_redirect_chain(conn, chosen_successor)
+
+    # Transaction 1: reassign_edge (owns its own with conn:).
+    store.reassign_edge(conn, edge_id, live_target)
+    # SPEC-QUESTION (T7.5/T7.6): the resolution enum
+    # (still_holds|revised|retracted|dismissed) has no dedicated 'reassigned'
+    # member, so 'still_holds' is reused as the narrowest reading ('the review
+    # is resolved, the human's chosen redirect is now in effect') — mirroring
+    # the existing precedent already in approve_proposal, which reuses
+    # still_holds for the same reason (see _PROPOSAL_APPROVAL_RESOLUTION).
+    # Transaction 2: mark resolved (separate top-level txn; never nest).
+    return store.resolve_review(conn, review_id, "still_holds")
