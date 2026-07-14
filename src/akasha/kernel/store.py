@@ -216,14 +216,43 @@ def enqueue_review(
     was persisted" shape) so callers can render it directly in an API
     response.
     """
+    with conn:
+        return enqueue_review_within_transaction(
+            conn, node_id, cause_kind, cause_ref=cause_ref, facet=facet
+        )
+
+
+def enqueue_review_within_transaction(
+    conn: sqlite3.Connection,
+    node_id: str | None,
+    cause_kind: str,
+    *,
+    cause_ref: str | None = None,
+    facet: str | None = None,
+) -> dict[str, Any]:
+    """Body of ``enqueue_review``, without opening its own transaction (task T7.2).
+
+    Invariant: identical to ``enqueue_review`` (see its docstring) but
+    assumes the caller already holds an open ``with conn:`` block --
+    mirrors ``_create_node_tx``'s/``_insert_commit``'s rationale exactly:
+    sqlite3's ``with conn:`` commits on every block exit, not just the
+    outermost one, so a function that may run INSIDE another mutation's
+    transaction (``tms/invalidate.py``'s ``invalidate()``, called from
+    ``commit_node`` on a major commit) must never open a second, nested
+    ``with conn:`` of its own -- doing so would silently commit the
+    caller's still-pending writes early, breaking the "atomic with the
+    commit" invariant spec §4.9 requires for invalidation. Used by both
+    ``enqueue_review`` itself (the standalone, transactional entry point)
+    and ``tms.invalidate.invalidate`` (transaction-less, composed inside
+    a caller's own transaction).
+    """
     now = _now()
     review_id = _mint_unique_review_id(conn)
-    with conn:
-        conn.execute(
-            "INSERT INTO review_queue (id, node_id, cause_kind, cause_ref, facet, "
-            "created_at, resolved_at, resolution) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
-            (review_id, node_id, cause_kind, cause_ref, facet, now),
-        )
+    conn.execute(
+        "INSERT INTO review_queue (id, node_id, cause_kind, cause_ref, facet, "
+        "created_at, resolved_at, resolution) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)",
+        (review_id, node_id, cause_kind, cause_ref, facet, now),
+    )
     return {
         "id": review_id,
         "node_id": node_id,
@@ -716,7 +745,7 @@ def commit_node(
         parents_head = _head_commit_hash(conn, node_id)
         parents = [parents_head] if parents_head is not None else []
 
-        _insert_commit(
+        commit_hash = _insert_commit(
             conn,
             node_id,
             parents=parents,
@@ -736,6 +765,37 @@ def commit_node(
         conn.execute("UPDATE nodes_fts SET body=? WHERE id=?", (canonical_body, node_id))
         # facets may have changed (facet_count is a maturity input, spec §4.6).
         _recompute_maturity(conn, node_id)
+
+        # SPEC-QUESTION (T7.2): spec §4.9 says invalidation triggers on "any
+        # commit with change_class == 'major'" but does not say which module
+        # decides the effective change_class (heuristic default vs. an
+        # explicit UI/CLI override) before it reaches this function.
+        # Narrowest reading adopted here: ``commit_node`` never recomputes or
+        # second-guesses ``change_class`` -- it is a plain, already-decided
+        # argument (an explicit override IS respected simply because nothing
+        # here overrides it back), and this function's ONLY job per T7.2's
+        # Steps (3) is to trigger the already-implemented (T7.1) invalidation
+        # walk whenever that argument is literally ``"major"``, using
+        # ``facets_touched`` verbatim as the touched set (a caller modeling a
+        # node retraction -- "always major touching all facets", §4.9 -- gets
+        # this by passing every one of the node's facet ids in
+        # ``facets_touched`` alongside ``change_class="major"``; see
+        # ``kernel/commits.py``'s module docstring). Deferred import to avoid
+        # a circular import (``tms.invalidate`` imports this module); this is
+        # the T7.2-sanctioned store.py touch outside this task's own Files
+        # list (rule 0.4 recurring precedent -- see docs/spec-questions.md
+        # entry for T7.2). Called INSIDE this transaction, not after it, so
+        # the enqueued facet_break reviews are atomic with the commit itself
+        # (crash between the two would otherwise leave a major commit
+        # persisted with no corresponding stale-subscriber flag); this is
+        # safe only because ``invalidate()`` (via ``store.enqueue_review_within_transaction``)
+        # never opens its own nested ``with conn:`` -- see
+        # ``enqueue_review_within_transaction``'s docstring for why a nested transaction would
+        # silently commit early instead.
+        if change_class == "major":
+            from akasha.tms import invalidate
+
+            invalidate.invalidate(conn, node_id, commit_hash, set(facets_touched))
 
     return Node(
         id=node_id,

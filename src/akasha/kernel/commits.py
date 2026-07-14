@@ -1,36 +1,52 @@
-"""Commit-facing helpers: facets_touched + change-class heuristic (task T1.6).
+"""Commit-facing helpers: facets_touched + change-class heuristic (tasks T1.6, T7.2).
 
-This module intentionally contains ONLY two small, pure, standalone
-helpers over ``Facet`` lists:
+This module contains small, pure, standalone helpers over ``Facet``
+lists plus a handful of unrelated pure formatting helpers used by the
+sync conflict path (added by T5.5, see below):
 
 - ``facets_touched(old_facets, new_facets)`` — which facet_ids changed.
-- ``default_change_class(old_facets, new_facets)`` — a NARROW heuristic
-  slice of spec §4.9's change-class rule (major-iff-removed/renamed/
-  version-bumped, else patch).
+- ``default_change_class(old_facets, new_facets, facets_touched=None)``
+  — the full §4.9 heuristic default: ``"major"`` iff a facet was
+  removed/renamed, or a facet in the (optionally caller-supplied)
+  ``facets_touched`` set had its ``version`` bumped; otherwise
+  ``"patch"``. This function never returns ``"minor"`` -- spec §4.9 only
+  names ``major`` (the interface-break trigger) and the residual
+  "least-invasive class the commit warrants" for everything else, which
+  this module (and the build plan's Goal/DoD for both T1.6 and T7.2)
+  reads as ``"patch"``; nothing in §4.9's default-heuristic clause ever
+  selects ``"minor"`` -- that class exists only for an explicit UI/CLI
+  choice (e.g. a brand-new facet addition, spec §7.7's mint-facet flow),
+  which always OVERRIDES this default rather than going through it.
 
-The FULL §4.9 heuristic (which also covers "minor" classification and
-"node retraction is always major touching all facets") plus wiring this
-into ``store.commit_node``'s default ``change_class``/``facets_touched``
-arguments is T7.2's job — deliberately NOT built here (build-plan T1.6
-Steps: "do NOT build that here, just the standalone helpers"). Callers
-that want the full commit-wiring behavior should wait for T7.2; callers
-here get exactly the two pure functions.
+"Node retraction is always major touching all facets" (spec §4.9) is
+NOT reimplemented here as a separate code path: T7.1's ``invalidate()``
+already flags every bound subscriber (including wildcard-bound) when
+handed ``touched`` equal to a node's full facet-id set (see
+``tests/unit/tms/test_invalidate.py::test_all_facets_touched_flags_every_bound_subscriber``),
+and T7.2's wiring (below / ``store.commit_node``) triggers that walk for
+ANY commit whose *actual* ``change_class`` is ``"major"`` regardless of
+whether that value came from this heuristic or an explicit override --
+so a caller representing a node retraction as a major commit that
+touches every one of the node's facets gets the exact §4.9 behavior for
+free, with no bespoke "retraction" function needed.
 
 This module performs no database access and imports nothing from
 ``store.py`` (mirrors ``maturity.py``'s pure-function discipline).
 
-# SPEC-QUESTION (T1.6): the task boundary between this module's narrow
-# helpers and T7.2's full commit wiring is stated in the build plan only
-# as "narrow heuristic (major iff a facet removed/renamed or a facet
-# version bumped, else patch)" — implemented exactly that literally below.
-# "minor" classification and the retraction-is-always-major rule (spec
-# §4.9) are left entirely to T7.2. See docs/spec-questions.md entry for
-# T1.6.
+# SPEC-QUESTION (T1.6, superseded by T7.2): the task boundary between
+# this module's heuristic and T7.2's full commit wiring was stated in
+# the build plan only as "narrow heuristic (major iff a facet
+# removed/renamed or a facet version bumped, else patch)". T7.2 confirms
+# that reading is already the FULL §4.9 default-heuristic clause (the
+# spec's only other classes -- "minor" and the retraction rule -- are
+# not reached via this heuristic at all, per the module docstring
+# above), so no further narrowing was needed here. See
+# docs/spec-questions.md entry for T1.6.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 from akasha.kernel.model import ChangeClass, Facet
 
@@ -63,18 +79,39 @@ def facets_touched(old_facets: list[Facet], new_facets: list[Facet]) -> list[str
     return sorted(touched)
 
 
-def default_change_class(old_facets: list[Facet], new_facets: list[Facet]) -> ChangeClass:
-    """Narrow default change-class heuristic (spec §4.9's "heuristic default" clause).
+def default_change_class(
+    old_facets: list[Facet],
+    new_facets: list[Facet],
+    facets_touched_ids: Iterable[str] | None = None,
+) -> ChangeClass:
+    """Default change-class heuristic (spec §4.9's "heuristic default" clause, task T7.2).
 
-    Invariant: returns ``"major"`` iff at least one facet present in
-    ``old_facets`` was removed (absent from ``new_facets``), renamed
-    (same ``facet_id``, different ``name``), or had its ``version``
-    strictly bumped in ``new_facets``; returns ``"patch"`` otherwise
-    (including when facets are only added, or unchanged). This function
-    never returns ``"minor"`` — that classification, and the separate
-    "node retraction is always major" rule, belong to spec §4.9's full
-    heuristic, which is T7.2's job (see module docstring). Pure function:
-    does not mutate either argument.
+    Invariant: returns ``"major"`` iff EITHER (a) at least one facet
+    present in ``old_facets`` was removed (absent from ``new_facets``) or
+    renamed (same ``facet_id``, different ``name`` — checked over every
+    old facet, not merely the ``facets_touched_ids`` set, since spec
+    §4.9 states this clause unconditionally: "a facet was
+    removed/renamed"), OR (b) a facet whose id is in
+    ``facets_touched_ids`` had its ``version`` strictly bumped between
+    ``old_facets`` and ``new_facets`` (spec §4.9: "a *touched* facet's
+    version was bumped" — this clause alone is scoped to the caller's
+    touched set). Returns ``"patch"`` otherwise (including when facets
+    are only added, or unchanged, or a version bump happened on a facet
+    NOT listed in ``facets_touched_ids``).
+
+    ``facets_touched_ids`` defaults to ``None``, in which case it is
+    computed as ``facets_touched(old_facets, new_facets)`` (this
+    module's own diff) — this is 100% backward compatible with T1.6's
+    original 2-positional-argument call sites (every facet that could
+    possibly have a version bump is, by ``facets_touched``'s own
+    definition, already included in that computed set, so passing no
+    explicit ``facets_touched_ids`` reproduces T1.6's original
+    all-old-facets version-bump check exactly).
+
+    This function never returns ``"minor"`` and never implements the
+    separate "node retraction is always major" rule — see the module
+    docstring for why neither is needed here. Pure function: does not
+    mutate any argument.
     """
     old_by_id = {f.facet_id: f for f in old_facets}
     new_by_id = {f.facet_id: f for f in new_facets}
@@ -84,8 +121,18 @@ def default_change_class(old_facets: list[Facet], new_facets: list[Facet]) -> Ch
             return "major"  # removed
         if new_f.name != old_f.name:
             return "major"  # renamed
-        if new_f.version > old_f.version:
-            return "major"  # version-bumped
+
+    touched_ids = (
+        set(facets_touched_ids)
+        if facets_touched_ids is not None
+        else set(facets_touched(old_facets, new_facets))
+    )
+    for facet_id in touched_ids:
+        old_f = old_by_id.get(facet_id)
+        new_f = new_by_id.get(facet_id)
+        if old_f is not None and new_f is not None and new_f.version > old_f.version:
+            return "major"  # touched facet's version was bumped
+
     return "patch"
 
 

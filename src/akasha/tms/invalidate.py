@@ -2,10 +2,28 @@
 
 Trigger: any commit with ``change_class == "major"``. This module only
 implements the walk itself -- classifying a commit as major (or minor) is
-the caller's job (T7.2); ``invalidate`` just honors whatever ``touched``
-set of facet ids it is handed. Node retraction ("major touching all
-facets") is likewise a caller concern: the caller passes ``touched`` equal
-to the full set of the retracted node's facet ids.
+the caller's job (T7.2, ``kernel/commits.py::default_change_class`` +
+``kernel/store.py::commit_node``'s wiring); ``invalidate`` just honors
+whatever ``touched`` set of facet ids it is handed. Node retraction
+("major touching all facets") is likewise a caller concern: the caller
+passes ``touched`` equal to the full set of the retracted node's facet
+ids (see ``test_all_facets_touched_flags_every_bound_subscriber`` below).
+
+Transaction discipline (task T7.2): ``invalidate()`` opens no ``with
+conn:`` block of its own and enqueues reviews via
+``store.enqueue_review_within_transaction`` (the transaction-less body of
+``store.enqueue_review``), NOT the public, self-committing
+``store.enqueue_review``. This is deliberate: ``store.commit_node`` calls
+``invalidate()`` from INSIDE its own ``with conn:`` block so the
+facet_break reviews it enqueues are atomic with the triggering commit;
+sqlite3's ``with conn:`` commits on every block exit (not just the
+outermost one), so a nested transactional call would silently commit the
+caller's still-pending writes early. Callers that invoke ``invalidate()``
+on its own (e.g. this module's unit tests) are responsible for wrapping
+it in their own ``with conn:`` if they need the enqueued reviews to be
+durably committed -- mirrors the same invariant ``kernel/store.py``
+already documents for its own transaction-less helpers (``_insert_commit``,
+``_recompute_maturity``, ``enqueue_review_within_transaction``).
 
 Implements exactly the §4.9 pseudocode::
 
@@ -69,7 +87,9 @@ def invalidate(
     flagged stale is not re-flagged by a further downstream break).
 
     Returns the list of newly-enqueued review rows (as returned by
-    ``store.enqueue_review``); an unaffected call returns ``[]``.
+    ``store.enqueue_review_within_transaction``); an unaffected call
+    returns ``[]``. Opens no transaction of its own -- see the module
+    docstring's "Transaction discipline" note.
     """
     live_edges = store.find_live_edges(conn, dst=node_id)
     subs = [
@@ -87,7 +107,7 @@ def invalidate(
     enqueued: list[dict[str, Any]] = []
     for e in subs:
         if not _already_unresolved_stale(conn, e.src):
-            review = store.enqueue_review(
+            review = store.enqueue_review_within_transaction(
                 conn, e.src, "facet_break", cause_ref=commit, facet=e.facet_binding
             )
             enqueued.append(review)
