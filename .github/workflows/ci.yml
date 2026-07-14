@@ -26,6 +26,19 @@ jobs:
     steps:
       - run: echo "windows-latest leg of 'check' is the release gate (spec §3, §6.3)"
 
+  plugin-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin-obsidian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm run build
+
   # Reserved for later milestones:
   # - nightly-battery: `make battery` on a schedule trigger (wired at M5+)
   # - nightly-soak: long-running soak test (wired at M5+)
