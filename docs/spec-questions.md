@@ -20,7 +20,8 @@ This file holds **open** questions only. Resolved entries are moved to
 closes (context-size optimization — an agent scanning for outstanding
 ambiguities shouldn't have to read past closed ones). See that file for the
 full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
-M4 (13 entries, 2026-07-12), and M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13).
+M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
+and M6 (1 entry: T6.5, 2026-07-14).
 
-**No open questions at present** (all M5 questions resolved and archived at
-M5 close, 2026-07-13). Next work: M6 (Obsidian plugin).
+**No open questions at present** (all M6 questions resolved and archived at
+M6 close, 2026-07-14). Next work: M7 (TMS loop) — both M6 and M7 unblock on M5.
