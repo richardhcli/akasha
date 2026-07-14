@@ -4,6 +4,7 @@ import {
   TmHubSettingTab,
   type TmHubSettings,
 } from "./settings";
+import { StatusBar } from "./statusbar";
 
 export default class TmHubPlugin extends Plugin {
   settings!: TmHubSettings;
@@ -11,6 +12,14 @@ export default class TmHubPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new TmHubSettingTab(this.app, this));
+
+    const statusBar = new StatusBar(this, this.addStatusBarItem());
+    await statusBar.refresh();
+    this.registerInterval(
+      window.setInterval(() => {
+        void statusBar.refresh();
+      }, 5000),
+    );
   }
 
   onunload(): void {}
