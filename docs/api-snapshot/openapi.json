@@ -22,6 +22,17 @@
             ],
             "title": "Facet Binding"
           },
+          "facet_span": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Facet Span"
+          },
           "mode": {
             "default": "track",
             "title": "Mode",

@@ -221,13 +221,13 @@ milestone **M6 (Obsidian plugin)** and **M7 (TMS loop)** both unblock on M5.
 
 | Task | Goal | Status | Notes |
 |---|---|---|---|
-| T7.1 | Invalidation walk (`invalidate.py`) | TODO | |
+| T7.1 | Invalidation walk (`invalidate.py`) | DONE | Run 20260714-M7 (parallel cohort w/ T7.7). `invalidate(conn, node_id, commit, touched)` reads subscribers via `store.find_live_edges(dst=node_id)`, filters in Python on `mode=='track'` + `edge_type in JUSTIFICATION_EDGE_TYPES|{'composes'}` + §4.9 facet-binding predicate; damper = non-empty `find_open_reviews(node_id=src, cause_kind='facet_break')`; enqueues via `store.enqueue_review`. 10 holistic unit tests (touched/untouched binding, `*`-on-any-break, damper-dedup, retracted/mode!=track/non-justification ignored, whole-node composes, all-facets retraction analogue). `composes_touched_facet` undefined in spec → narrowest reading (whole-node composes fires on any touched) + SPEC-QUESTION T7.1 (open). Direct edit (worker: ~90 LOC spec-precise, not Cursor). Verify exit 0; independently re-verified (full gate green). |
 | T7.2 | Change-class heuristic + wiring into commit | TODO | |
 | T7.3 | Trigger registry + evaluator (`triggers.py`) | TODO | |
 | T7.4 | Supertask trigger fires once, never auto-closes | TODO | |
 | T7.5 | Review queue: resolutions + daily cap (`review.py`) | TODO | |
 | T7.6 | Split/merge inbound-reassignment queue | TODO | |
-| T7.7 | Facets-from-spans capture (`POST /edges` with `facet_span`) | TODO | |
+| T7.7 | Facets-from-spans capture (`POST /edges` with `facet_span`) | DONE | Run 20260714-M7 (parallel cohort w/ T7.1). `CreateEdgeBody` gains `facet_span: str\|None`; when present, route mints a facet on `dst` via new `store.mint_facet_from_span(conn, node_id, span, *, author, message)` (id8 via existing `ids.mint`, appends `Facet(version=1)`, `commit_node(change_class="minor")`) then forces edge `facet_binding` to that concrete id (non-`*`). 3 holistic integration tests (`-k facet_span`): mint-on-target + concrete binding + neighborhood visibility + zero spurious reviews; no-span path unchanged; justification-binding invariant satisfied. OpenAPI snapshot regenerated (sanctioned command, not hand-edited) — diff is exactly the new field. `Facet.name` not supplied by capture flow → narrowest reading `name=facet_id` + SPEC-QUESTION T7.7 (open). Direct edit (Facet.name ambiguity + cross-module wiring, not Cursor). Verify exit 0 (both cmds); independently re-verified (full gate green). |
 
 ## M8 — Web UI (Depends on: M7)
 

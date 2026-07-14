@@ -905,6 +905,72 @@ def _edge_row_to_model(row: tuple[Any, ...]) -> Edge:
     )
 
 
+def mint_facet_from_span(
+    conn: sqlite3.Connection,
+    node_id: str,
+    span: str,
+    *,
+    author: str,
+    message: str = "",
+) -> Facet:
+    """Mint a brand-new facet on node_id from a highlighted span (task T7.7, spec §4.2).
+
+    Invariant: reads node_id's current head content (raises
+    ``NodeNotFoundError`` if unknown — same exception ``commit_node``
+    raises, propagated from it below), mints a fresh ``facet_id`` via the
+    same id8 scheme every other id in the system uses (``ids.mint()``,
+    spec §4.1) -- reusing the CLI's ``_parse_facets`` precedent
+    (``cli/main.py``): a facet_id is minted client/server-side with no DB
+    collision check, since (unlike ``nodes``/``edges``/``tokens``/
+    ``review_queue``) there is no standalone facets table to check
+    uniqueness against -- facets live only inside a node's versioned
+    object blob (module docstring above). Appends one new ``Facet`` (with
+    ``version=1``, a brand-new facet has never had an interface break) to
+    node_id's current facet list and commits it via ``commit_node`` with
+    ``change_class="minor"`` and ``facets_touched=[new_facet_id]``.
+
+    ``change_class="minor"`` (never ``"major"``) is not a judgment call:
+    spec §4.9's invalidation-trigger heuristic fires on ``major`` iff a
+    facet was "removed/renamed" or an existing facet's ``version`` was
+    "bumped" -- a brand-new v1 facet is neither, and a ``major`` commit
+    here would spuriously flag every other live inbound justification
+    edge on node_id (a ``'*'``-bound one, or a ``composes`` edge) even
+    though nothing they depend on changed (spec §4.9 ``invalidate``).
+
+    # SPEC-QUESTION (T7.7): spec §4.2's ``Facet.name`` is a "short label,
+    # unique per node", but facets-from-spans capture (§T7.7 step 1) only
+    # supplies ``facet_span`` (the highlighted text) -- no name field.
+    # Narrowest, collision-free reading used here: ``name = facet_id``
+    # (the id8 is unique by construction, unlike the span text, which may
+    # repeat). See docs/spec-questions.md entry for T7.7.
+
+    Not atomic with a subsequent ``create_edge`` call (the caller's own
+    transaction; this function opens and closes its own via
+    ``commit_node``): if the caller mints a facet here and then
+    ``create_edge`` fails (e.g. an edge-model validation error unrelated
+    to the facet_binding itself), the minted facet is NOT rolled back --
+    it remains a harmless, unbound extra facet on node_id, never a
+    dangling reference (spec §4.5 has no cross-node atomic-commit
+    primitive to compose the two writes into a single transaction).
+
+    Returns the newly-minted ``Facet``. Raises ``NodeNotFoundError`` if
+    node_id does not exist.
+    """
+    node = get_node(conn, node_id)
+    facet_id = ids.mint()
+    new_facet = Facet(facet_id=facet_id, name=facet_id, span=span, version=1)
+    commit_node(
+        conn,
+        node_id,
+        facets=[*node.facets, new_facet],
+        change_class="minor",
+        facets_touched=[facet_id],
+        author=author,
+        message=message,
+    )
+    return new_facet
+
+
 def create_edge(
     conn: sqlite3.Connection,
     src: str,
