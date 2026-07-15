@@ -1,29 +1,68 @@
 # Agent Fleet Orchestrator — Architecture & Dispatch Protocol
 
 **Status:** Development meta-tooling (not part of akasha product code).  
-**Purpose:** Parallelize and optimize execution of akasha build-plan tasks across a 3-tier model hierarchy, cutting token cost by matching task complexity to model cost.
+**Purpose:** Parallelize and optimize execution of akasha build-plan tasks across a 3-tier model hierarchy, strongly cutting token cost by matching task complexity to model cost.
 
 ---
 
 ## Tier System
 
-| Tier | Model | Role | Invocation | Cost | Judgment? |
-|------|-------|------|-----------|------|-----------|
-| **Tier 1** | Opus 4.8 | Orchestrator: dispatch, verify results, manage task-status | Claude Code Agent tool | $$$ | Yes (decide what runs, parse ambiguity) |
-| **Tier 2** | Sonnet 5 | Task executor: owns one task, decides tier-3 delegation, verifies | Claude Code Agent tool | $$ | Medium (interpret spec, judge direct vs. delegate) |
-| **Tier 3** | Cursor Grok 4.5 High | Code editor: edits files per task JSON spec | Subprocess (`cursor_bridge.py`) | $$ | No (mechanical, constrained by JSON contract) |
 
-**Rationale:** Frontier-model (Opus) time is expensive; spend it on judgment and orchestration. Tier 2 (Sonnet) handles most task execution, with good spec-reading ability. Tier 3 (Cursor Grok 4.5 High) is strong at large-context code edits with spec-following — reserved for verbatim-from-spec work, golden corpus generation, and repetitive boilerplate. Model selection is modular (env var + CLI flag) to support future swaps without code changes.
+| Tier       | Model                | Role                                                                                     | Invocation                      | Cost | Judgment?                                          |
+| ---------- | -------------------- | ---------------------------------------------------------------------------------------- | ------------------------------- | ---- | -------------------------------------------------- |
+| **Tier 1** | Opus 4.8             | Scanner only: eligible cohort from task-status + build-plan (no dispatch, no status I/O) | Claude Code Agent tool          | $$$  | Yes (decide what runs, parse ambiguity)            |
+| **Tier 2** | Sonnet 5             | Task owner: decide Cursor vs direct, confirm Verify, own retries/BLOCKED                 | Claude Code Agent tool          | $$   | Medium (interpret spec, judge direct vs. delegate) |
+| **Tier 3** | Cursor Grok 4.5 High | Edit executor **plus** local Verify loop; returns structured edit+verify evidence        | Subprocess (`cursor_bridge.py`) | $    | Low (follow JSON contract; may re-edit on Verify fail) |
+
+
+**Rationale:** Frontier-model (Opus) time is expensive; spend it on judgment and cohort selection. Tier 2 (Sonnet) owns the task and escalation. Tier 3 (Cursor) is the cheapest place to run the edit→Verify→fix loop for mechanical/spec-following work — not merely a dumb patch applicator. Authoritative durable logging and `DONE` flips stay outside any LLM (caller + Workflow return values). Model selection is modular (env var + CLI flag) to support future swaps without code changes.
 
 ---
 
+
+
+## Division of Responsibility (RACI)
+
+Who does what today, and what is *authoritative* vs *advisory*:
+
+| Concern                         | Cursor (T3)                         | Worker (T2)                                      | Independent verifier (Workflow)     | Caller (outer session)                          | Scanner (T1)        |
+| ------------------------------- | ----------------------------------- | ------------------------------------------------ | ----------------------------------- | ----------------------------------------------- | ------------------- |
+| Choose next cohort              | —                                   | —                                                | —                                   | invokes scanner                                 | **R** (structured)  |
+| Spawn workers / verifiers       | —                                   | —                                                | —                                   | invokes Workflow                                | —                   |
+| Edit files for a task           | **R** when delegated                | **R** when direct / on Cursor failure            | —                                   | —                                               | —                   |
+| Run task `Verify` (first pass)  | **R** inside bridge session (target)| **A**: confirm / retry / BLOCKED                 | —                                   | —                                               | —                   |
+| Independent re-Verify + git xchk| —                                   | —                                                | **R** / **A** for `CONFIRMED_*`     | —                                               | —                   |
+| Durable run log under `logs/`   | contributes evidence fields only    | contributes structured result                    | contributes verdict                 | **R** / **A** (writes verbatim from Workflow)   | —                   |
+| Flip `task-status.md` → `DONE`  | —                                   | —                                                | supplies verdict only               | **R** / **A** (only on `CONFIRMED_DONE`)        | —                   |
+| `make check` / cohort settle    | —                                   | —                                                | —                                   | **R**                                           | —                   |
+
+
+**R** = responsible (does the work). **A** = accountable (gate that must pass). Cells marked "contributes" are inputs to the accountable writer, never a substitute for it.
+
+### Why this split (and what was suboptimal)
+
+The *previous* Tier-3 contract treated Cursor as **edit-only**: the bridge explicitly did not run `Verify`, and the worker was told never to trust Cursor's self-report. That was correct about **trust** (never mark `DONE` from an LLM claim alone — see Verification Model / ORCHESTRATION-INCIDENT) but **suboptimal about cost and loop placement**:
+
+1. **Verify belongs next to the editor.** Cursor already runs with `--force --trust` and can shell out. Forcing every Verify failure to bounce back to Sonnet for diagnosis doubles latency and spends $$ re-reading context Cursor already has open.
+2. **Triple Verify without Cursor participation** (worker + independent verifier, with Cursor contributing nothing) wastes the cheapest tier on the loop that most often needs a second edit.
+3. **Durable logging must not move to Cursor (or any worker LLM).** Workflow scripts have no filesystem access; the audit property is that prompts/results on disk are the *literal* harness-returned objects with no narration step. An agent "logging" by writing files reintroduces the fabrication surface the log was designed to close. Cursor should *emit* verify exit codes / usage / `files_changed` into the bridge JSON so the caller can persist them — it should not own `docs/agents/logs/`.
+
+**Target contract (optimized):** Cursor = edit + local Verify loop + structured evidence. Worker = strategy, confirmation Verify, retries, BLOCKED. Independent verifier + caller = trust boundary and durable log. This keeps the incident-driven guarantees while putting mechanical re-edit cycles on `$` instead of `$$`.
+
+---
+
+
+
 ## Dispatch Model
+
+
 
 ### File-Disjoint Parallelism
 
 Per `docs/agents/runbook.md`, tasks whose `Files` lists don't overlap are safe to run in parallel (no write conflicts). Tasks touching the same file(s) must run sequentially.
 
 Example:
+
 ```
 T2.1 → Files: [src/akasha/ids.py]
 T2.2 → Files: [src/akasha/canonical.py]
@@ -39,39 +78,45 @@ T1.5 → Files: [src/akasha/kernel/store.py, ...]
 T1.3, T1.4, T1.5 all touch store.py → run sequentially, one at a time.
 ```
 
+
+
 ### Orchestrator Responsibilities
 
 The "orchestrator" role is now split across two components rather than one
 prose-narrating agent — see "Verification model" below for why.
 
-1. **`fleet-orchestrator` agent (scanner, Opus)** — reads task-status.md +
-   build-plan.md, identifies all TODO tasks with satisfied dependencies,
+1. `fleet-orchestrator` **agent (scanner, Opus)** — reads task-status.md +
+  build-plan.md, identifies all TODO tasks with satisfied dependencies,
    partitions by file disjointness into a cohort (sequential group collapsed
    to its first task, or a batch of fully parallel tasks), and returns that
    cohort as structured data. It does not spawn workers and does not write
    task-status.md.
-2. **`docs/agents/fleet-workflow.js` (Workflow script)** — receives the
-   cohort, spawns one `fleet-worker` agent per task (in parallel where
+2. `docs/agents/fleet-workflow.js` **(Workflow script)** — receives the
+  cohort, spawns one `fleet-worker` agent per task (in parallel where
    file-disjoint, via `pipeline()`), then spawns a separate, independent
    verifier agent per task that re-runs Verify and cross-checks claimed
    files against `git status`. Returns structured worker + verifier results
    for the whole cohort.
 3. **Caller (the outer Claude Code session)** — after the Workflow returns,
-   writes the durable log under `docs/agents/logs/<run_id>/` (see
+  writes the durable log under `docs/agents/logs/<run_id>/` (see
    "Logging" below) and updates `docs/agents/task-status.md` /
    `docs/spec-questions.md`, flipping a task to `DONE` only when its
    verifier verdict is `CONFIRMED_DONE`. Runs `make check` (+ `make battery`
    for M5+ closures) before considering the cohort settled.
 
+
+
 ### Worker Responsibilities
 
 1. **Understand the task** — read its Goal/Depends/Files/Spec/Steps/Verify/DoD from build-plan.md.
 2. **Decide edit strategy** — delegate to Cursor or edit directly (see decision tree in `fleet-worker.md`).
-3. **If delegating:** build task JSON (task_id, goal, files, constraints) and pipe to `python scripts/fleet/cursor_bridge.py`.
-4. **Always verify** — run the task's `Verify` command yourself; never trust Cursor's self-report.
-5. **Report back** — status (DONE / BLOCKED), Verify output, files touched, any spec questions.
+3. **If delegating:** build task JSON including `verify_cmd` (task_id, goal, files, constraints, verify_cmd) and pipe to `python scripts/fleet/cursor_bridge.py`. Cursor is expected to edit **and** run Verify locally (see bridge contract).
+4. **Always confirm Verify** — re-run the task's `Verify` yourself after Cursor returns (or after a direct edit). Treat Cursor's reported exit code as **advisory evidence**, not authority. Never mark the worker result `DONE` solely on Cursor's narrative.
+5. **Report back** — status (DONE / BLOCKED), Verify output, files touched, Cursor bridge evidence (if any), any spec questions.
 
 ---
+
+
 
 ## Cursor Bridge Contract (`scripts/fleet/cursor_bridge.py`)
 
@@ -80,26 +125,36 @@ prose-narrating agent — see "Verification model" below for why.
 ### Input
 
 Read task JSON from stdin:
+
 ```json
 {
   "task_id": "T2.4",
   "goal": "Generate 15 golden test fixtures covering all facet types",
   "files": ["tests/golden/fixtures_facet.json"],
-  "constraints": "No pickle/eval/exec. Follow spec §7.1 exactly. Output must be valid JSON, schema: [{id, type, facets, ...}, ...]"
+  "constraints": "No pickle/eval/exec. Follow spec §7.1 exactly. Output must be valid JSON, schema: [{id, type, facets, ...}, ...]",
+  "verify_cmd": "uv run pytest tests/unit/test_golden_fixtures.py -q"
 }
 ```
+
+`verify_cmd` is required for the optimized contract. The bridge prompt instructs Cursor to: (1) edit only listed files, (2) run `verify_cmd`, (3) on non-zero exit, diagnose and re-edit within a small budget (typically 1–2 fix passes), (4) stop and report rather than inventing passing tests.
+
+
 
 ### Output
 
 Single JSON line to stdout:
 
-**On successful edit:**
+**On completed edit + local Verify attempt:**
+
 ```json
 {
   "status": "completed",
   "files_changed": ["tests/golden/fixtures_facet.json"],
   "diff_stat": "tests/golden/fixtures_facet.json | 120 +++++++++...",
   "cursor_result_text": "Generated 15 fixtures covering Entity, Definition, Claim, Relation...",
+  "verify_command": "uv run pytest tests/unit/test_golden_fixtures.py -q",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "... 19 passed in 0.4s",
   "usage": {
     "inputTokens": 8500,
     "outputTokens": 2100,
@@ -109,16 +164,21 @@ Single JSON line to stdout:
 }
 ```
 
+`status: "completed"` means the Cursor session finished and returned structured evidence — **not** that the task is fleet-`DONE`. If Cursor exhausted its local fix budget with Verify still failing, still return `completed` with `verify_exit_code != 0` so the worker can retry direct or BLOCKED; do not invent a green Verify.
+
 **If Cursor unavailable (not on PATH or not logged in):**
+
 ```json
 {
   "status": "unavailable",
   "reason": "cursor-agent not found on PATH"
 }
 ```
+
 Worker will fall back to direct edit; this is not an error.
 
 **On timeout:**
+
 ```json
 {
   "status": "timeout",
@@ -127,6 +187,7 @@ Worker will fall back to direct edit; this is not an error.
 ```
 
 **On error:**
+
 ```json
 {
   "status": "error",
@@ -134,15 +195,19 @@ Worker will fall back to direct edit; this is not an error.
 }
 ```
 
+
+
 ### Model Selection (Modular)
 
 **Current default:** `grok-4.5-high` (Cursor Grok 4.5 High — strong spec-following, large-context code work).
 
 Override via:
+
 - `--model <model_id>` flag (e.g., `--model composer-2.5`)
 - `AKASHA_FLEET_CURSOR_MODEL` env var (e.g., `export AKASHA_FLEET_CURSOR_MODEL=gpt-5.3-codex-high`)
 
 **Design principle:** Model selection is parameterized in two places for refactorability:
+
 - `run_cursor()` function default (internal)
 - CLI argparse default (external/API)
 
@@ -154,25 +219,35 @@ This allows swapping models without touching the orchestrator or worker agents.
 echo '{"task_id":"T2.4",...}' | python scripts/fleet/cursor_bridge.py
 ```
 
-**Important:** The bridge does NOT run the task's `Verify` command. It only reports "edits happened"; the worker is responsible for verifying correctness.
+**Important:** The bridge **does** ask Cursor to run `verify_cmd` and return exit code + output tail as structured fields. That is *local* verification — cheap fix loops on Tier 3. It does **not** replace the worker's confirmation Verify or the Workflow's independent verifier. The worker remains accountable for the worker-schema `verify_*` fields; the independent verifier remains the gate for `CONFIRMED_DONE`.
 
 ---
 
+
+
 ## Verification Model
 
-**Never trust a worker's self-report as the sole basis for marking a task
-`DONE`.** `docs/agents/fleet-workflow.js` spawns a second, independent
-`agent()` call per task — the verifier — after the worker returns. The
-verifier:
+Verification is intentionally layered. Cheaper tiers catch most failures;
+only the outermost independent stage is allowed to authorize `DONE`.
+
+```
+Cursor local Verify  →  Worker confirmation Verify  →  Independent verifier
+     (advisory)              (worker schema)              (CONFIRMED_*)
+```
+
+**Never trust a worker's (or Cursor's) self-report as the sole basis for
+marking a task `DONE`.** `docs/agents/fleet-workflow.js` spawns a second,
+independent `agent()` call per task — the verifier — after the worker
+returns. The verifier:
 
 1. Re-runs the task's exact `Verify` command itself, via its own `Bash`
-   call, and records the real exit code and output tail.
+  call, and records the real exit code and output tail.
 2. Checks every path the worker claimed in `files_changed` actually exists
-   on disk and is non-empty.
+  on disk and is non-empty.
 3. Cross-checks `git status --porcelain` / `git diff --name-only` against
-   the claim.
+  the claim.
 4. Returns a structured verdict: `CONFIRMED_DONE`, `CONTRADICTS_CLAIM`, or
-   `CONFIRMED_BLOCKED`.
+  `CONFIRMED_BLOCKED`.
 
 A task is flipped to `DONE` in `docs/agents/task-status.md` only on
 `CONFIRMED_DONE`. `CONTRADICTS_CLAIM` is treated exactly like any other
@@ -193,6 +268,13 @@ subagent then self-reports as if it succeeded. See the
 `ORCHESTRATION-INCIDENT` entry in `docs/spec-questions.md` for the full
 writeup.
 
+**What Cursor verification is for:** shrinking the Sonnet retry loop. When
+Cursor returns `verify_exit_code: 0` and the worker's own re-run agrees,
+the independent verifier usually confirms quickly. When Cursor returns
+non-zero, the worker can skip a wasted "hope it passed" confirmation and
+go straight to direct fix or BLOCKED. What Cursor verification is *not*
+for: authorizing `task-status.md` updates or replacing the durable log.
+
 ## Logging
 
 Every `fleet-dispatch` Workflow run is persisted to
@@ -211,13 +293,20 @@ docs/agents/logs/<run_id>/
 ```
 
 Workflow scripts have no filesystem access, so this is written by the
-caller (the outer Claude Code session) immediately after `await
-Workflow(...)` resolves, directly from the structured `results` array the
+caller (the outer Claude Code session) immediately after `await Workflow(...)` resolves, directly from the structured `results` array the
 workflow returns — never from a re-narrated summary of it. This is what
 makes the log trustworthy for manual review: every prompt on disk is the
 literal string that was sent, and every result on disk is the literal
 schema-validated object the harness returned, with no narration step in
 between where a fabrication could be introduced.
+
+**Cursor's role in logging:** emit evidence into the bridge JSON
+(`files_changed`, `verify_*`, `usage`) that the worker copies into its
+structured result (`cursor_task_json` / `cursor_response_json`). The
+caller then persists those fields inside `workers/<task_id>/result.json`.
+Cursor must **not** write under `docs/agents/logs/` itself — agent-authored
+log files would not be trustworthy for the same reason prose orchestration
+is not.
 
 ## Hang Handling
 
@@ -238,13 +327,21 @@ while this system was being designed.
 
 ---
 
+
+
 ## Retry & Escalation
+
+
 
 ### Worker Retry Logic
 
-On `Verify` failure:
-1. **Retry 1:** Diagnose. If delegated to Cursor, try direct edit; if direct, fix obvious bug.
-2. **Retry 2:** Final attempt.
+On `Verify` failure (worker's confirmation, or Cursor returned non-zero):
+
+1. **Retry 1:** Diagnose. If Cursor already reported a failing Verify with a
+   useful stdout tail, use that diagnosis; prefer a focused direct edit over
+   re-invoking Cursor blindly. If the first path was direct, fix the obvious bug.
+2. **Retry 2:** Final attempt (direct edit preferred once Cursor has had its
+   local fix budget).
 3. **BLOCKED:** After 2 retries, report `BLOCKED: <reason>` with full Verify output. **Never weaken the test.**
 
 Per CLAUDE.md rule 9: if Verify doesn't pass, the task isn't done.
@@ -252,12 +349,15 @@ Per CLAUDE.md rule 9: if Verify doesn't pass, the task isn't done.
 ### Orchestrator Escalation
 
 If a task goes `BLOCKED`:
+
 1. Investigate whether it's a spec ambiguity (worker should have drafted a `SPEC-QUESTION:` comment).
 2. If spec ambiguity: log it to `docs/spec-questions.md` and stop the pipeline.
 3. If genuine obstacle (e.g., dep not installed): communicate to user.
 4. Do NOT try to unblock automatically — stop and ask.
 
 ---
+
+
 
 ## Constraints & Guardrails
 
@@ -277,6 +377,8 @@ Orchestrator and workers will be briefed with this list verbatim.
 
 ---
 
+
+
 ## Example Dispatch Flow
 
 ```
@@ -284,33 +386,37 @@ Orchestrator and workers will be briefed with this list verbatim.
 → Scan task-status.md: M0 is CLOSED, find next eligible milestone
 → M2 tasks (T2.1–T2.4) all TODO, all depend only on M0 (DONE)
 → Check file disjointness: all disjoint ✓
-→ Flip all 4 to IN PROGRESS in task-status.md
+→ Caller may mark cohort IN PROGRESS; invokes fleet-workflow.js
 
-[Spawn in parallel]
+[Spawn in parallel via Workflow]
 → fleet-worker for T2.1 (IDs + checksums)
 → fleet-worker for T2.2 (Canonicalization)
 → fleet-worker for T2.3 (Canonicalization property tests)
 → fleet-worker for T2.4 (Golden corpus)
 
 [T2.4 worker decides: "This is golden fixtures, verbatim from spec → delegate to Cursor"]
-→ Build task JSON, pipe to cursor_bridge.py
-→ Cursor returns status=completed, diff_stat shows fixtures.json +150 lines
-→ Worker runs `make check` (task's Verify) → PASSED ✓
-→ Report back to orchestrator: DONE, files={fixtures.json}, usage={...}
+→ Build task JSON (incl. verify_cmd), pipe to cursor_bridge.py
+→ Cursor edits fixtures, runs Verify locally, fix-loops if needed
+→ Bridge returns status=completed, verify_exit_code=0, diff_stat, usage
+→ Worker re-runs Verify (confirmation) → PASSED ✓
+→ Independent verifier re-runs Verify + git cross-check → CONFIRMED_DONE
+→ Caller writes docs/agents/logs/<run_id>/ from Workflow results; flips task-status
 
-[All 4 workers finish]
-→ Orchestrator flips all to DONE, runs `make check` to gate the milestone
-→ `make check` passes ✓
-→ Move to next phase: M1 + M3 are now eligible
+[All 4 workers finish + verifiers confirm]
+→ Orchestrator flips all to Done, runs `make check` to gate the milestone
+→ Continue (next phase OR stop)
 
 [No spec questions, proceed to parallel cohorts...]
 ```
 
 ---
 
+
+
 ## Integration with Existing Runbook
 
 The orchestrator's dispatch logic is a **pure automation of** the manual procedure in `docs/agents/runbook.md`. Both follow the same rules:
+
 - File-disjoint parallelism (from runbook.md).
 - Task structure and verification (from build-plan.md).
 - Non-negotiable rules (from CLAUDE.md).
@@ -319,38 +425,50 @@ The orchestrator is an optional *acceleration*: spawn it via the Agent tool to r
 
 ---
 
+
+
 ## Token Cost Estimation
 
 Rough per-task costs (single pass, no retries):
 
-| Task Type | Tier | Cost | Example |
-|-----------|------|------|---------|
-| Verbatim spec transcription (DDL, fixtures) | 3 (Cursor) | ~$0.01–0.05 | T1.1, T2.4 |
-| Straightforward coding (parser, store logic) | 2 (Sonnet) | ~$0.10–0.30 | T1.3, T3.2 |
-| Spec interpretation + judgment | 2 (Sonnet) | ~$0.30–0.50 | T5.4, T7.2 |
-| Task orchestration (whole milestone) | 1 (Opus) | ~$2–5 | M2 cohort, all retries |
 
-**Optimization win:** Without the fleet, every task (even T1.1 verbatim DDL) runs on Opus ($$$) or Sonnet ($$) at full cost. With the fleet, T1.1 runs on Cursor ($) and is verified by Sonnet, cutting 70–90% of token spend for mechanical tasks.
+| Task Type                                    | Tier       | Cost        | Example                |
+| -------------------------------------------- | ---------- | ----------- | ---------------------- |
+| Verbatim spec + local Verify loop            | 3 (Cursor) | ~$0.02–0.08 | T1.1, T2.4             |
+| Straightforward coding (parser, store logic) | 2 (Sonnet) | ~$0.10–0.30 | T1.3, T3.2             |
+| Spec interpretation + judgment               | 2 (Sonnet) | ~$0.30–0.50 | T5.4, T7.2             |
+| Task orchestration (whole milestone)         | 1 (Opus)   | ~$2–5       | M2 cohort, all retries |
+
+
+**Optimization win:** Without the fleet, every task runs on Opus ($$$) or Sonnet ($$). With the fleet, mechanical tasks run edit+Verify loops on Cursor ($), Sonnet only confirms / escalates, and Opus only scans cohorts — typically cutting 70–90% of token spend versus Opus-everywhere. Moving Verify *into* Cursor (vs edit-only Cursor) cuts a further Sonnet round-trip on the common "almost right, one fix" path.
 
 ---
 
+
+
 ## Failure Modes & Fallbacks
 
-| Failure | Orchestrator Behavior | Worker Behavior |
-|---------|----------------------|-----------------|
-| Cursor unavailable | (N/A — orchestrator doesn't call Cursor) | Fall back to direct edit; no cost |
-| Cursor timeout | (N/A) | Report error to orchestrator; retry direct edit or BLOCKED |
-| Worker fails Verify | Mark task BLOCKED, stop pipeline | (Rule 0.9: never weaken test) |
-| Spec ambiguity found | Stop pipeline, ask user | Draft SPEC-QUESTION: comment + entry |
-| make check fails | Stop pipeline, investigate | (Orchestrator re-runs make check after all workers) |
+
+| Failure              | Orchestrator Behavior                    | Worker Behavior                                            |
+| -------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| Cursor unavailable   | (N/A — orchestrator doesn't call Cursor) | Fall back to direct edit; no cost                          |
+| Cursor timeout       | (N/A)                                    | Report error to orchestrator; retry direct edit or BLOCKED |
+| Cursor Verify ≠ 0    | (N/A)                                    | Use stdout tail; direct fix or BLOCKED (don't blind-retry Cursor) |
+| Worker fails Verify  | Mark task BLOCKED, stop pipeline         | (Rule 0.9: never weaken test)                              |
+| Spec ambiguity found | Stop pipeline, ask user                  | Draft SPEC-QUESTION: comment + entry                       |
+| make check fails     | Stop pipeline, investigate               | (Caller re-runs make check after cohort)                   |
+
 
 No failure path silently weakens guardrails or moves on. Failures surface, are logged, and block progress until resolved.
 
 ---
 
+
+
 ## Future Enhancements
 
-1. **Alternative edit executors:** Replace `cursor_bridge.py` with a non-Cursor implementation (e.g., native Claude Code agent that shells out to `git apply` patches). Same JSON contract.
-2. **Multi-pass refinement:** Orchestrator could retry a failed task at a higher tier (direct Opus edit) if worker+Cursor fails.
-3. **Cost tracking:** Log token usage per task/tier/milestone for cost reporting.
-4. **Distributed workers:** Run fleet-worker agents across multiple machines (not planned for MVP).
+1. **Bridge implementation of local Verify:** Update `scripts/fleet/cursor_bridge.py` + `compose_prompt` to pass `verify_cmd`, instruct the edit→Verify→fix loop, and parse/return `verify_exit_code` / `verify_stdout_tail` (target contract above; code may lag the doc until this lands).
+2. **Alternative edit executors:** Replace `cursor_bridge.py` with a non-Cursor implementation (e.g., native Claude Code agent that shells out to `git apply` patches). Same JSON contract, including Verify fields.
+3. **Multi-pass refinement:** Orchestrator could retry a failed task at a higher tier (direct Opus edit) if worker+Cursor fails.
+4. **Cost tracking:** Aggregate `usage` from bridge JSON per task/tier/milestone into `manifest.json` for cost reporting (caller-side; still not agent-authored log prose) (determinsitic cost tracking per agent per task / tier / milestone)
+5. **Distributed workers:** Run fleet-worker agents across multiple machines (not planned for MVP).
