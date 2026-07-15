@@ -4,7 +4,7 @@ Utilities for the 3-tier agent fleet that orchestrates akasha build-plan executi
 
 ## Files
 
-- **`cursor_bridge.py`** — Executor subprocess that bridges fleet-worker agents to the Cursor Agent CLI. Implements the abstract JSON contract: task_json in → diff_stat/usage JSON out. Designed to be swappable with other edit executors (same contract, different implementation).
+- **`cursor_bridge.py`** — Executor subprocess that bridges fleet-worker agents to the Cursor Agent CLI. Implements the abstract JSON contract: task_json (incl. `verify_cmd`) in → edit evidence + independently-run verify result JSON out. Designed to be swappable with other edit executors (same contract, different implementation).
 
 ## Architecture
 
@@ -19,8 +19,8 @@ See `docs/agents/fleet-architecture.md` for the full design document.
 ### For fleet-worker agents
 
 ```bash
-# Build task JSON
-task_json='{"task_id":"T2.4","goal":"...","files":["..."],"constraints":"..."}'
+# Build task JSON — verify_cmd is required
+task_json='{"task_id":"T2.4","goal":"...","files":["..."],"constraints":"...","verify_cmd":"uv run pytest tests/unit/test_x.py -q"}'
 
 # Pipe to bridge (uses Cursor Grok 4.5 High by default)
 echo "$task_json" | python3 scripts/fleet/cursor_bridge.py
@@ -31,9 +31,21 @@ echo "$task_json" | python3 scripts/fleet/cursor_bridge.py
   "files_changed": [...],
   "diff_stat": "...",
   "cursor_result_text": "...",
+  "verify_command": "...",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "...",
   "usage": {...}
 }
 ```
+
+`verify_command`/`verify_exit_code`/`verify_stdout_tail` come from the bridge
+independently re-running `verify_cmd` as a plain subprocess *after* Cursor's
+own edit+fix-loop — real evidence, not Cursor's self-report, and free (no
+extra LLM tokens). This is still only Tier-3/advisory evidence: the worker
+always re-runs Verify itself before claiming `DONE`, and an independent
+verifier agent re-runs it again before the task is flipped `DONE` in
+`task-status.md`. See `docs/agents/fleet-architecture.md` "Verification
+Model".
 
 ### Model Selection (Modular & Refactorable)
 
@@ -75,7 +87,7 @@ python3 scripts/fleet/cursor_bridge.py --model composer-2.5 --timeout 300
 
 ```bash
 # Smoke test (valid input)
-echo '{"task_id":"TEST","goal":"Test","files":[],"constraints":""}' | \
+echo '{"task_id":"TEST","goal":"Test","files":[],"constraints":"","verify_cmd":"true"}' | \
   python3 scripts/fleet/cursor_bridge.py | python3 -m json.tool
 
 # Error handling (invalid JSON)

@@ -31,9 +31,21 @@ by design.
 ## Task
 
 1. Read `docs/agents/task-status.md` and `docs/build-plan.md`.
-2. Find all `TODO` tasks whose `Depends on` tasks are all `DONE`, respecting
-   the milestone dependency map (`M0 → {M1,M2} → M3 → M4 → M5 → {M6,M7} →
-   {M8,M9} → M10`).
+2. Find all `TODO` tasks that satisfy **both** gates below — a task's
+   per-task `Depends on` does not encode everything; milestone-level
+   `Depends on` can be strictly wider (e.g. M9's per-task deps name no
+   T8.x task, yet the M9 milestone header requires all of M5–M8 closed —
+   both gates are load-bearing, neither substitutes for the other):
+   - **Task gate:** the task's own literal `Depends on` field lists only
+     `DONE` tasks.
+   - **Milestone gate:** the task's milestone has a literal `Depends on:
+     ...` in its `## M<n> — ... (Depends on: ...)` header in
+     `docs/build-plan.md` (read fresh each scan — never reuse a
+     paraphrased or previously-cached map, including any map that has
+     appeared in this agent's own prior instructions; those have drifted
+     from build-plan before). Every milestone named there must be fully
+     `DONE`/closed in `docs/agents/task-status.md` before any task in the
+     dependent milestone is eligible.
 3. Partition eligible tasks by file disjointness (`docs/agents/
    fleet-architecture.md` §"File-Disjoint Parallelism"):
    - Tasks sharing any file in their `Files` list go in a **sequential**
