@@ -217,7 +217,16 @@ milestone **M6 (Obsidian plugin)** and **M7 (TMS loop)** both unblock on M5.
 | T6.4 | Command: create node from selection | DONE | Cursor-built `commands.ts` `createNodeFromSelection(editor)` appends ` ^tm-new` at end-of-block (selection-end/cursor line), base32-safe duplicate-anchor guard (`/\s\^tm-\S+\s*$/` — caught+fixed a hex-only regex bug), pure editor edit (no apiFetch/mint client-side). `main.ts` addCommand `tm-create-node-from-selection`. Gate: build + tsc exit 0. Blank-line edge flagged for T6.5 manual TESTPLAN. |
 | T6.5 | Clipboard cut/copy carrying anchors + TESTPLAN | DONE | Cursor-built self-contained `clipboard.ts` (pure helpers `lineHasAnchor`/`extractAnchor`/`extractAnchorId`/`collectAnchors` on base32 alphabet `abcdefghijklmnopqrstuvwxyz234567`; `registerClipboard(plugin)` inert wiring point — native Obsidian cut/copy already preserves plain-text anchors; no mint, no API) + `TESTPLAN.md` (manual operator script: Setup, T6.2 persistence, T6.3 status+offline, T6.4 mint w/ E08, T6.5 CUT→MOVE E04 / COPY→E_DUP_ID E05). Per Files list, main.ts NOT edited (registerClipboard unwired by design → SPEC-QUESTION T6.5, resolved MVP-accept). Local gate: build + tsc exit 0; end-to-end TESTPLAN execution is pending-manual (needs live Obsidian+daemon, not fakeable headless). **M6 code-complete; runtime DoD (CI-green + manual TESTPLAN) pending** — see milestone header. |
 
-## M7 — TMS loop (Depends on: M4) — **COMPLETE** (all tasks DONE + verified; 7 spec-questions open)
+## M7 — TMS loop (Depends on: M4) — **COMPLETE** (all tasks DONE + verified; 6 spec-questions open)
+
+> **Follow-up T7.2b (2026-07-15):** resolved the elevated SPEC-QUESTION T7.2
+> — `store.delete_node`'s S1+ tombstone branch now fires `invalidate`
+> (touched = all facet_ids, captured pre-tombstone; called before
+> `_reassign_inbound_edges` so subscribers still target the node), so a real
+> S1+ retraction (incl. `DELETE /nodes/{id}`) flags bound + `'*'`-bound
+> dependents. New `test_s1_node_retraction_flags_dependents` covers the
+> tombstone AND redirect paths. Cursor-delegated; gate green (integration
+> 109). 7 open → 6 open.
 
 > All seven tasks (T7.1–T7.7) DONE and independently gate-verified (ruff
 > clean, pyright 0, unit+property 382, integration 108, battery 27; zero

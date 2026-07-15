@@ -1449,6 +1449,12 @@ def delete_node(
         if row is None:
             raise NodeNotFoundError(node_id)
 
+        # Spec §4.9: "node retraction is always major touching all facets."
+        # Capture every live facet id BEFORE the tombstone UPDATE so the
+        # invalidate() walk below can flag bound (and '*'-bound) subscribers.
+        # Empty set is fine — only '*'-bound subscribers fire in that case.
+        touched_facets = {f.facet_id for f in get_node(conn, node_id).facets}
+
         _recompute_maturity(conn, node_id)
         current_maturity = conn.execute(
             "SELECT maturity FROM nodes WHERE id=?", (node_id,)
@@ -1465,6 +1471,15 @@ def delete_node(
             raise NeedsRedirectError(node_id)
 
         conn.execute("UPDATE nodes SET status='tombstone', updated_at=? WHERE id=?", (now, node_id))
+        # Must run BEFORE _reassign_inbound_edges (inside redirect_to below):
+        # that repoints inbound edges off node_id, which would leave
+        # invalidate() with no dst==node_id subscribers to flag.
+        head_hash = conn.execute(
+            "SELECT head_hash FROM nodes WHERE id=?", (node_id,)
+        ).fetchone()[0]
+        from akasha.tms import invalidate
+
+        invalidate.invalidate(conn, node_id, head_hash, touched_facets)
         if redirect_to:
             conn.execute(
                 "INSERT INTO redirects (old_id, successors, created_at) VALUES (?, ?, ?)",

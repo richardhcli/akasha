@@ -23,7 +23,8 @@ full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 and M6 (1 entry: T6.5, 2026-07-14).
 
-**Open questions: 7** (M7 complete — logged 2026-07-14; several need a
+**Open questions: 6** (M7 complete — logged 2026-07-14; T7.2 delete_node
+gap RESOLVED 2026-07-15 via follow-up T7.2b. The remaining 6 need a
 product/spec decision before archiving, see below).
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
@@ -39,7 +40,7 @@ product/spec decision before archiving, see below).
 ## T7.2 -- S1+ node retraction via `delete_node` never wires into `invalidate`
 - **Where:** `src/akasha/kernel/store.py` (`delete_node` -- NOT edited by T7.2, which only wired `commit_node`).
 - **Narrowest reading taken:** spec 4.9 says "node retraction is always major touching all facets." T7.1's `invalidate` already flags every bound subscriber when handed the full facet-id set (unit-tested), and T7.2 wired that trigger into `commit_node` only (per T7.2's Files list + the orchestrator's sanctioned-edit scope). But a real S1+ tombstone via `delete_node` does not go through `commit_node`, so an actual node-retraction API/CLI call -- as opposed to a synthetic "major commit touching all facets" -- would not currently fire `invalidate`. Left as-is (out of T7.2's scope); the synthetic path is covered and tested.
-- **Resolution:** open -- **ELEVATED: this is a real engine gap, not cosmetic.** Retracting an S1+ evidence node via the real API/CLI path (`delete_node` tombstone) does NOT flag its dependents, which is the exact signal a TMS exists to produce; only the synthetic "major commit touching all facets" path is currently wired+tested. (Earlier note said "likely lands with T7.5" — STALE: T7.5 is DONE and did not touch this.) It does NOT hard-block M8 (the M8 smoke "break facet -> badge" is a major commit, which DOES flag — not a node retraction). Needs an explicit product decision: fix now as a small follow-up task (wire `delete_node`/`DELETE /nodes/{id}` S1+ retraction through `invalidate` with `touched = all facets`) vs. defer post-MVP.
+- **Resolution:** **RESOLVED 2026-07-15 (fixed now — product decision: fix, not defer).** Follow-up task T7.2b wired the S1+ tombstone branch of `store.delete_node` through `invalidate`: it captures the node's full facet-id set before tombstoning, and (after the tombstone UPDATE, BEFORE `_reassign_inbound_edges` so subscriber edges still have `dst == node_id`) calls `invalidate(conn, node_id, head_hash, touched=all facet_ids)` inside the existing transaction (uses `enqueue_review_within_transaction`, deferred import to dodge the circular import — same pattern as `commit_node`). S0 hard-delete branch untouched. `tests/integration/test_tms.py::test_s1_node_retraction_flags_dependents` proves both the pure-tombstone path (facet-bound AND `'*'`-bound dependents flagged) and the `redirect_to` path (dependent flagged, proving invalidate runs before edge reassignment). Full gate green (integration 109). Since `DELETE /nodes/{id}` calls `store.delete_node`, the API path is covered too.
 
 ## T7.3 -- where does `recheck_after`'s per-node ISO-date/period schedule persist?
 - **Where:** `src/akasha/tms/triggers.py` (module docstring + `run_daily_tick`, inline `# SPEC-QUESTION:`).

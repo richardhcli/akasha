@@ -647,3 +647,72 @@ def test_review_active_queue_orders_by_inbound_count_on_created_at_tie(api, monk
     # proposal would sort ahead of `high` on this tie; it must not.
     assert queue_ids.index(r_high["id"]) < queue_ids.index(r_prop["id"])
 
+
+def test_s1_node_retraction_flags_dependents(api):
+    """S1+ retract: facet_break on bound + '*'-bound deps; invalidate before reassign."""
+    from akasha.kernel.model import Facet
+
+    conn = api["conn"]
+
+    # --- case 1: pure tombstone flags facet-bound and '*'-bound dependents ---
+    facet_e = ids.mint()
+    evidence = store.create_node(
+        conn,
+        "evidence",
+        "evidence body",
+        facets=[Facet(facet_id=facet_e, name="fe", span="fe", version=1)],
+    )
+    dependent = store.create_node(conn, "claim", "dependent D")
+    store.create_edge(
+        conn,
+        src=dependent.id,
+        dst=evidence.id,
+        edge_type="supports",
+        facet_binding=facet_e,
+        provenance="human",
+    )
+    dependent2 = store.create_node(conn, "claim", "dependent D2")
+    store.create_edge(
+        conn,
+        src=dependent2.id,
+        dst=evidence.id,
+        edge_type="supports",
+        facet_binding="*",
+        provenance="human",
+    )
+
+    store.delete_node(conn, evidence.id, tombstone=True)
+    assert (
+        len(store.find_open_reviews(conn, node_id=dependent.id, cause_kind="facet_break"))
+        >= 1
+    )
+    assert (
+        len(store.find_open_reviews(conn, node_id=dependent2.id, cause_kind="facet_break"))
+        >= 1
+    )
+
+    # --- case 2: redirect_to — invalidate must run before edge reassignment ---
+    facet_e2 = ids.mint()
+    evidence2 = store.create_node(
+        conn,
+        "evidence",
+        "evidence E2",
+        facets=[Facet(facet_id=facet_e2, name="fe2", span="fe2", version=1)],
+    )
+    dependent3 = store.create_node(conn, "claim", "dependent D3")
+    store.create_edge(
+        conn,
+        src=dependent3.id,
+        dst=evidence2.id,
+        edge_type="supports",
+        facet_binding=facet_e2,
+        provenance="human",
+    )
+    successor = store.create_node(conn, "claim", "successor body")
+
+    store.delete_node(conn, evidence2.id, redirect_to=[successor.id])
+    assert (
+        len(store.find_open_reviews(conn, node_id=dependent3.id, cause_kind="facet_break"))
+        >= 1
+    )
+
