@@ -318,6 +318,201 @@ console.debug("tm ui loaded");
       });
   }
 
+  // Search view (T8.4, spec §4.13): FTS over /v1/search. Node bodies are
+  // free-text (the seed XSS canary lives in a node body), so results render
+  // exclusively via textContent, same discipline as the node/review views.
+  function truncate(text, max) {
+    var str = text || "";
+    if (str.length <= max) {
+      return str;
+    }
+    return str.slice(0, max) + "...";
+  }
+
+  function renderSearchResults(container, results) {
+    container.textContent = "";
+    if (results.length === 0) {
+      container.appendChild(el("li", { text: "No results." }));
+      return;
+    }
+    results.forEach(function (node) {
+      var li = el("li", { className: "search-result" });
+      li.appendChild(el("p", { text: "id: " + node.id + " (" + node.node_type + ")" }));
+      li.appendChild(el("p", { text: truncate(node.body, 200) }));
+      container.appendChild(li);
+    });
+  }
+
+  function initSearchView() {
+    var app = document.getElementById("app");
+    var token = getToken();
+    if (!token) {
+      renderNotice(app, "Set tm_token in localStorage to use this view.");
+      return;
+    }
+
+    var formEl = document.getElementById("search-form");
+    var inputEl = document.getElementById("search-input");
+    var resultsEl = document.getElementById("search-results");
+
+    formEl.addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      var q = inputEl.value.trim();
+      if (!q) {
+        renderNotice(resultsEl, "Enter a search query.");
+        return;
+      }
+      fetchJson("/v1/search?q=" + encodeURIComponent(q), token)
+        .then(function (result) {
+          renderSearchResults(resultsEl, result.results || []);
+        })
+        .catch(function (err) {
+          renderNotice(resultsEl, "Search failed: " + err.message);
+        });
+    });
+  }
+
+  // Sync view (T8.4, spec §4.13): per-sync-root status + pause&diff
+  // inspector. This MVP labels the resource generically as "sync root"
+  // rather than the spec's example Obsidian-specific copy ("Obsidian
+  // vault") -- that wording is Obsidian-client-specific presentation (the
+  // Obsidian thin client, M6), out of scope for this generic daemon UI.
+  //
+  // Diffs (unified diffs of arbitrary file text) and violation/pause
+  // metadata are free-text -- rendered exclusively via textContent /
+  // <pre>.textContent, never innerHTML, same XSS discipline as node/review.
+  function renderReviewSummary(item) {
+    var p = el("p", {
+      text:
+        "id: " +
+        item.id +
+        " path: " +
+        (item.path || "(none)") +
+        " cause_kind: " +
+        item.cause_kind +
+        " created_at: " +
+        item.created_at,
+    });
+    return p;
+  }
+
+  function renderPauseItem(pause) {
+    var li = el("li", { className: "sync-pause" });
+    li.appendChild(renderReviewSummary(pause));
+    var detail = {};
+    try {
+      detail = JSON.parse(pause.cause_ref || "{}");
+    } catch (err) {
+      detail = {};
+    }
+    var pre = document.createElement("pre");
+    pre.textContent = detail.diff || "(no diff available)";
+    li.appendChild(pre);
+    return li;
+  }
+
+  function renderReviewList(title, items, className) {
+    var section = el("div", { className: className });
+    section.appendChild(el("h3", { text: title + " (" + items.length + ")" }));
+    if (items.length === 0) {
+      section.appendChild(el("p", { text: "None." }));
+      return section;
+    }
+    var ul = el("ul");
+    items.forEach(function (item) {
+      var li = el("li");
+      li.appendChild(renderReviewSummary(item));
+      ul.appendChild(li);
+    });
+    section.appendChild(ul);
+    return section;
+  }
+
+  function renderSyncRoot(root) {
+    var section = el("div", { className: "sync-root" });
+    section.appendChild(
+      el("h2", { text: root.name + " (" + root.root_path + ")" })
+    );
+    section.appendChild(
+      el("p", { text: "files: " + (root.files || []).length })
+    );
+    section.appendChild(
+      renderReviewList("Violations", root.violations || [], "sync-violations")
+    );
+
+    var pausesSection = el("div", { className: "sync-pauses" });
+    var pauses = root.pauses || [];
+    pausesSection.appendChild(
+      el("h3", { text: "Pause & diff inspector (" + pauses.length + ")" })
+    );
+    if (pauses.length === 0) {
+      pausesSection.appendChild(el("p", { text: "None." }));
+    } else {
+      var pauseList = el("ul");
+      pauses.forEach(function (pause) {
+        pauseList.appendChild(renderPauseItem(pause));
+      });
+      pausesSection.appendChild(pauseList);
+    }
+    section.appendChild(pausesSection);
+
+    section.appendChild(
+      renderReviewList("Conflicts", root.conflicts || [], "sync-conflicts")
+    );
+    return section;
+  }
+
+  function renderSyncRoots(container, roots) {
+    container.textContent = "";
+    if (roots.length === 0) {
+      container.appendChild(el("p", { text: "No sync roots registered." }));
+      return;
+    }
+    roots.forEach(function (root) {
+      container.appendChild(renderSyncRoot(root));
+    });
+  }
+
+  function renderSyncUnresolved(container, unresolved) {
+    container.textContent = "";
+    container.appendChild(el("h2", { text: "Unresolved (" + unresolved.length + ")" }));
+    if (unresolved.length === 0) {
+      container.appendChild(el("p", { text: "None." }));
+      return;
+    }
+    var ul = el("ul");
+    unresolved.forEach(function (item) {
+      var li = el("li");
+      li.appendChild(
+        el("p", { text: "bucket: " + item.bucket })
+      );
+      li.appendChild(renderReviewSummary(item));
+      ul.appendChild(li);
+    });
+    container.appendChild(ul);
+  }
+
+  function initSyncView() {
+    var app = document.getElementById("app");
+    var token = getToken();
+    if (!token) {
+      renderNotice(app, "Set tm_token in localStorage to use this view.");
+      return;
+    }
+
+    var rootsEl = document.getElementById("sync-roots");
+    var unresolvedEl = document.getElementById("sync-unresolved");
+
+    fetchJson("/v1/sync/status", token)
+      .then(function (result) {
+        renderSyncRoots(rootsEl, result.sync_roots || []);
+        renderSyncUnresolved(unresolvedEl, result.unresolved || []);
+      })
+      .catch(function (err) {
+        renderNotice(app, "Failed to load sync status: " + err.message);
+      });
+  }
+
   // app.js is loaded in <head>, so defer view init until the DOM (#app and
   // the view containers) is parsed — otherwise getElementById returns null.
   function boot() {
@@ -325,6 +520,10 @@ console.debug("tm ui loaded");
       initNodeView();
     } else if (window.location.pathname === "/review") {
       initReviewView();
+    } else if (window.location.pathname === "/search") {
+      initSearchView();
+    } else if (window.location.pathname === "/sync") {
+      initSyncView();
     }
   }
   if (document.readyState === "loading") {

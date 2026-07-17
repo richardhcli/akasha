@@ -129,6 +129,22 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
         content = (_TEMPLATES_DIR / "review.html").read_bytes()
         return HTMLResponse(content=content, status_code=200)
 
+    # Search view (T8.4 / spec §4.13): same static-shell pattern as /node --
+    # no auth (the /v1/search fetch driven by app.js is authenticated),
+    # excluded from OpenAPI so the /v1 contract snapshot stays unchanged.
+    @app.get("/search", response_class=HTMLResponse, include_in_schema=False)
+    def ui_search() -> HTMLResponse:  # pyright: ignore[reportUnusedFunction]
+        content = (_TEMPLATES_DIR / "search.html").read_bytes()
+        return HTMLResponse(content=content, status_code=200)
+
+    # Sync view (T8.4 / spec §4.13): same static-shell pattern as /node --
+    # no auth (the /v1/sync/status fetch driven by app.js is authenticated),
+    # excluded from OpenAPI so the /v1 contract snapshot stays unchanged.
+    @app.get("/sync", response_class=HTMLResponse, include_in_schema=False)
+    def ui_sync() -> HTMLResponse:  # pyright: ignore[reportUnusedFunction]
+        content = (_TEMPLATES_DIR / "sync.html").read_bytes()
+        return HTMLResponse(content=content, status_code=200)
+
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     return app
