@@ -256,13 +256,28 @@ milestone **M6 (Obsidian plugin)** and **M7 (TMS loop)** both unblock on M5.
 
 ## M8 — Web UI (Depends on: M7)
 
+**BINDING M8 rendering architecture (decided at T8.1 via fable design review, 2026-07-17).**
+The `.html` files under `src/akasha/ui/templates/` are **static shells served as-is**;
+all dynamic server data is rendered **client-side in vanilla `app.js`**, which fetches
+JSON from the existing `/v1` endpoints and builds the DOM. **NO jinja2 / no server-side
+templating** — adding it would edit `pyproject.toml` (unlisted in every M8 task's Files →
+rule 0.8 violation) and clashes with the repo-wide `exec` ban (jinja2 compiles templates
+to `exec`'d Python). This is also the only architecture consistent with the T8.2–T8.4
+Files lists, which contain only `templates/*.html` + `static/app.js` and **no route `.py`**.
+**XSS rule for T8.2–T8.4 workers:** render all server free-text (node bodies, facet text)
+via `element.textContent` / `createElement`, **never** `innerHTML` on API data; if a
+server-side HTML fragment ever proves unavoidable, it needs a SPEC-QUESTION first and must
+route every interpolation through stdlib `html.escape(s, quote=True)`.
+NOTE: T8.2+ data fetches from the browser will need the Bearer token wired into `app.js`
+(the shell itself is unauthenticated and fetches nothing) — a T8.2 concern.
+
 | Task | Goal | Status | Notes |
 |---|---|---|---|
-| T8.1 | UI shell + static serving (htmx, no build step) | TODO | |
-| T8.2 | Node view | TODO | |
-| T8.3 | Review view (one-click resolutions + daily-cap banner) | TODO | |
-| T8.4 | Search + Sync views | TODO | |
-| T8.5 | Playwright smoke test (full loop) | TODO | |
+| T8.1 | UI shell + static serving (htmx, no build step) | DONE | Run 20260717-M8. Delegated to Cursor (grok-4.5-high) for the mechanical edits; htmx vendored by worker via curl; independently re-verified by caller (full gate green). `app.py` adds `GET /` → `HTMLResponse(base.html)` with `include_in_schema=False` (keeps `/v1` OpenAPI snapshot golden unchanged — verified: openapi snapshot test stays 3-passed) and NO auth dependency (browser-reachable shell; auth here is per-route, not global). `app.mount("/static", StaticFiles(...))`; both dirs resolved **package-relative** (`Path(__file__).resolve().parent.parent/"ui"`), never cwd. `base.html`: static HTML5 shell, `<title>tm-daemon</title>` (rebrand-clean, grep confirms no product name in `ui/`), refs `/static/htmx.min.js` + `/static/app.js`, `<main id="app">`, nav placeholders. `app.js`: `console.debug("tm ui loaded")`. Vendored `htmx.min.js` (htmx 2.0.4, 50,917 bytes). **No jinja2** (pyproject untouched, verified empty diff). Files-list completions (build-plan Files omitted them; required by Goal/Verify): `static/htmx.min.js` (the "copying static files" asset) + `tests/integration/test_ui_shell.py` (the "lightweight integration test" the Verify demands) — logged as SPEC-QUESTION T8.1. Gate (caller re-run): ruff clean · pyright 0 · ui_shell 3 · openapi snapshot 3 · unit+property 382 · battery 27. |
+| T8.2 | Node view | TODO | Blocked by T8.1 (DONE now → eligible). Shares `static/app.js` with T8.3/T8.4 → sequence one at a time. Follow the BINDING architecture above (client-side render, textContent). |
+| T8.3 | Review view (one-click resolutions + daily-cap banner) | TODO | Blocked on `app.js` overlap with T8.2 (sequence after). |
+| T8.4 | Search + Sync views | TODO | Blocked on `app.js` overlap with T8.2/T8.3 (sequence after). |
+| T8.5 | Playwright smoke test (full loop) | TODO | Depends on T8.2/T8.3/T8.4. Needs Python `playwright` lib (NOT installed yet) + a CI job — part of T8.5's own scope. |
 
 ## M9 — Hardening (Depends on: M5–M8)
 

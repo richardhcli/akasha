@@ -23,9 +23,14 @@ full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 and M6 (1 entry: T6.5, 2026-07-14).
 
-**Open questions: 6** (M7 complete — logged 2026-07-14; T7.2 delete_node
-gap RESOLVED 2026-07-15 via follow-up T7.2b. The remaining 6 need a
-product/spec decision before archiving, see below).
+**Open questions: 7** (M7's 6, logged 2026-07-14, still open; +1 M8 entry
+T8.1 logged 2026-07-17. T7.2 delete_node gap RESOLVED 2026-07-15 via
+follow-up T7.2b. All 7 need a product/spec decision before archiving.).
+
+## T8.1 — build-plan Files list omits the vendored htmx asset and the integration test
+- **Where:** `docs/build-plan.md` T8.1 `Files:` (lists only `base.html`, `static/app.js`, `api/app.py`); actual deliverable also added `src/akasha/ui/static/htmx.min.js` and `tests/integration/test_ui_shell.py`.
+- **Narrowest reading taken:** both additions are mechanically required by the task's own Goal ("Wire htmx"; DoD "static files served directly") and Verify ("assert in a lightweight integration test"), not scope creep — a vendored `htmx.min.js` IS "the static file to copy," and the Verify literally demands a test. Added both, touched no other unlisted file, `pyproject.toml` untouched (no jinja2). Same class as prior incomplete-Files-list cases; a spec editor should add these two paths to T8.1's Files line (and note the M8 rendering architecture: static shells + client-side vanilla-JS render, no jinja2 — recorded in `docs/agents/task-status.md` M8 header).
+- **Resolution:** open.
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
 - **Where:** `src/akasha/tms/invalidate.py` (`_composes_touched_facet`, inline `# SPEC-QUESTION:`).

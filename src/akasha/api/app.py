@@ -26,12 +26,19 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from akasha.api import deps
 from akasha.api.routes import edges, nodes, search, sync, sync_roots, tokens
 from akasha.config import Config, default_db_path, load_config
 from akasha.contract.grammar import CONTRACT_VERSION
 from akasha.kernel import store
+
+# Package-relative UI paths (never cwd-relative): api/ -> akasha/ -> ui/{static,templates}.
+_UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+_STATIC_DIR = _UI_DIR / "static"
+_TEMPLATES_DIR = _UI_DIR / "templates"
 
 
 def app_version() -> str:
@@ -96,5 +103,14 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
             "version": app_version(),
             "contract_version": CONTRACT_VERSION,
         }
+
+    # UI shell (T8.1 / spec §4.13): static HTML, no auth, excluded from OpenAPI
+    # so the /v1 contract snapshot stays unchanged.
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def ui_shell() -> HTMLResponse:  # pyright: ignore[reportUnusedFunction]
+        content = (_TEMPLATES_DIR / "base.html").read_bytes()
+        return HTMLResponse(content=content, status_code=200)
+
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     return app
