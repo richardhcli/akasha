@@ -112,6 +112,15 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
         content = (_TEMPLATES_DIR / "base.html").read_bytes()
         return HTMLResponse(content=content, status_code=200)
 
+    # Node view (T8.2 / spec §4.13): same pattern as the shell above -- a
+    # static HTML page served as-is, no auth (the underlying /v1 data
+    # fetches driven by app.js are authenticated), excluded from OpenAPI so
+    # the /v1 contract snapshot stays unchanged.
+    @app.get("/node", response_class=HTMLResponse, include_in_schema=False)
+    def ui_node() -> HTMLResponse:  # pyright: ignore[reportUnusedFunction]
+        content = (_TEMPLATES_DIR / "node.html").read_bytes()
+        return HTMLResponse(content=content, status_code=200)
+
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     return app
