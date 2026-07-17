@@ -1,4 +1,4 @@
-.PHONY: fmt check battery run
+.PHONY: fmt check battery run dev-ui
 
 fmt:
 	uv run ruff format .
@@ -13,3 +13,6 @@ battery:
 
 run:
 	uv run python -m akasha.cli.main daemon
+
+dev-ui:
+	uv run python scripts/dev/seed_and_run.py
