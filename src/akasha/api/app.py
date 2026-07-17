@@ -30,7 +30,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from akasha.api import deps
-from akasha.api.routes import edges, nodes, search, sync, sync_roots, tokens
+from akasha.api.routes import edges, nodes, review, search, sync, sync_roots, tokens
 from akasha.config import Config, default_db_path, load_config
 from akasha.contract.grammar import CONTRACT_VERSION
 from akasha.kernel import store
@@ -90,6 +90,7 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
     app.include_router(tokens.router)
     app.include_router(sync_roots.router)
     app.include_router(sync.router)
+    app.include_router(review.router)
 
     # Operational liveness is intentionally root-level and unauthenticated;
     # authenticated application resources are versioned under /v1.

@@ -863,3 +863,98 @@ def test_sync_status_and_rescan_allow_agent_tokens(api):
     resp = client.post("/v1/sync/rescan", headers=agent)
     assert resp.status_code == 200
     assert resp.json() == {"files_reconciled": 0, "files_missing": 0, "reviews_open": 0}
+
+
+def test_review_list_open_returns_seeded_reviews(api):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    node = _create(client, h).json()
+    review = store.enqueue_review(
+        conn, node["id"], "conflict", cause_ref=json.dumps({"path": "/x"})
+    )
+
+    resp = client.get("/v1/review?status=open", headers=h)
+    assert resp.status_code == 200
+    ids = [r["id"] for r in resp.json()["reviews"]]
+    assert review["id"] in ids
+
+
+def test_review_list_filters_by_node(api):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    a = _create(client, h, body="node-a").json()
+    b = _create(client, h, body="node-b").json()
+    ra = store.enqueue_review(conn, a["id"], "conflict", cause_ref="a")
+    rb = store.enqueue_review(conn, b["id"], "conflict", cause_ref="b")
+
+    resp = client.get(f"/v1/review?node={a['id']}", headers=h)
+    assert resp.status_code == 200
+    ids = [r["id"] for r in resp.json()["reviews"]]
+    assert ra["id"] in ids
+    assert rb["id"] not in ids
+
+
+def test_review_list_status_resolved_returns_422(api):
+    client, h = api["client"], api["human"]
+    resp = client.get("/v1/review?status=resolved", headers=h)
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "E_INVALID"
+
+
+def test_review_resolve_still_holds_removes_from_open(api):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    node = _create(client, h).json()
+    review = store.enqueue_review(
+        conn, node["id"], "conflict", cause_ref=json.dumps({"path": "/x"})
+    )
+
+    resp = client.post(
+        f"/v1/review/{review['id']}/resolve",
+        json={"resolution": "still_holds"},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["id"] == review["id"]
+    assert resp.json()["resolution"] == "still_holds"
+
+    open_ids = [
+        r["id"] for r in client.get("/v1/review?status=open", headers=h).json()["reviews"]
+    ]
+    assert review["id"] not in open_ids
+
+
+def test_review_resolve_agent_token_rejected(api):
+    client, h, agent, conn = api["client"], api["human"], api["agent"], api["conn"]
+    node = _create(client, h).json()
+    review = store.enqueue_review(conn, node["id"], "conflict", cause_ref="x")
+
+    resp = client.post(
+        f"/v1/review/{review['id']}/resolve",
+        json={"resolution": "still_holds"},
+        headers=agent,
+    )
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "E_HUMAN_ONLY"
+
+
+def test_review_resolve_unknown_id_returns_404(api):
+    client, h = api["client"], api["human"]
+    resp = client.post(
+        "/v1/review/tm-review-does-not-exist/resolve",
+        json={"resolution": "still_holds"},
+        headers=h,
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "E_NOT_FOUND"
+
+
+def test_review_resolve_dismissed_on_non_violation_returns_409(api):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    node = _create(client, h).json()
+    review = store.enqueue_review(conn, node["id"], "conflict", cause_ref="x")
+
+    resp = client.post(
+        f"/v1/review/{review['id']}/resolve",
+        json={"resolution": "dismissed"},
+        headers=h,
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "E_CONFLICT"
