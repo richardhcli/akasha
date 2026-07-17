@@ -126,6 +126,155 @@ console.debug("tm ui loaded");
     );
   }
 
+  function postJson(path, token, payload) {
+    return fetch(path, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + token,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }).then(function (resp) {
+      return resp
+        .json()
+        .catch(function () {
+          return null;
+        })
+        .then(function (data) {
+          return { ok: resp.ok, status: resp.status, data: data };
+        });
+    });
+  }
+
+  // Review view (task T8.3, spec §4.13 / §4.9). One-click resolutions for
+  // still_holds/retracted/dismissed; "dismissed" is only rendered for
+  // cause_kind === "violation" to mirror the server's 409 rule (spec §4.11)
+  // rather than let the user hit a predictable error.
+  //
+  // SPEC-QUESTION (T8.3): §4.13 asks for "one-click resolutions", but the
+  // `revised` resolution inherently requires a new node body (plus
+  // change_class/facets_touched) the server cannot infer -- it cannot be
+  // truly one-click. This renders a minimal inline <textarea> + a "submit
+  // revised" button as the smallest possible affordance; see
+  // docs/spec-questions.md T8.3 for the logged ambiguity.
+  function renderReviewItem(review, token, onResolved) {
+    var li = el("li", { className: "review-item" });
+    li.appendChild(el("p", { text: "id: " + review.id }));
+    li.appendChild(el("p", { text: "node_id: " + (review.node_id || "(none)") }));
+    li.appendChild(el("p", { text: "cause_kind: " + review.cause_kind }));
+    li.appendChild(el("p", { text: "facet: " + (review.facet || "(none)") }));
+    li.appendChild(el("p", { text: "created_at: " + review.created_at }));
+
+    var errorEl = el("p", { className: "review-error" });
+
+    function resolve(payload) {
+      errorEl.textContent = "";
+      postJson(
+        "/v1/review/" + encodeURIComponent(review.id) + "/resolve",
+        token,
+        payload
+      )
+        .then(function (result) {
+          if (result.ok) {
+            onResolved();
+          } else {
+            errorEl.textContent = "Resolve failed (" + result.status + ").";
+          }
+        })
+        .catch(function (err) {
+          errorEl.textContent = "Resolve failed: " + err.message;
+        });
+    }
+
+    var stillHoldsBtn = el("button", { text: "still_holds" });
+    stillHoldsBtn.addEventListener("click", function () {
+      resolve({ resolution: "still_holds" });
+    });
+    li.appendChild(stillHoldsBtn);
+
+    var retractedBtn = el("button", { text: "retracted" });
+    retractedBtn.addEventListener("click", function () {
+      resolve({ resolution: "retracted" });
+    });
+    li.appendChild(retractedBtn);
+
+    if (review.cause_kind === "violation") {
+      var dismissedBtn = el("button", { text: "dismissed" });
+      dismissedBtn.addEventListener("click", function () {
+        resolve({ resolution: "dismissed" });
+      });
+      li.appendChild(dismissedBtn);
+    }
+
+    var revisedTextarea = document.createElement("textarea");
+    li.appendChild(revisedTextarea);
+    var revisedBtn = el("button", { text: "submit revised" });
+    revisedBtn.addEventListener("click", function () {
+      resolve({
+        resolution: "revised",
+        new_body: revisedTextarea.value,
+        change_class: "minor",
+        facets_touched: [],
+      });
+    });
+    li.appendChild(revisedBtn);
+
+    li.appendChild(errorEl);
+    return li;
+  }
+
+  function renderReviewQueue(container, reviews, token, onResolved) {
+    container.textContent = "";
+    if (reviews.length === 0) {
+      container.appendChild(el("li", { text: "No open reviews." }));
+      return;
+    }
+    reviews.forEach(function (review) {
+      container.appendChild(renderReviewItem(review, token, onResolved));
+    });
+  }
+
+  // Daily-cap banner (spec §4.9, cap=10). GET /v1/review is uncapped by
+  // design (T8.0); the cap-10 is purely this display concern, so the full
+  // list still renders and the banner is only an additional signal.
+  function renderReviewBanner(container, count) {
+    container.textContent = "";
+    if (count >= 10) {
+      container.appendChild(
+        el("p", {
+          text: "Daily review cap reached (10 active items).",
+          className: "review-cap-banner",
+        })
+      );
+    }
+  }
+
+  function initReviewView() {
+    var app = document.getElementById("app");
+    var token = getToken();
+    if (!token) {
+      renderNotice(app, "Set tm_token in localStorage to use this view.");
+      return;
+    }
+
+    var bannerEl = document.getElementById("review-banner");
+    var queueEl = document.getElementById("review-queue");
+
+    function load() {
+      fetchJson("/v1/review?status=open", token)
+        .then(function (result) {
+          var reviews = result.reviews || [];
+          renderReviewBanner(bannerEl, reviews.length);
+          renderReviewQueue(queueEl, reviews, token, load);
+        })
+        .catch(function (err) {
+          renderNotice(app, "Failed to load reviews: " + err.message);
+        });
+    }
+
+    load();
+  }
+
   function initNodeView() {
     var app = document.getElementById("app");
     var token = getToken();
@@ -174,6 +323,8 @@ console.debug("tm ui loaded");
   function boot() {
     if (window.location.pathname === "/node") {
       initNodeView();
+    } else if (window.location.pathname === "/review") {
+      initReviewView();
     }
   }
   if (document.readyState === "loading") {

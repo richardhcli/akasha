@@ -121,6 +121,14 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
         content = (_TEMPLATES_DIR / "node.html").read_bytes()
         return HTMLResponse(content=content, status_code=200)
 
+    # Review view (T8.3 / spec §4.13): same static-shell pattern as /node --
+    # no auth (the /v1/review fetches driven by app.js are authenticated),
+    # excluded from OpenAPI so the /v1 contract snapshot stays unchanged.
+    @app.get("/review", response_class=HTMLResponse, include_in_schema=False)
+    def ui_review() -> HTMLResponse:  # pyright: ignore[reportUnusedFunction]
+        content = (_TEMPLATES_DIR / "review.html").read_bytes()
+        return HTMLResponse(content=content, status_code=200)
+
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     return app

@@ -23,9 +23,14 @@ full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 and M6 (1 entry: T6.5, 2026-07-14).
 
-**Open questions: 8** (M7's 6, logged 2026-07-14, still open; +2 M8 entries
-T8.1 and T8.0, logged 2026-07-17. T7.2 delete_node gap RESOLVED 2026-07-15 via
-follow-up T7.2b. All 8 need a product/spec decision before archiving.).
+**Open questions: 9** (M7's 6, logged 2026-07-14, still open; +3 M8 entries
+T8.0/T8.1/T8.3, logged 2026-07-17. T7.2 delete_node gap RESOLVED 2026-07-15 via
+follow-up T7.2b. All 9 need a product/spec decision before archiving.).
+
+## T8.3 — "revised" resolution cannot be truly one-click
+- **Where:** `src/akasha/ui/static/app.js` (`renderReviewItem`, Review view, inline `# SPEC-QUESTION`-style comment).
+- **Narrowest reading taken:** §4.13 asks for "one-click resolutions," but the `revised` resolution (spec §4.9) requires a new node body plus `change_class`/`facets_touched` that the server cannot infer — it cannot be literally one-click. Implemented `still_holds`/`retracted` as true one-click buttons, `dismissed` as one-click but only rendered when `cause_kind === "violation"` (mirrors the server's violations-only 409 rule so the UI never offers a guaranteed-fail action), and `revised` as a minimal inline `<textarea>` + "submit revised" button that POSTs `{resolution:"revised", new_body:<textarea>, change_class:"minor", facets_touched:[]}` — the smallest affordance short of a full editor. Cap-10 banner is a display-only signal over the uncapped `GET /v1/review` (renders when open count ≥ 10).
+- **Resolution:** open — confirm the minimal inline-body affordance is the intended `revised` UX, or specify a richer edit flow (e.g. route to the node edit view).
 
 ## T8.0 — `/v1/review` HTTP endpoints were spec-defined but never in any task's Files list
 - **Where:** `docs/build-plan.md` (no task created `src/akasha/api/routes/review.py`); spec §4.11 line ~315 defines `GET /review?status=open` + `POST /review/{id}/resolve`; `src/akasha/cli/main.py` docstring expected T7.5 to "land them"; but T7.5's `Files` list was `tms/review.py` + `test_tms.py` only.
