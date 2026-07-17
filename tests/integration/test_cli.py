@@ -361,14 +361,16 @@ def test_token_revoke_missing_returns_exit_3(daemon):
 # --- review (SPEC-QUESTION T4.8: /v1/review does not exist until T7.5) -----
 
 
-def test_review_list_against_unimplemented_endpoint_fails_gracefully(daemon):
-    # The server-side /v1/review route does not exist yet (M7/T7.5). This
-    # asserts the CLI never crashes with an unhandled traceback and maps
-    # FastAPI's own (non-envelope) 404 to a sane non-zero exit — NOT that
-    # the verb round-trips (it can't, until T7.5 lands the route).
+def test_review_list_round_trips(daemon):
+    # The /v1/review route now exists (landed by T8.0, the review-API task
+    # inserted in M8). This previously asserted graceful FAILURE while the
+    # route was unimplemented ("until T7.5 lands the route"); now the verb
+    # round-trips against the live endpoint. An empty open queue is a valid
+    # success (exit 0), and the CLI still never crashes with a traceback.
     result = _run(daemon, "review", "list")
-    assert result.exit_code != 0
+    assert result.exit_code == 0, result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert "reviews" in result.output
 
 
 # --- global flags ------------------------------------------------------------
