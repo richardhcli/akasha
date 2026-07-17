@@ -630,6 +630,15 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 
 **Milestone DoD (spec):** playwright smoke test: create → link with span → break facet → see badge → resolve.
 
+### T8.0 — Review API endpoints (`GET /v1/review`, `POST /v1/review/{id}/resolve`)
+- **Goal** — Expose the spec §4.11 review endpoints over HTTP, wiring the existing `src/akasha/tms/review.py` logic. **Prerequisite for T8.2/T8.3** (both need review data over HTTP). Discovered missing during M8 orientation: §4.11 defines these endpoints and M4's CLI + M8's UI depend on them, but no prior task's `Files` list ever included the route — T7.5 built only `tms/review.py`. See SPEC-QUESTION T8.0.
+- **Depends on** — T7.5 (review logic), T4.3 (app factory).
+- **Files** — `src/akasha/api/routes/review.py` (new), `src/akasha/api/app.py` (wire router), `docs/api-snapshot/openapi.json` (regenerate via the sanctioned command, never hand-edit), `tests/integration/test_api.py`.
+- **Spec** — §4.11 (`GET /review?status=open` queue; `POST /review/{id}/resolve` resolutions, human-only ∅).
+- **Steps** — (1) `GET /review?status=open` returns the OPEN review set via `store.find_open_reviews` (**UNCAPPED** — the daily-cap-10 is a T8.3 display concern, not an endpoint limit), with an optional `node` filter so the Node view can query a node's open `facet_break` reviews for its stale badge. (2) `POST /review/{id}/resolve` (human-only via `deps.require_human`) dispatches to `tms/review.py` `resolve_review` for the four standard resolutions (`still_holds|revised|retracted|dismissed`). (3) Wire the router into `app.py`. (4) Regenerate the OpenAPI snapshot via the sanctioned command.
+- **Verify** — `uv run pytest tests/integration/test_api.py -k review && uv run pytest tests/integration/test_openapi_snapshot.py`
+- **DoD** — a browser/CLI can list open reviews (filterable by node) and resolve one of the four resolutions; resolve is human-only; OpenAPI snapshot regenerated with a reviewed diff of exactly the two new paths.
+
 ### T8.1 — UI shell + static serving (htmx, no build step)
 - **Goal** — Daemon-served UI shell with htmx + vanilla JS, no SPA framework, no build step beyond copying static files.
 - **Depends on** — T4.3.
@@ -641,7 +650,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 
 ### T8.2 — Node view
 - **Goal** — Body, facets, 1-hop neighborhood, history, and a stale badge with its cause.
-- **Depends on** — T8.1, T4.4.
+- **Depends on** — T8.0, T8.1, T4.4.
 - **Files** — `src/akasha/ui/templates/node.html`, `src/akasha/ui/static/app.js`.
 - **Spec** — §4.13 (Node view), R9 (badge copy "vetted by you", never "true").
 - **Steps** — (1) Render body + facets + 1-hop neighborhood + history. (2) Show a stale badge with its cause when the node has an open facet_break. (3) Badge copy uses "vetted by you" language, never "true".
@@ -650,7 +659,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 
 ### T8.3 — Review view (one-click resolutions + daily-cap banner)
 - **Goal** — Queue with one-click resolutions and a daily-cap banner.
-- **Depends on** — T8.1, T7.5.
+- **Depends on** — T8.0, T8.1, T7.5.
 - **Files** — `src/akasha/ui/templates/review.html`, `src/akasha/ui/static/app.js`.
 - **Spec** — §4.13 (Review view), §4.9 (daily cap 10).
 - **Steps** — (1) List the active queue. (2) One-click `still_holds/revised/retracted/dismissed`. (3) Show a daily-cap banner when the cap is reached.

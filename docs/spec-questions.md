@@ -23,9 +23,14 @@ full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 and M6 (1 entry: T6.5, 2026-07-14).
 
-**Open questions: 7** (M7's 6, logged 2026-07-14, still open; +1 M8 entry
-T8.1 logged 2026-07-17. T7.2 delete_node gap RESOLVED 2026-07-15 via
-follow-up T7.2b. All 7 need a product/spec decision before archiving.).
+**Open questions: 8** (M7's 6, logged 2026-07-14, still open; +2 M8 entries
+T8.1 and T8.0, logged 2026-07-17. T7.2 delete_node gap RESOLVED 2026-07-15 via
+follow-up T7.2b. All 8 need a product/spec decision before archiving.).
+
+## T8.0 — `/v1/review` HTTP endpoints were spec-defined but never in any task's Files list
+- **Where:** `docs/build-plan.md` (no task created `src/akasha/api/routes/review.py`); spec §4.11 line ~315 defines `GET /review?status=open` + `POST /review/{id}/resolve`; `src/akasha/cli/main.py` docstring expected T7.5 to "land them"; but T7.5's `Files` list was `tms/review.py` + `test_tms.py` only.
+- **Narrowest reading taken:** the endpoints are spec-mandated, so building them is implementation, not invention (rule 0.2 satisfied). Inserted a new focused prerequisite task **T8.0** (Files: `routes/review.py`, `app.py`, regenerated OpenAPI snapshot, `test_api.py`) rather than reopening T7.5 (which delivered exactly its Files list). Endpoint contract decisions: `GET /review?status=open` returns the **uncapped** open set via `store.find_open_reviews` (the §4.9 daily-cap-10 is a T8.3 *display/banner* concern, NOT an endpoint limit — a capped endpoint could not answer "does node X have an open facet_break," which the T8.2 badge needs and which a 1-review seed fixture would mask); added an optional `node` filter param for the badge's per-node query; `POST /review/{id}/resolve` is human-only (∅, `require_human`) and covers the four standard resolutions (`still_holds|revised|retracted|dismissed`) via `tms/review.py` `resolve_review` (proposal-approval / split-reassignment flows are out of T8.0 scope).
+- **Resolution:** open — a spec editor should add `T8.0`'s route to the build-plan §4.11 task coverage (it was an M4→T7.5 sequencing gap) and confirm the uncapped-endpoint + `node`-filter contract.
 
 ## T8.1 — build-plan Files list omits the vendored htmx asset and the integration test
 - **Where:** `docs/build-plan.md` T8.1 `Files:` (lists only `base.html`, `static/app.js`, `api/app.py`); actual deliverable also added `src/akasha/ui/static/htmx.min.js` and `tests/integration/test_ui_shell.py`.
