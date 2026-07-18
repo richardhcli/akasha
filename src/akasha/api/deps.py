@@ -20,6 +20,7 @@ marked ∅"); ∅ endpoints never call it — they use ``require_human`` instead
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -85,9 +86,25 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
 
-def get_conn(request: Request) -> sqlite3.Connection:
-    """The daemon's single shared WAL connection (set on app.state in app.py)."""
-    return request.app.state.conn
+def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
+    """Yield the DB connection for one request (WAL; see app.py / SPEC-QUESTION T8.5b).
+
+    Production (``app.state.db_path`` set): open a FRESH connection per request
+    and close it when the request ends. WAL permits concurrent readers + one
+    writer, so the Web UI's parallel ``fetch()``es are served safely — a single
+    ``sqlite3.Connection`` shared across the ASGI threadpool corrupts reads under
+    concurrent access. Test/embedded injection (``db_path is None``): yield the
+    shared, migrated connection (those callers drive the app sequentially).
+    """
+    db_path = getattr(request.app.state, "db_path", None)
+    if db_path is None:
+        yield request.app.state.conn
+        return
+    conn = store.connect(db_path, check_same_thread=False)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def require_auth(

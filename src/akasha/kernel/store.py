@@ -114,15 +114,20 @@ def connect(db_path: str | Path, *, check_same_thread: bool = True) -> sqlite3.C
     """Open a WAL sqlite3 connection (spec §3 PRAGMAs).
 
     ``check_same_thread`` defaults to ``True`` (stdlib default, preserving
-    every existing caller). The API daemon (T4.4) shares one connection
-    across the ASGI threadpool and passes ``check_same_thread=False``; the
-    daemon is a single-user localhost process (spec §3) issuing sequential
-    requests, so the one-connection-shared tradeoff is acceptable there.
+    every existing caller). The API daemon opens one connection PER REQUEST
+    (see ``api/deps.py::get_conn``): WAL permits concurrent readers plus a
+    single writer, so the daemon's real concurrency (the Web UI fires several
+    ``fetch()``es in parallel) is served safely — a single ``sqlite3.Connection``
+    shared across the ASGI threadpool is NOT safe under concurrent access and
+    corrupts reads (see SPEC-QUESTION T8.5b amending spec §3). ``busy_timeout``
+    makes a connection wait for a held write lock instead of raising
+    ``SQLITE_BUSY`` when two requests write near-simultaneously.
     """
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 

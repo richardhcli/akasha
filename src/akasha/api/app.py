@@ -81,6 +81,19 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = store.connect(db_path, check_same_thread=False)
         store.run_migrations(conn)
+        # Production: request handling uses a fresh connection PER REQUEST from
+        # this path (``deps.get_conn``) — WAL permits concurrent readers + one
+        # writer, so the UI's parallel fetches are safe. Sharing one connection
+        # across the ASGI threadpool corrupts reads under concurrency
+        # (SPEC-QUESTION T8.5b, amending spec §3). ``app.state.conn`` below is
+        # the startup connection, used ONLY by the pre-serving startup reconcile
+        # (``daemon.py``), never for request handling.
+        app.state.db_path = str(db_path)
+    else:
+        # Test/embedded injection: a single migrated connection is shared and
+        # driven sequentially (TestClient), so it is safe; ``get_conn`` yields
+        # it directly (``db_path is None`` selects that branch).
+        app.state.db_path = None
     app.state.conn = conn
 
     deps.register_error_handlers(app)

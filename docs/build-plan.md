@@ -675,9 +675,18 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Verify** — Playwright step: run a search; open the sync view and inspect a paused file.
 - **DoD** — search returns hits; sync view renders violations and the pause&diff inspector.
 
+### T8.5b — Daemon per-request DB connections (concurrency fix)
+- **Goal** — Fix the data-integrity concurrency defect the T8.5 smoke test exposed: the spec-§3 single shared `sqlite3.Connection` corrupts reads under the Web UI's concurrent `fetch`es. **Prerequisite for T8.5.** Discovered during T8.5; user-directed "ensure concurrency is possible."
+- **Depends on** — T8.1 (the app factory / deps this touches).
+- **Files** — `src/akasha/api/deps.py`, `src/akasha/api/app.py`, `src/akasha/kernel/store.py`, `tests/integration/test_concurrency.py`.
+- **Spec** — amends §3 (see SPEC-QUESTION T8.5b).
+- **Steps** — (1) `get_conn` opens a fresh WAL connection PER REQUEST (concurrent readers + one writer), closed at request end; `app.state.db_path` selects this vs. the injected-connection path for tests. (2) `store.connect` gains `PRAGMA busy_timeout`. (3) Keep `app.state.conn` for the pre-serving startup reconcile only. (4) Add a fast concurrent-request regression test.
+- **Verify** — `uv run pytest tests/integration/test_concurrency.py`
+- **DoD** — concurrent node-view fetches never corrupt (all 200); existing sequential (injected-connection) tests unchanged.
+
 ### T8.5 — Playwright smoke test (full loop)
 - **Goal** — Automate create → link with span → break facet → see badge → resolve.
-- **Depends on** — T8.2, T8.3, T8.4, T7.7.
+- **Depends on** — T8.2, T8.3, T8.4, T8.5b, T7.7.
 - **Files** — `tests/integration/test_ui_smoke.py` (or `plugin-obsidian`-independent playwright harness), CI job.
 - **Spec** — M8 DoD.
 - **Steps** — (1) Script the five-step loop end-to-end. (2) Run against a live test daemon. (3) Add to CI.
