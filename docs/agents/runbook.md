@@ -7,28 +7,56 @@ request) follows to start one.
 
 ## Choosing a dispatch path
 
-There are two equally-primary dispatch mechanisms, selected by what your
-current session actually has, not by preference:
+There are two dispatch mechanisms, but they are **not** currently equally
+available — pick based on the confirmed status below, not on preference:
 
-- **Path A — `Workflow` tool.** Use this whenever a `Workflow` tool is
-  available (e.g. Claude Code, including the `claude -p` overnight loop in
-  `scripts/fleet/overnight_runner.sh`). Its `agent()` calls are real
-  synchronous awaits in deterministic script code, which is the strongest
-  available guarantee against the failure mode below.
-- **Path B — direct `Task`-tool dispatch.** Use this whenever no `Workflow`
-  tool exists in your toolset (e.g. a Cursor session — confirmed empirically
-  2026-07-17: Cursor's `Task` tool has no `Workflow` equivalent). You are
-  the caller *and* the dispatcher, so the discipline below has to be carried
-  by you explicitly instead of by a deterministic script.
+- **Path B — direct `Agent`/`Task`-tool dispatch. Use this by default,
+  everywhere, including the `claude -p` overnight loop in
+  `scripts/fleet/overnight_runner.sh`.** Confirmed working: Cursor's `Task`
+  tool (2026-07-17) and Claude Code's headless `claude -p` via the `Agent`
+  tool (2026-07-18 — see the Path A caveat below for why this, not
+  `Workflow`, is what the overnight loop actually uses). You are the caller
+  *and* the dispatcher, so the discipline below has to be carried by you
+  explicitly instead of by a deterministic script.
+- **Path A — `Workflow` tool. Experimental; interactive Claude Code only;
+  do not use for headless/`claude -p` dispatch.** Confirmed **not**
+  available from headless `claude -p` (2026-07-18, both empirically — a
+  live `claude -p` session given an explicit `Workflow({scriptPath, args})`
+  instruction searched via `ToolSearch` and correctly reported the tool
+  does not exist in its toolset, rather than fabricating a result — and per
+  Anthropic's own docs: dynamic workflows are gated behind a `/config`
+  opt-in some plans default to off, saved workflow scripts live under
+  `.claude/workflows/` and are invoked by name/slash-command, and the
+  natural-language `ultracode` trigger that would otherwise turn a prompt
+  into a workflow run is explicitly excluded for "a prompt passed with
+  `-p`" — see code.claude.com/docs/en/workflows). Whether it works from an
+  *interactive* Claude Code session is plausible per those same docs but
+  has not been tested here. Do not point `overnight_runner.sh` at it. See
+  the `WORKFLOW-TOOL-HEADLESS-GAP` entry in `docs/archived-questions.md`
+  for the full writeup, including what a future interactive-only attempt
+  would require (the `/config` toggle, relocating
+  `docs/agents/fleet-workflow.js` under `.claude/workflows/`, and invoking
+  it by slash-command rather than by asking a headless session to call a
+  tool literally named `Workflow`).
 
-**Both paths converge on the same contract:** the same eligibility scan, the
-same worker/verifier schemas, the same durable log layout under
-`docs/agents/logs/<run_id>/`, and the same rule that a task becomes `DONE`
-in `docs/agents/task-status.md` only on a `CONFIRMED_DONE` verdict. Neither
-path is a lesser fallback of the other — pick whichever your current tools
-support and follow it fully, including its logging step.
+**Both paths converge on the same contract where both apply:** the same
+eligibility scan, the same worker/verifier schemas, the same durable log
+layout under `docs/agents/logs/<run_id>/`, and the same rule that a task
+becomes `DONE` in `docs/agents/task-status.md` only on a `CONFIRMED_DONE`
+verdict. If Path A is ever confirmed usable from an interactive session, it
+remains an *accelerant* over Path B (a deterministic script closes the
+ORCHESTRATION-INCIDENT failure mode by construction instead of by
+discipline) — not a different contract.
 
 ## Path A: fleet-dispatch Workflow
+
+> **Status (2026-07-18): experimental, interactive-only, unverified. Do not
+> use for `overnight_runner.sh` or any headless `claude -p` invocation** —
+> see "Choosing a dispatch path" above. This section is kept because the
+> design (a deterministic script closing the ORCHESTRATION-INCIDENT failure
+> mode by construction) is still the better one *if* a `Workflow` tool is
+> genuinely reachable, and because it documents what a future interactive
+> session would need to do to actually try it.
 
 `docs/agents/fleet-architecture.md` defines a 3-tier agent hierarchy (Opus
 scanner → Sonnet worker → Cursor editor). Dispatch and verification are
@@ -63,6 +91,9 @@ orchestrator agent" below for why that distinction matters.
 
 **If a `Workflow` tool isn't available in your session, this path cannot be
 followed literally (there is no script to await) — use Path B instead.**
+As of 2026-07-18 that includes every headless `claude -p` session tested
+(see the status note above) — Path B is not just the fallback for "no
+`Workflow` tool", it is currently the *only* confirmed-working path there.
 
 ### Why this is a Workflow, not an orchestrator agent
 
@@ -81,15 +112,22 @@ incident writeup.
 
 ## Path B: direct Task-tool dispatch
 
-Use this path when your session has a `Task`-style subagent tool but no
-`Workflow` tool (confirmed to be Cursor's situation as of 2026-07-17: `Task`
-supports `subagent_type: "fleet-orchestrator"` and `"fleet-worker"` — both
-resolve to the same `.claude/agents/*.md` personas Path A uses — but there
-is no `Workflow` tool at all). Because there is no deterministic script
-standing between you and each subagent's result, **you** are the boundary
-that the ORCHESTRATION-INCIDENT closed for Path A by construction — the
-same guarantee has to come from discipline here instead. That discipline is
-one rule, applied consistently:
+**This is the default path as of 2026-07-18** — use it whenever your
+session has a `Task`/`Agent`-style subagent tool, which in practice means
+always: confirmed on Cursor (2026-07-17, `Task` tool) and confirmed under
+Claude Code's headless `claude -p` (2026-07-18) as far as: `subagent_type:
+"fleet-worker"` resolved correctly via Claude Code's native
+`.claude/agents/*.md` loading, ran, and produced the exact on-disk artifact
+asked for (verified directly from the outer session, not from the worker's
+self-report). The run then hit the account's real usage-window limit before
+it could spawn the independent verifier or reach the logging step — so the
+verifier `subagent_type` resolution and the full
+worker→verifier→`log_run.py` chain are reasoned-correct but still pending a
+live re-run once the window resets. Because there is no deterministic
+script standing between you and each subagent's result, **you** are the
+boundary that the ORCHESTRATION-INCIDENT closed for Path A by construction
+— the same guarantee has to come from discipline here instead. That
+discipline is one rule, applied consistently:
 
 > **Never write down — in a log file, in `task-status.md`, or in your own
 > reply — a result you have not actually received.** If you dispatched a
@@ -247,8 +285,9 @@ cohort until a human looks at it.
 
 ## Starting a run
 
-Use Path A (the `Workflow` tool) or Path B (direct `Task`-tool dispatch) —
-see above, chosen by what your session actually has — following a
+Use Path B (direct `Task`/`Agent`-tool dispatch) by default, or Path A (the
+`Workflow` tool) only from an interactive session where you've confirmed it
+actually works — see "Choosing a dispatch path" above — following a
 procedure that:
 
 1. Reads `docs/agents/task-status.md` to find the next `TODO` task per

@@ -5,7 +5,7 @@ Utilities for the 3-tier agent fleet that orchestrates akasha build-plan executi
 ## Files
 
 - **`cursor_bridge.py`** — Executor subprocess that bridges fleet-worker agents to the Cursor Agent CLI. Implements the abstract JSON contract: task_json (incl. `verify_cmd`) in → edit evidence + independently-run verify result JSON out. Designed to be swappable with other edit executors (same contract, different implementation).
-- **`log_run.py`** — Mechanical, schema-checked writer for `docs/agents/logs/<run_id>/`. Required when dispatching via direct `Task`-tool calls instead of the `Workflow` tool (`docs/agents/runbook.md` "Path B"), since that path has no deterministic script enforcing the logging step the way a `Workflow` run does. See "Path B logging" below.
+- **`log_run.py`** — Mechanical, schema-checked writer for `docs/agents/logs/<run_id>/`. Required when dispatching via direct `Agent`/`Task`-tool calls (`docs/agents/runbook.md` "Path B" — the default path as of 2026-07-18, including the overnight loop; see "Choosing a dispatch path" there for why), since that path has no deterministic script enforcing the logging step the way a `Workflow` run does. See "Path B logging" below.
 - **`overnight_runner.sh`** / **`overnight_prompt.md`** — unattended overnight loop. See "Overnight unattended runs" below.
 
 ## Path B logging (`log_run.py`)
@@ -45,10 +45,25 @@ rather than retyping/paraphrasing it, is the part that actually matters.
 
 `overnight_runner.sh` repeatedly invokes headless Claude Code (`claude -p`,
 Opus by default) with `overnight_prompt.md` as the prompt, which instructs
-it to run one fleet-dispatch cohort per the primary path in
-`docs/agents/runbook.md`, commit + push after each cohort, and write
-`docs/agents/logs/OVERNIGHT_HALT.md` instead of guessing once no eligible
-work remains.
+it to run one fleet-dispatch cohort per **Path B** (direct `Agent`-tool
+dispatch) in `docs/agents/runbook.md`, commit + push after each cohort, and
+write `docs/agents/logs/OVERNIGHT_HALT.md` instead of guessing once no
+eligible work remains.
+
+**Not Path A.** Confirmed live 2026-07-18: a headless `claude -p` session
+has no `Workflow` tool available (see the `WORKFLOW-TOOL-HEADLESS-GAP`
+entry in `docs/archived-questions.md`) — `overnight_prompt.md` dispatches
+via the `Agent` tool directly, same as a Cursor session would.
+
+**Root/container environments** (confirmed live 2026-07-18): if this runs
+as root/sudo (common on a disposable overnight VM), `claude -p
+--dangerously-skip-permissions` hard-exits before making any API call
+unless `IS_SANDBOX=1` is set — `overnight_runner.sh` now sets this
+automatically when it detects UID 0. Separately, if `bubblewrap`/`socat`
+aren't installed, Claude Code's own internal command-sandboxing disables
+itself with a `Commands will run WITHOUT sandboxing` warning; the script
+doesn't install these itself (one-time host setup, not a per-run concern),
+but consider `apt-get install -y bubblewrap socat` on a fresh VM.
 
 This is local-first by design (it shells out to local `cursor-agent`, runs
 local `pytest`, reads/writes the local repo) — it deliberately does **not**
@@ -71,13 +86,20 @@ scripts/fleet/.overnight_runner.pid)`.
 
 **How it handles the usage-window limit:** there is no documented way to
 query remaining usage before a call, so the runner treats a failed
-invocation as the signal. One failure gets a short retry (might be a
-transient blip); two failures in a row are treated as the account's rolling
-usage window being exhausted, and it sleeps `OVERNIGHT_RESET_SECS` (default
-5h — set this to what your claude.ai usage page actually shows) before
-resuming. Tune via env vars: `OVERNIGHT_MODEL`, `OVERNIGHT_RESET_SECS`,
-`OVERNIGHT_SHORT_BACKOFF_SECS`, `OVERNIGHT_BETWEEN_RUNS_SECS`,
-`OVERNIGHT_FAIL_THRESHOLD`.
+invocation as the signal. Confirmed live 2026-07-18 — the actual failure is
+`is_error: true`, `api_error_status: 429`, exit code 1, and a `result`
+string of the form `"You've hit your session limit · resets 1:30am
+(America/Indiana/Indianapolis)"`. The runner now greps the invocation's
+output for that `resets <time> (<tz>)` pattern on **every** failure (not
+just repeated ones) and, when found, sleeps exactly until that moment (+2min
+buffer) — skipping the blind guess entirely. This is scraping a human-facing
+string, not a documented API contract, so any run whose output doesn't
+match that exact shape falls back to the original heuristic: one failure
+gets a short retry (might be a transient blip); two failures in a row are
+treated as the usage window being exhausted, and it sleeps
+`OVERNIGHT_RESET_SECS` (default 5h) before resuming. Tune via env vars:
+`OVERNIGHT_MODEL`, `OVERNIGHT_RESET_SECS`, `OVERNIGHT_SHORT_BACKOFF_SECS`,
+`OVERNIGHT_BETWEEN_RUNS_SECS`, `OVERNIGHT_FAIL_THRESHOLD`.
 
 **Safety net:** runs with `--dangerously-skip-permissions` (no human present
 to answer prompts) but pairs it with `--disallowedTools` denying
@@ -88,12 +110,18 @@ output). Everything else is allowed, including regular `git commit` +
 `git push` after each cohort, per this repo's current choice to run the
 fleet unattended on a VM with disposable, revertible history.
 
-**Not yet verified against a real overnight run:** the exact text/exit code
-Claude Code returns when the usage window is actually exhausted (the
-2-failure heuristic above is a guess at that signal, not a confirmed one),
-and the deny-pattern glob syntax for patterns other than the one spot-check
-above. Watch the first run's logs under `docs/agents/logs/` and
-`docs/agents/logs/overnight-runner.log`.
+**Not yet verified against a real overnight run:** the deny-pattern glob
+syntax for patterns other than the one spot-check already done, and a full
+cohort actually landing end-to-end (`fleet-worker` → `fleet-verifier` →
+`log_run.py` → `task-status.md` → commit/push) under `claude -p`
+specifically. A live 2026-07-18 attempt got further than a bare
+tool-availability check — `subagent_type: "fleet-worker"` resolved and ran
+via the `Agent` tool, and produced the exact on-disk file asked for
+(independently confirmed afterward, not just the worker's own claim) — but
+then hit the account's actual usage-window limit (see above) before it
+could spawn the verifier or reach the logging step, so that tail end is
+still unconfirmed under headless dispatch. Watch the first real run's logs
+under `docs/agents/logs/` and `docs/agents/logs/overnight-runner.log`.
 
 ## Architecture
 

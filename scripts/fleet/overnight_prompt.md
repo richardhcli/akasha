@@ -3,22 +3,33 @@ fleet-dispatch loop. No human will see your output until morning, so act
 conservatively and leave a clear, file-based trail — do not rely on anyone
 reading your prose.
 
-Follow `docs/agents/runbook.md`, section "Path A: fleet-dispatch Workflow",
-exactly (this script runs under Claude Code, which has a `Workflow` tool, so
-Path A — not the Cursor-oriented Path B — is the one that applies here):
+Follow `docs/agents/runbook.md`, section "Path B: direct Task-tool
+dispatch", exactly. (Not Path A / the `Workflow` tool: confirmed 2026-07-18
+that a headless `claude -p` session has no `Workflow` tool available — see
+the `WORKFLOW-TOOL-HEADLESS-GAP` entry in `docs/archived-questions.md`. Do
+not attempt to invoke `Workflow` from this prompt; use the `Agent` tool
+directly, per Path B, exactly as you would for any other subagent.)
 
-1. Spawn a `fleet-orchestrator` agent to scan `docs/agents/task-status.md` +
-   `docs/build-plan.md` and return the next eligible, file-disjoint cohort.
-2. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`) and run the
-   `fleet-dispatch` Workflow (`docs/agents/fleet-workflow.js`) for that
-   cohort.
-3. Update `docs/agents/task-status.md` using ONLY the Workflow's returned
-   verdicts — a task becomes `DONE` only on `CONFIRMED_DONE`. A
+1. Spawn a `fleet-orchestrator` agent (via the `Agent` tool) to scan
+   `docs/agents/task-status.md` + `docs/build-plan.md` and return the next
+   eligible, file-disjoint cohort.
+2. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`).
+3. For each task in the cohort, dispatch via the `Agent` tool with
+   `subagent_type: "fleet-worker"`, wait for its real result, then dispatch
+   an independent verifier with `subagent_type: "fleet-verifier"` (fall
+   back to `"general-purpose"` with `.claude/agents/fleet-verifier.md`'s
+   Steps/Return Value inlined if that `subagent_type` is rejected) and wait
+   for its real result — never proceed on a guess about either result.
+   Respect file-disjoint parallelism per `docs/agents/fleet-architecture.md`
+   "File-Disjoint Parallelism".
+4. Update `docs/agents/task-status.md` using ONLY each verifier's returned
+   verdict — a task becomes `DONE` only on `CONFIRMED_DONE`. A
    `CONTRADICTS_CLAIM` verdict means `BLOCKED: verifier contradicted worker
    claim`, same as any other Verify failure.
-4. Write the durable run log under `docs/agents/logs/<run_id>/` per the
-   runbook's "Logging" section, from the Workflow's real structured return
-   value — never a re-narrated summary of it.
+5. Write the durable run log under `docs/agents/logs/<run_id>/` immediately
+   on receiving each real result, via `scripts/fleet/log_run.py` exactly per
+   the runbook's "Logging" section (Path B) — never a re-narrated summary of
+   what a subagent said.
 
 ## After each cohort: commit and push
 

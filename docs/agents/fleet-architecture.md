@@ -25,10 +25,10 @@
 
 Who does what today, and what is *authoritative* vs *advisory*:
 
-| Concern                         | Cursor (T3)                         | Worker (T2)                                      | Independent verifier (Workflow)     | Caller (outer session)                          | Scanner (T1)        |
+| Concern                         | Cursor (T3)                         | Worker (T2)                                      | Independent verifier                | Caller (outer session)                          | Scanner (T1)        |
 | ------------------------------- | ----------------------------------- | ------------------------------------------------ | ----------------------------------- | ----------------------------------------------- | ------------------- |
 | Choose next cohort              | —                                   | —                                                | —                                   | invokes scanner                                 | **R** (structured)  |
-| Spawn workers / verifiers       | —                                   | —                                                | —                                   | invokes Workflow                                | —                   |
+| Spawn workers / verifiers       | —                                   | —                                                | —                                   | invokes Workflow (Path A, experimental) or `Agent` tool directly (Path B, default) | —                   |
 | Edit files for a task           | **R** when delegated                | **R** when direct / on Cursor failure            | —                                   | —                                               | —                   |
 | Run task `Verify` (first pass)  | **R** inside bridge session (target)| **A**: confirm / retry / BLOCKED                 | —                                   | —                                               | —                   |
 | Independent re-Verify + git xchk| —                                   | —                                                | **R** / **A** for `CONFIRMED_*`     | —                                               | —                   |
@@ -91,21 +91,24 @@ prose-narrating agent — see "Verification model" below for why.
    to its first task, or a batch of fully parallel tasks), and returns that
    cohort as structured data. It does not spawn workers and does not write
    task-status.md.
-2. `docs/agents/fleet-workflow.js` **(Workflow script)** — receives the
-  cohort, spawns one `fleet-worker` agent per task (in parallel where
-   file-disjoint, via `pipeline()`), then spawns a separate, independent
-   verifier agent per task that re-runs Verify and cross-checks claimed
-   files against `git status`. Returns structured worker + verifier results
-   for the whole cohort. **This step requires a `Workflow` tool.** In an
-   environment without one (e.g. a Cursor session), the caller dispatches
-   the same worker → verifier sequence directly via a `Task`-style tool
-   instead — see `docs/agents/runbook.md` "Path B: direct Task-tool
-   dispatch" for the exact procedure and its stricter logging discipline
-   (there is no deterministic script to enforce it there, so the caller
-   carries that guarantee explicitly).
-3. **Caller (the outer session)** — after the Workflow (or, on Path B, the
-   direct dispatch sequence) returns,
-  writes the durable log under `docs/agents/logs/<run_id>/` (see
+2. Dispatch + verification, one `fleet-worker` agent per task (in parallel
+   where file-disjoint) followed by a separate, independent verifier agent
+   per task that re-runs Verify and cross-checks claimed files against
+   `git status`. **Default mechanism (Path B): the caller dispatches this
+   worker → verifier sequence directly via the `Agent`/`Task` tool** — see
+   `docs/agents/runbook.md` "Path B: direct Task-tool dispatch" for the
+   exact procedure and its stricter logging discipline (there is no
+   deterministic script to enforce it here, so the caller carries that
+   guarantee explicitly). **Experimental alternative (Path A):**
+   `docs/agents/fleet-workflow.js`, a `Workflow` script that does the same
+   dispatch inside deterministic code via `pipeline()`/`agent()` — stronger
+   in principle, but confirmed unavailable from headless `claude -p`
+   sessions (2026-07-18) and unverified even interactively; see
+   `docs/agents/runbook.md` "Choosing a dispatch path" before reaching for
+   it.
+3. **Caller (the outer session)** — after the dispatch sequence above
+   returns (Path B's direct calls, or Path A's `Workflow` if used), writes
+   the durable log under `docs/agents/logs/<run_id>/` (see
    "Logging" below) and updates `docs/agents/task-status.md` /
    `docs/spec-questions.md`, flipping a task to `DONE` only when its
    verifier verdict is `CONFIRMED_DONE`. Runs `make check` (+ `make battery`
@@ -243,9 +246,11 @@ Cursor local Verify  →  Worker confirmation Verify  →  Independent verifier
 ```
 
 **Never trust a worker's (or Cursor's) self-report as the sole basis for
-marking a task `DONE`.** `docs/agents/fleet-workflow.js` spawns a second,
-independent `agent()` call per task — the verifier — after the worker
-returns. The verifier:
+marking a task `DONE`.** The caller spawns a second, independent agent per
+task — the verifier — after the worker returns, either inside
+`docs/agents/fleet-workflow.js`'s `agent()` call (Path A) or via a direct
+`Agent`/`Task`-tool call (Path B, the default — see
+`docs/agents/runbook.md`). The verifier:
 
 1. Re-runs the task's exact `Verify` command itself, via its own `Bash`
   call, and records the real exit code and output tail.
@@ -265,15 +270,17 @@ This exists because of a real incident, not a hypothetical: the
 orchestrating turn once narrated a fabricated "worker complete" result
 before the real background task had actually finished, and that
 fabrication was indistinguishable from a genuine report by inspection
-alone — only an independent, out-of-band filesystem check caught it. Using
-a `Workflow` script for dispatch closes the *orchestrator*-side version of
-this bug by construction (its `agent()` calls are real blocking awaits, not
-narratable text). The independent verifier stage closes the *worker*-side
-version — including a separately documented Claude Code failure mode where
-a background subagent's tool call can be silently auto-denied and the
-subagent then self-reports as if it succeeded. See the
-`ORCHESTRATION-INCIDENT` entry in `docs/spec-questions.md` for the full
-writeup.
+alone — only an independent, out-of-band filesystem check caught it. A
+`Workflow` script (Path A) closes the *orchestrator*-side version of this
+bug by construction (its `agent()` calls are real blocking awaits, not
+narratable text); direct dispatch (Path B, the default) closes the same gap
+by the caller's explicit discipline instead — never write down a result you
+have not actually received (`docs/agents/runbook.md` Path B). The
+independent verifier stage closes the *worker*-side version — including a
+separately documented Claude Code failure mode where a background
+subagent's tool call can be silently auto-denied and the subagent then
+self-reports as if it succeeded. See the `ORCHESTRATION-INCIDENT` entry in
+`docs/archived-questions.md` for the full writeup.
 
 **What Cursor verification is for:** shrinking the Sonnet retry loop. When
 Cursor returns `verify_exit_code: 0` and the worker's own re-run agrees,
