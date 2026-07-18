@@ -10,10 +10,12 @@ model: opus
 Your job is narrow: read the current build-plan state and return a
 structured, ready-to-dispatch cohort. You do **not** spawn workers, do not
 edit product code, and do not narrate task outcomes — dispatch and
-verification are owned by the `docs/agents/fleet-workflow.js` Workflow
-script, which awaits real subagent results and cannot be pre-empted by
-narration. Your only output is the cohort description handed to that
-script's `args.cohort`.
+verification are owned by whatever the caller uses next: the
+`docs/agents/fleet-workflow.js` Workflow script where one is available, or
+direct `Task`-tool dispatch per `docs/agents/runbook.md` "Path B" where it
+isn't. Either way, that next step awaits real subagent results and cannot
+be pre-empted by narration. Your only output is the cohort description
+handed to whichever dispatch mechanism the caller is using.
 
 ## Why this role is scanner-only
 
@@ -89,4 +91,6 @@ A single JSON object: `{"run_label": "<milestone-or-cohort-label>",
 "cohort": [<task objects as above>], "notes": "<any blocked-dependency or
 ambiguity observations>"}`. The caller feeds `cohort` directly into
 `Workflow({scriptPath: "docs/agents/fleet-workflow.js", args: {run_id,
-cohort}})`.
+cohort}})` (Path A), or uses each task object to build a worker prompt for
+direct `Task`-tool dispatch (Path B) — see `docs/agents/runbook.md`. Either
+way, your output is the same; only what the caller does with it differs.

@@ -1,0 +1,11 @@
+- generic [active] [ref=e1]:
+  - navigation [ref=e2]:
+    - link "Node" [ref=e3] [cursor=pointer]:
+      - /url: /node
+    - link "Review" [ref=e4] [cursor=pointer]:
+      - /url: /review
+    - link "Search" [ref=e5] [cursor=pointer]:
+      - /url: /search
+    - link "Sync" [ref=e6] [cursor=pointer]:
+      - /url: /sync
+  - main

@@ -1,0 +1,28 @@
+- generic [active] [ref=f1e1]:
+  - navigation [ref=f1e2]:
+    - link "Node" [ref=f1e3] [cursor=pointer]:
+      - /url: /node
+    - link "Review" [ref=f1e4] [cursor=pointer]:
+      - /url: /review
+    - link "Search" [ref=f1e5] [cursor=pointer]:
+      - /url: /search
+    - link "Sync" [ref=f1e6] [cursor=pointer]:
+      - /url: /sync
+  - main [ref=f1e7]:
+    - list [ref=f1e8]:
+      - listitem [ref=f1e9]:
+        - paragraph [ref=f1e10]: "id: btfibrod"
+        - paragraph [ref=f1e11]: "node_id: z4xoj7xw"
+        - paragraph [ref=f1e12]: "cause_kind: facet_break"
+        - paragraph [ref=f1e13]: "facet: gcxsas3a"
+        - paragraph [ref=f1e14]: "created_at: 2026-07-18T03:17:09.520366+00:00"
+        - button "still_holds" [ref=f1e15]
+        - button "retracted" [ref=f1e16]
+        - textbox [ref=f1e17]
+        - generic [ref=f1e18]:
+          - text: "commit as change_class:"
+          - combobox "commit as change_class:" [ref=f1e19]:
+            - option "minor" [selected]
+            - option "major"
+        - button "submit revised" [ref=f1e20]
+        - paragraph

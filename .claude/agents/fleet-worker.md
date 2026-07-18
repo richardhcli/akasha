@@ -107,7 +107,7 @@ If you encounter a spec ambiguity that prevents you from deciding on an approach
 
 ## Return Value
 
-Your result is schema-validated by the Workflow script (`WORKER_SCHEMA` in `docs/agents/fleet-workflow.js`). Return exactly these fields — no prose summary substitutes for them:
+Your result is schema-validated against `WORKER_SCHEMA` (`docs/agents/fleet-workflow.js`) — automatically, if you were dispatched by the Workflow script; by the caller piping your reply through `scripts/fleet/log_run.py`, if you were dispatched directly via a `Task`-style tool (see `docs/agents/runbook.md` Path B). Either way, end your reply with a fenced ```json block containing exactly these fields — no prose summary substitutes for them:
 
 - **`status`** — `"DONE"` or `"BLOCKED"` (never a combined string; put the reason in `blocked_reason`).
 - **`files_changed`** — array of paths, from `git diff --name-only` plus any untracked files you created (check `git status --porcelain`). Never a guess.

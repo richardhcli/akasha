@@ -96,8 +96,15 @@ prose-narrating agent — see "Verification model" below for why.
    file-disjoint, via `pipeline()`), then spawns a separate, independent
    verifier agent per task that re-runs Verify and cross-checks claimed
    files against `git status`. Returns structured worker + verifier results
-   for the whole cohort.
-3. **Caller (the outer Claude Code session)** — after the Workflow returns,
+   for the whole cohort. **This step requires a `Workflow` tool.** In an
+   environment without one (e.g. a Cursor session), the caller dispatches
+   the same worker → verifier sequence directly via a `Task`-style tool
+   instead — see `docs/agents/runbook.md` "Path B: direct Task-tool
+   dispatch" for the exact procedure and its stricter logging discipline
+   (there is no deterministic script to enforce it there, so the caller
+   carries that guarantee explicitly).
+3. **Caller (the outer session)** — after the Workflow (or, on Path B, the
+   direct dispatch sequence) returns,
   writes the durable log under `docs/agents/logs/<run_id>/` (see
    "Logging" below) and updates `docs/agents/task-status.md` /
    `docs/spec-questions.md`, flipping a task to `DONE` only when its
@@ -277,13 +284,14 @@ for: authorizing `task-status.md` updates or replacing the durable log.
 
 ## Logging
 
-Every `fleet-dispatch` Workflow run is persisted to
+Every dispatch run — via the Workflow script or via direct `Task`-tool
+dispatch (`docs/agents/runbook.md` Path B) — is persisted to
 `docs/agents/logs/<run_id>/` (`run_id` format:
 `<YYYYMMDD-HHMMSS>-<milestone-label>`):
 
 ```
 docs/agents/logs/<run_id>/
-  manifest.json              # {run_id, cohort: [task_ids], final_status: "COMPLETE"|"PARTIAL"|"ABORTED"}
+  manifest.json              # {run_id, cohort: [task_ids], final_status: "IN_PROGRESS"|"COMPLETE"|"PARTIAL"|"ABORTED"}
   workers/<task_id>/
     prompt.md                 # exact prompt sent to the worker, verbatim
     result.json                # worker's schema-validated structured result, verbatim
@@ -299,6 +307,18 @@ makes the log trustworthy for manual review: every prompt on disk is the
 literal string that was sent, and every result on disk is the literal
 schema-validated object the harness returned, with no narration step in
 between where a fabrication could be introduced.
+
+**When there is no Workflow script** (Path B), there is also no filesystem
+boundary and no automatic schema check standing between the caller and this
+directory — so the caller writes these files via `scripts/fleet/log_run.py`
+(which validates the same required fields `WORKER_SCHEMA`/`VERIFY_SCHEMA`
+demand and refuses to write a malformed or duplicate entry) immediately
+upon receiving each subagent's real result, before doing anything else with
+it. See `docs/agents/runbook.md` "Path B" and "Logging" for the exact
+procedure. This gap was real, not hypothetical: every task after `T4.1` in
+the first logged run went through this exact caller-has-no-Workflow
+situation and produced no log at all, because at the time neither Path B
+nor `log_run.py` existed yet.
 
 **Cursor's role in logging:** emit evidence into the bridge JSON
 (`files_changed`, `verify_*`, `usage`) that the worker copies into its

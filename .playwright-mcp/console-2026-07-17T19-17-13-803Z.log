@@ -1,0 +1,3 @@
+[      27ms] TypeError: Cannot set properties of null (setting 'textContent')
+    at renderNotice (http://127.0.0.1:7468/static/app.js:23:27)
+    at http://127.0.0.1:7468/static/app.js:168:9

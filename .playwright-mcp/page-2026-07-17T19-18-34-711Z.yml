@@ -1,0 +1,30 @@
+- generic [active] [ref=f2e1]:
+  - navigation [ref=f2e2]:
+    - link "Node" [ref=f2e3] [cursor=pointer]:
+      - /url: /node
+    - link "Review" [ref=f2e4] [cursor=pointer]:
+      - /url: /review
+    - link "Search" [ref=f2e5] [cursor=pointer]:
+      - /url: /search
+    - link "Sync" [ref=f2e6] [cursor=pointer]:
+      - /url: /sync
+  - main [ref=f2e7]:
+    - paragraph [ref=f2e9]: "Stale -- needs recheck (cause: facet_break)."
+    - generic [ref=f2e10]:
+      - heading "Body" [level=2] [ref=f2e11]
+      - paragraph [ref=f2e12]: The Earth orbits the Sun once per year. <img src=x onerror="alert(2)"> & a "revised quoted" clause.
+    - generic [ref=f2e13]:
+      - heading "Facets" [level=2] [ref=f2e14]
+      - list [ref=f2e15]:
+        - listitem [ref=f2e16]: "orbit-claim: orbits the Sun"
+        - listitem [ref=f2e17]: "annual-period: once per year"
+    - generic [ref=f2e18]:
+      - heading "Neighborhood" [level=2] [ref=f2e19]
+      - list [ref=f2e20]:
+        - listitem [ref=f2e21]: shxjbafr -composes-> btk2ojxk
+        - listitem [ref=f2e22]: j3g56urk -supports-> shxjbafr
+    - generic [ref=f2e23]:
+      - heading "History" [level=2] [ref=f2e24]
+      - list [ref=f2e25]:
+        - listitem [ref=f2e26]: "c4b9c89126c6ef1282b8f64c4199572f55e63133aa311f34ee4072cc8321e5d7 seed: initial (2026-07-17T19:16:30.929819+00:00)"
+        - listitem [ref=f2e27]: "35e529fea97ac5eff6a61af90461006b1338051fbae0b327d565893d99f76075 seed: revision (2026-07-17T19:16:30.930120+00:00)"

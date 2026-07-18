@@ -5,7 +5,30 @@ This describes how to actually kick off an unattended run through
 this is the procedure a human (or a session acting on the human's explicit
 request) follows to start one.
 
-## Primary path: fleet-dispatch Workflow (recommended for large batches)
+## Choosing a dispatch path
+
+There are two equally-primary dispatch mechanisms, selected by what your
+current session actually has, not by preference:
+
+- **Path A — `Workflow` tool.** Use this whenever a `Workflow` tool is
+  available (e.g. Claude Code, including the `claude -p` overnight loop in
+  `scripts/fleet/overnight_runner.sh`). Its `agent()` calls are real
+  synchronous awaits in deterministic script code, which is the strongest
+  available guarantee against the failure mode below.
+- **Path B — direct `Task`-tool dispatch.** Use this whenever no `Workflow`
+  tool exists in your toolset (e.g. a Cursor session — confirmed empirically
+  2026-07-17: Cursor's `Task` tool has no `Workflow` equivalent). You are
+  the caller *and* the dispatcher, so the discipline below has to be carried
+  by you explicitly instead of by a deterministic script.
+
+**Both paths converge on the same contract:** the same eligibility scan, the
+same worker/verifier schemas, the same durable log layout under
+`docs/agents/logs/<run_id>/`, and the same rule that a task becomes `DONE`
+in `docs/agents/task-status.md` only on a `CONFIRMED_DONE` verdict. Neither
+path is a lesser fallback of the other — pick whichever your current tools
+support and follow it fully, including its logging step.
+
+## Path A: fleet-dispatch Workflow
 
 `docs/agents/fleet-architecture.md` defines a 3-tier agent hierarchy (Opus
 scanner → Sonnet worker → Cursor editor). Dispatch and verification are
@@ -38,8 +61,8 @@ orchestrator agent" below for why that distinction matters.
    returned — never a re-narrated summary of it.
 5. Repeat from step 1 for the next eligible cohort.
 
-**Fallback:** The manual one-task-at-a-time procedure below remains valid and
-required if `Workflow` is unavailable or you prefer single-task control.
+**If a `Workflow` tool isn't available in your session, this path cannot be
+followed literally (there is no script to await) — use Path B instead.**
 
 ### Why this is a Workflow, not an orchestrator agent
 
@@ -53,17 +76,84 @@ check caught the contradiction. A `Workflow` script's `agent()` calls are
 real synchronous awaits in deterministic code: the script cannot proceed
 until the harness resolves the actual subagent result, so this failure mode
 is closed by construction, not by prompting discipline. See the
-`ORCHESTRATION-INCIDENT` entry in `docs/spec-questions.md` for the full
+`ORCHESTRATION-INCIDENT` entry in `docs/archived-questions.md` for the full
 incident writeup.
 
-### Logging
+## Path B: direct Task-tool dispatch
 
-Every `fleet-dispatch` Workflow run should be persisted to
-`docs/agents/logs/<run_id>/` for durable, human-reviewable audit trail:
+Use this path when your session has a `Task`-style subagent tool but no
+`Workflow` tool (confirmed to be Cursor's situation as of 2026-07-17: `Task`
+supports `subagent_type: "fleet-orchestrator"` and `"fleet-worker"` — both
+resolve to the same `.claude/agents/*.md` personas Path A uses — but there
+is no `Workflow` tool at all). Because there is no deterministic script
+standing between you and each subagent's result, **you** are the boundary
+that the ORCHESTRATION-INCIDENT closed for Path A by construction — the
+same guarantee has to come from discipline here instead. That discipline is
+one rule, applied consistently:
+
+> **Never write down — in a log file, in `task-status.md`, or in your own
+> reply — a result you have not actually received.** If you dispatched a
+> subagent in the background, wait for its real completion notification
+> before saying anything about its outcome. Do not estimate, anticipate, or
+> narrate ahead of the actual return value, no matter how confident you are
+> about what it will say. This is the literal ORCHESTRATION-INCIDENT failure
+> mode, ported to whatever tool you're using instead of `Workflow`.
+
+**How to use:**
+1. Spawn a `fleet-orchestrator` agent via `Task`
+   (`subagent_type: "fleet-orchestrator"`, foreground) to scan
+   `docs/agents/task-status.md` + `docs/build-plan.md` and return the next
+   eligible, file-disjoint cohort. Identical scanner, identical output
+   contract as Path A — this step does not change based on dispatch
+   mechanism.
+2. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`) the same way.
+3. For each task in the cohort:
+   a. Build a task-specific prompt with the same content
+      `fleet-workflow.js`'s `buildWorkerPrompt()` would produce (Goal /
+      Depends on / Files / Spec / Steps / Verify command / DoD, the
+      non-negotiable rules, the hang guard, and an explicit instruction to
+      end the reply with a fenced ```json block matching `WORKER_SCHEMA`
+      in `docs/agents/fleet-workflow.js`). Dispatch it via `Task` with
+      `subagent_type: "fleet-worker"`. Respect file-disjoint parallelism
+      exactly as `docs/agents/fleet-architecture.md` §"File-Disjoint
+      Parallelism" describes: file-disjoint tasks may be dispatched as
+      multiple backgrounded `Task` calls together; tasks sharing a file
+      must run sequentially, one at a time.
+   b. Wait for the worker's real result per the rule above. For a
+      backgrounded call, that means waiting for the actual completion
+      notification — not proceeding on a guess in the meantime.
+   c. Once received, build a verifier prompt with the same content
+      `buildVerifierPrompt()` would produce (or, equivalently, the **Steps**
+      / **Return Value** sections of `.claude/agents/fleet-verifier.md`,
+      demanding a fenced ```json block matching `VERIFY_SCHEMA`). Try
+      `subagent_type: "fleet-verifier"` first — if your `Task` tool rejects
+      it as an invalid enum value (as Cursor's did on 2026-07-17, since that
+      persona file postdates whatever fixed the enum), fall back to
+      `subagent_type: "generalPurpose"` with the same prompt content
+      inlined; this is exactly what `fleet-workflow.js` already does for
+      its own verifier call (it sets no `agentType` there either).
+   d. Wait for the verifier's real result per the rule above.
+4. Persist every prompt and result **immediately on receipt, before doing
+   anything else with it** — see "Logging" below. Do this before touching
+   `task-status.md`.
+5. Update `docs/agents/task-status.md` using only `CONFIRMED_DONE` verdicts,
+   exactly like Path A step 3 — `CONTRADICTS_CLAIM` is
+   `BLOCKED: verifier contradicted worker claim`, pipeline stops for that
+   task.
+6. Repeat from step 1 for the next eligible cohort.
+
+**Fallback within this path:** the manual one-task-at-a-time procedure in
+"Starting a run" below remains valid if you prefer single-task control over
+dispatching a whole cohort at once.
+
+## Logging
+
+Every dispatch run — Path A or Path B — should be persisted to
+`docs/agents/logs/<run_id>/` for a durable, human-reviewable audit trail:
 
 ```
 docs/agents/logs/<run_id>/
-  manifest.json              # {run_id, cohort: [task_ids], final_status}
+  manifest.json              # {run_id, cohort: [task_ids], final_status, notes}
   workers/<task_id>/
     prompt.md                 # the exact prompt sent to the worker (verbatim)
     result.json                # the worker's schema-validated structured result
@@ -72,23 +162,78 @@ docs/agents/logs/<run_id>/
     result.json                 # the verifier's schema-validated verdict
 ```
 
-Write these files from the Workflow's returned `results` array directly
-after `await Workflow(...)` resolves — the workflow script itself has no
-filesystem access, so this is the caller's responsibility, and it must come
-from the structured return value, not a freeform description of it.
+`final_status` is one of `IN_PROGRESS` (cohort dispatched, not yet fully
+resolved — legitimate, not just a terminal-state enum: this is the real
+state a manifest sits in between tasks landing), `COMPLETE`, `PARTIAL`, or
+`ABORTED`.
 
-### Hang handling
+**Path A:** write these files from the Workflow's returned `results` array
+directly after `await Workflow(...)` resolves — the workflow script itself
+has no filesystem access, so this is the caller's responsibility, and it
+must come from the structured return value, not a freeform description of
+it. You may write the files directly or pipe each result through
+`scripts/fleet/log_run.py` (below) for the same schema-validation Path B
+gets — either is acceptable here because the Workflow's return value is
+already fully-trusted structured data.
+
+**Path B:** you have no automatic schema validation and no filesystem-access
+boundary protecting you from accidentally narrating instead of transcribing
+— so routing every result through the mechanical writer is not optional
+here, it's the only thing standing in for what a `Workflow` script would
+have enforced by construction. Extract the fenced ```json block from the
+subagent's real, received final message verbatim (copy it — do not retype
+or "clean up" any field), save the exact prompt you sent to a temp file,
+and run:
+
+```bash
+python scripts/fleet/log_run.py task \
+  --run-id <run_id> --task-id <task_id> --kind worker \
+  --prompt /tmp/<task_id>-worker-prompt.md --result -   # paste/pipe the JSON block
+```
+
+(and the equivalent `--kind verify` call for the verifier's result). Update
+the manifest as tasks land:
+
+```bash
+python scripts/fleet/log_run.py manifest \
+  --run-id <run_id> --cohort <task_id> [<task_id> ...] --status IN_PROGRESS
+```
+
+`log_run.py` validates required fields for the given `--kind` (mirroring
+`WORKER_SCHEMA`/`VERIFY_SCHEMA` in `fleet-workflow.js`) and **refuses to
+write anything** — no partial files — if the JSON is malformed or missing a
+required field, or if a `(run_id, task_id, kind)` entry already exists
+(pass `--force` for a genuine re-verification). It fails loudly instead of
+silently; a validation error means you go find out why, not paper over it.
+It never talks to a model and never invents a field — it is exactly as
+trustworthy as the JSON you give it, which is why the "copy the fenced
+block verbatim" step above is the load-bearing part, not the script.
+
+## Hang handling
 
 A worker or verifier agent that stalls should self-report `BLOCKED:
-possible hang — exceeded tool-call budget` per the guard built into every
-prompt in `fleet-workflow.js` — this is a soft, prompt-level cap, not a
-guarantee. There is no documented hard per-`agent()` timeout inside a
+possible hang — exceeded tool-call budget` (Path A: this guard is baked
+into every prompt `fleet-workflow.js` builds; Path B: include the same
+instruction in your own prompt, or rely on `.claude/agents/fleet-worker.md`'s
+/ `fleet-verifier.md`'s built-in hang-guard section) — a soft, prompt-level
+cap, not a guarantee.
+
+**Path A:** there is no documented hard per-`agent()` timeout inside a
 Workflow script. If a `Workflow` run itself appears wedged (no progress
 after a delay sized to the cohort's expected runtime), force-stop it with
 `TaskStop` on the Workflow's task ID, write a `manifest.json` with
 `final_status: "ABORTED"` and `hang_detected: true`, and stop — do not
 retry automatically. This has been exercised in practice (a stalled
 planning subagent was force-stopped this way during this system's design).
+
+**Path B:** if a backgrounded `Task` call appears wedged (no completion
+notification after a delay sized to the task's expected runtime), apply the
+same rule as everywhere else in this path — do not fabricate or guess its
+outcome, and do not let the silence stop you from logging what you do know.
+Record `docs/agents/logs/<run_id>/manifest.json` via `log_run.py ...
+--status ABORTED --notes "<task_id> never returned a completion
+notification as of <time>"`, and stop dispatching further tasks in that
+cohort until a human looks at it.
 
 ## Preconditions
 
@@ -102,8 +247,9 @@ planning subagent was force-stopped this way during this system's design).
 
 ## Starting a run
 
-Use the `Workflow` tool (or the `schedule` skill for a cron-triggered start)
-with a script that:
+Use Path A (the `Workflow` tool) or Path B (direct `Task`-tool dispatch) —
+see above, chosen by what your session actually has — following a
+procedure that:
 
 1. Reads `docs/agents/task-status.md` to find the next `TODO` task per
    milestone in dependency order (`M0 → {M1, M2} → M3 → M4 → {M5, M7} → {M6,
@@ -116,10 +262,10 @@ with a script that:
 3. On success, flips that task's row in `docs/agents/task-status.md` to
    `DONE` and moves to the next eligible task. On failure, sets
    `BLOCKED: <reason>` and stops that branch rather than guessing past it.
-4. Never starts a task whose dependencies aren't `DONE` — `pipeline()` is
-   safe within a milestone's independent tasks; tasks with `Depends on`
-   pointing at same-milestone siblings need a barrier or sequential
-   pipeline stage.
+4. Never starts a task whose dependencies aren't `DONE` — `pipeline()` (Path
+   A) or a background-and-await group (Path B) is safe within a milestone's
+   independent tasks; tasks with `Depends on` pointing at same-milestone
+   siblings need a barrier or sequential stage.
 
 Because tasks within a milestone often share files (e.g. `T1.3`–`T1.7` all
 touch `src/akasha/kernel/store.py`), run same-file tasks **sequentially**,

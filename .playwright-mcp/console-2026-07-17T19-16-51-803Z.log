@@ -1,0 +1,6 @@
+[      28ms] TypeError: Cannot set properties of null (setting 'textContent')
+    at renderNotice (http://127.0.0.1:7468/static/app.js:23:27)
+    at initNodeView (http://127.0.0.1:7468/static/app.js:133:7)
+    at http://127.0.0.1:7468/static/app.js:173:5
+    at http://127.0.0.1:7468/static/app.js:175:3
+[      46ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:7468/favicon.ico:0

@@ -2,7 +2,11 @@
 
 A local-first, human-in-the-loop personal Truth Maintenance System (pTMS) —
 see `docs/vision.md` for the full product rationale. This file is the
-entry point for any agent (autonomous or interactive) working in this repo.
+entry point for any agent (autonomous or interactive) *implementing* this
+repo's build plan. Just want to run/use the product, or set up a dev
+environment without picking up a build-plan task? See `docs/user/` and
+`docs/dev/` instead — this file and the spec chain below are implementation
+law, not user or setup docs.
 
 ## Read these first, in order
 
