@@ -67,7 +67,7 @@ from akasha.kernel.canonical import canonical_json, canonicalize_text, object_ha
 from akasha.kernel.ids import contract_anchor
 from akasha.kernel.model import Maturity
 from akasha.sync import base_store
-from akasha.sync.watcher import detect_cloud_path
+from akasha.sync.watcher import detect_cloud_path, retry_with_backoff
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1007,16 +1007,26 @@ class Reconciler:
         ``os.replace``). Records ``(path, object_hash(text))`` via
         ``self.origin`` for EVERY write this method performs, including a
         ``^tm-new`` rewrite -- "origin-tagged, not an echo" (spec §4.7).
+
+        build-plan T9.1: both the pre-write existence read and the
+        ``os.replace`` rename are wrapped in :func:`retry_with_backoff` --
+        this is the spec's own named write-back primitive (§4.8's
+        ``write_if_diff(path, H)``/``write_if_diff(path, H2)``), i.e. the
+        actual OS-level file write this task's "locking retry" targets. A
+        transient Windows sharing-violation/lock-violation/AV-held-handle
+        error on either call is retried with backoff before giving up.
         """
         target = Path(path)
         current: str | None = None
         if target.exists():
-            current = canonicalize_text(target.read_text(encoding="utf-8"))
+            current = canonicalize_text(
+                retry_with_backoff(lambda: target.read_text(encoding="utf-8"))
+            )
         if current == text:
             return False
         tmp_path = target.with_name(f".{target.name}.tmp-{secrets.token_hex(8)}")
         tmp_path.write_text(text, encoding="utf-8")
-        os.replace(tmp_path, target)
+        retry_with_backoff(lambda: os.replace(tmp_path, target))
         self.origin.record_write(path, object_hash(text.encode("utf-8")))
         return True
 
@@ -1092,7 +1102,13 @@ class Reconciler:
         conservative = detect_cloud_path(root["root_path"]) is not None
         assert self.projection is not None
 
-        raw = Path(path).read_text(encoding="utf-8")
+        # build-plan T9.1: the vault file may be transiently locked by
+        # another process (AV scanner, editor autosave) right as its watcher
+        # event fires -- retry with backoff rather than surfacing a raw
+        # OSError for what is, on Windows, a routine sharing violation. See
+        # ``sync.watcher``'s module docstring ("Windows locking-retry /
+        # AV-noise tolerance") for the reconcile.py/watcher.py split.
+        raw = retry_with_backoff(lambda: Path(path).read_text(encoding="utf-8"))
         vault_text = canonicalize_text(raw)
         base_text = base_store.get(self.conn, sync_root_id, path)
 

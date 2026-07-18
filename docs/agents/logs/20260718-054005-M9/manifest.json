@@ -1,0 +1,11 @@
+{
+  "cohort": [
+    "T9.1",
+    "T9.2",
+    "T9.3",
+    "T9.4"
+  ],
+  "final_status": "COMPLETE",
+  "notes": "All 4 tasks CONFIRMED_DONE by independent verifiers. T9.3 and T9.2 logged non-blocking SPEC-QUESTIONs (docs/spec-questions.md). T9.5 (24h soak) now eligible next -- depends on all 4.",
+  "run_id": "20260718-054005-M9"
+}

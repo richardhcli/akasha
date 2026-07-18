@@ -38,7 +38,15 @@ from typing import Any, Literal, get_args
 
 from akasha.kernel import ids, maturity
 from akasha.kernel.canonical import canonical_json, canonicalize_text, object_hash
-from akasha.kernel.model import ChangeClass, Edge, EdgeType, Facet, Node, NodeType
+from akasha.kernel.model import (
+    JUSTIFICATION_EDGE_TYPES,
+    ChangeClass,
+    Edge,
+    EdgeType,
+    Facet,
+    Node,
+    NodeType,
+)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
 
@@ -2082,3 +2090,156 @@ def read_base_snapshot(conn: sqlite3.Connection, sync_root_id: str, path: str) -
         return None
     data: bytes = obj_row[0]
     return data.decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# T9.2 read-only metrics aggregation helpers (spec §7, §4.11 GET /metrics).
+#
+# design note (T9.2, rule 0.4): added outside T9.2's own Files list
+# (`src/akasha/metrics.py`, `src/akasha/api/routes/health.py`,
+# `tests/unit/test_metrics.py`), same recurring precedent as the store.py
+# touches in T4.2/T4.4/T4.5/T4.6/T5.1/T5.4/T5.5/T5.7 -- every §7 counter
+# that reads persistent state must do so through this module (never a
+# parallel raw-SQL path in metrics.py), and no existing store function
+# exposes these aggregates. All functions below are pure reads: none opens
+# a `with conn:` write transaction, none mutates a row. See
+# docs/spec-questions.md (T9.2 entry) for the Files-list note.
+# ---------------------------------------------------------------------------
+
+# Node types exempt from facet-coverage's denominator: `maturity.py`'s S2
+# derivation lets task/entity nodes reach S2+ on inbound-edge count alone
+# (no facets required -- see `_S2_FACET_EXEMPT_TYPES`), so an S2+ task/
+# entity node structurally never carries a meaningful facet binding.
+# Spec §7's "S2+ definitions" (facet_coverage) and vision.md R8 ("facet
+# coverage is a gating dogfood metric" tied to relation-from-span capture
+# on definition-like nodes) both read as excluding exactly this exempt
+# set, not the literal `node_type == "definition"` string.
+_FACET_COVERAGE_EXEMPT_TYPES: tuple[str, ...] = ("task", "entity")
+_S2_PLUS_MATURITIES: tuple[str, ...] = ("S2", "S3", "S4")
+
+
+def facet_coverage_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Read-only counts for the §7 ``facet_coverage`` metric (task T9.2).
+
+    Returns ``{"covered": n, "total": n}``:
+
+    * ``total`` -- every live node at maturity S2 or above, excluding the
+      task/entity types that reach S2+ without ever needing a facet (see
+      module-level note above).
+    * ``covered`` -- the subset of those with >=1 live inbound
+      justification edge (spec §4.2's ``JUSTIFICATION_EDGE_TYPES``) whose
+      ``facet_binding`` is a concrete facet id, not the ``"*"`` wildcard
+      (spec §4.2: "'*' bindings are legal but counted against the
+      facet-coverage metric").
+
+    ``metrics.py`` divides these two counts into a ratio (0.0 when
+    ``total`` is 0) -- this function only reads/aggregates, per rule 0.4.
+    """
+    maturity_placeholders = ",".join("?" for _ in _S2_PLUS_MATURITIES)
+    type_placeholders = ",".join("?" for _ in _FACET_COVERAGE_EXEMPT_TYPES)
+    total_row = conn.execute(
+        "SELECT COUNT(*) FROM nodes "
+        f"WHERE status='live' AND maturity IN ({maturity_placeholders}) "
+        f"AND node_type NOT IN ({type_placeholders})",
+        (*_S2_PLUS_MATURITIES, *_FACET_COVERAGE_EXEMPT_TYPES),
+    ).fetchone()
+    justification_placeholders = ",".join("?" for _ in JUSTIFICATION_EDGE_TYPES)
+    covered_row = conn.execute(
+        "SELECT COUNT(DISTINCT n.id) FROM nodes n "
+        "JOIN edges e ON e.dst = n.id AND e.retracted_at IS NULL "
+        f"WHERE n.status='live' AND n.maturity IN ({maturity_placeholders}) "
+        f"AND n.node_type NOT IN ({type_placeholders}) "
+        f"AND e.edge_type IN ({justification_placeholders}) "
+        "AND e.facet_binding IS NOT NULL AND e.facet_binding != '*'",
+        (
+            *_S2_PLUS_MATURITIES,
+            *_FACET_COVERAGE_EXEMPT_TYPES,
+            *JUSTIFICATION_EDGE_TYPES,
+        ),
+    ).fetchone()
+    return {"covered": int(covered_row[0]), "total": int(total_row[0])}
+
+
+def count_reviews_created_since(conn: sqlite3.Connection, since_iso: str) -> int:
+    """Read-only: count of ``review_queue`` rows with ``created_at >= since_iso``.
+
+    Every ``cause_kind`` counts (spec §7's ``review_inflow_7d`` is about
+    total review-queue load, not violations specifically -- see
+    ``count_violations_total`` below for the violation-only count).
+    Lexical ``>=`` comparison is safe because every ``created_at`` is
+    written by this module's own ``_now()`` (fixed-width ISO-8601, UTC,
+    microsecond precision, always ``+00:00`` offset).
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM review_queue WHERE created_at >= ?", (since_iso,)
+    ).fetchone()
+    return int(row[0])
+
+
+def count_reviews_resolved_since(conn: sqlite3.Connection, since_iso: str) -> int:
+    """Read-only: count of ``review_queue`` rows with ``resolved_at >= since_iso``."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM review_queue WHERE resolved_at >= ?", (since_iso,)
+    ).fetchone()
+    return int(row[0])
+
+
+def list_review_created_at_since(conn: sqlite3.Connection, since_iso: str) -> list[str]:
+    """Read-only: every ``review_queue.created_at`` timestamp >= ``since_iso``.
+
+    Raw timestamps (not a count) so ``metrics.py`` can bucket them by
+    calendar day for ``inflow_variance_30d`` -- bucketing is metric
+    *computation*, not a DB read, so it stays out of this module (rule
+    0.4 covers reads/writes, not arithmetic on their results).
+    """
+    rows = conn.execute(
+        "SELECT created_at FROM review_queue WHERE created_at >= ? ORDER BY created_at",
+        (since_iso,),
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def count_violations_total(conn: sqlite3.Connection) -> int:
+    """Read-only: total ``review_queue`` rows with ``cause_kind='violation'`` (all-time).
+
+    Numerator for §7's ``violation_rate`` (``violations ÷ sync cycles``).
+    Counts every violation ever raised (open or resolved) -- a resolved
+    violation still happened during some past sync cycle, so excluding it
+    would undercount the rate's numerator relative to its denominator
+    (which also accumulates over the daemon's whole run, not a window).
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) FROM review_queue WHERE cause_kind='violation'"
+    ).fetchone()
+    return int(row[0])
+
+
+def count_nodes_created_since(conn: sqlite3.Connection, since_iso: str | None = None) -> int:
+    """Read-only: count of ``nodes`` rows created (optionally since ``since_iso``).
+
+    Unfiltered by ``status``: a tombstoned/retracted node still happened
+    as a creation event (spec §7's ``crossing_rate`` is "nodes created ÷
+    day", a minting-activity rate, not a live-node census); an S0
+    hard-delete removes the row entirely, so it naturally drops out on
+    its own without a status filter.
+    """
+    if since_iso is None:
+        row = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE created_at >= ?", (since_iso,)
+        ).fetchone()
+    return int(row[0])
+
+
+def earliest_node_created_at(conn: sqlite3.Connection) -> str | None:
+    """Read-only: the earliest ``nodes.created_at`` timestamp, or ``None`` if empty.
+
+    Denominator basis for §7's ``crossing_rate`` -- ``metrics.py`` divides
+    the total node count by the number of days elapsed since this instant
+    (the daemon's own minting history), not a fixed calendar window.
+    """
+    # A bare MIN() aggregate always returns exactly one row; its value is
+    # NULL (Python None) when the table is empty, never a missing row.
+    row = conn.execute("SELECT MIN(created_at) FROM nodes").fetchone()
+    return row[0]

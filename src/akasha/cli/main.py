@@ -38,6 +38,24 @@ value) that typer's own parser cannot validate.
 ``GET /v1/review`` / ``POST /v1/review/{id}/resolve`` endpoints. Until
 T7.5 lands them, any HTTP 404 (envelope or not) maps to exit 3 without a
 traceback; no CLI-side contract change is expected when the routes arrive.
+
+T9.4 audit note: every mutating verb (``new``/``set``/``rm``/
+``review resolve``/``token create``/``token revoke``) already funneled
+through the shared ``_mutate`` helper as of T4.8, so ``--dry-run``
+coverage was already structurally complete — confirmed, not re-derived,
+by ``tests/integration/test_cli_dry_run.py``'s source-scanning meta-test,
+which fails if a future verb calls ``_request`` with a mutating HTTP
+method (bypassing ``--dry-run``) instead of ``_mutate``. The one real gap
+found and fixed: ``_usage_error`` (client-side argument validation, exit
+2) did not honor ``--json`` and always printed the plain-text form even
+under ``--json`` — unlike ``_fail`` (server-reported errors), which
+already emitted the ``cli/v1`` envelope. Fixed by threading ``state``
+through ``_usage_error`` and its callers (``_parse_facets``,
+``token create``) so both client- and server-rejected requests get a
+consistent, machine-parseable error shape under ``--json``. Also
+clarified the connection-error message (``E_CONNECTION``) to name the
+unreachable ``--base-url`` explicitly rather than a bare httpx exception
+string.
 """
 
 from __future__ import annotations
@@ -187,8 +205,29 @@ def _fail(
     raise typer.Exit(exit_code)
 
 
-def _usage_error(message: str) -> NoReturn:
-    typer.echo(f"usage error: {message}", err=True)
+def _usage_error(state: CliState, message: str) -> NoReturn:
+    """Client-side argument-validation failure (exit 2, spec §4.12).
+
+    ``E_USAGE`` is a CLI-local code (never sent by the server) for the
+    handful of checks typer's own parser cannot express (e.g. `--facet`
+    shape) — same precedent as ``_request``'s ``E_CONNECTION`` below.
+    Honors ``--json`` so a scripted/machine caller always gets the
+    documented ``cli/v1`` envelope regardless of which layer rejected the
+    input, matching ``_fail``'s server-error behavior below.
+    """
+    if state.json_mode:
+        typer.echo(
+            json_lib.dumps(
+                {
+                    "schema": CLI_SCHEMA,
+                    "ok": False,
+                    "error": {"code": "E_USAGE", "message": message, "detail": {}},
+                }
+            ),
+            err=True,
+        )
+    else:
+        typer.echo(f"usage error: {message}", err=True)
     raise typer.Exit(2)
 
 
@@ -211,7 +250,7 @@ def _request(
             timeout=10.0,
         )
     except httpx.HTTPError as exc:
-        _fail(state, 0, "E_CONNECTION", str(exc), {})
+        _fail(state, 0, "E_CONNECTION", f"could not reach daemon at {state.base_url}: {exc}", {})
     if resp.status_code >= 400:
         code, message, detail = _parse_error_body(resp)
         _fail(state, resp.status_code, code, message, detail)
@@ -229,7 +268,7 @@ def _mutate(
     return _request(state, method, path, json_body=json_body)
 
 
-def _parse_facets(raw: list[str]) -> list[dict[str, Any]]:
+def _parse_facets(state: CliState, raw: list[str]) -> list[dict[str, Any]]:
     """Parse repeated ``--facet name=span`` into full ``Facet`` dicts.
 
     The API's ``Facet`` model (spec §4.2) requires ``facet_id``/``version``
@@ -241,10 +280,10 @@ def _parse_facets(raw: list[str]) -> list[dict[str, Any]]:
     facets: list[dict[str, Any]] = []
     for item in raw:
         if "=" not in item:
-            _usage_error(f"--facet must be name=span, got {item!r}")
+            _usage_error(state, f"--facet must be name=span, got {item!r}")
         name, span = item.split("=", 1)
         if not name:
-            _usage_error(f"--facet name must be non-empty, got {item!r}")
+            _usage_error(state, f"--facet name must be non-empty, got {item!r}")
         facets.append({"facet_id": ids.mint(), "name": name, "span": span, "version": 1})
     return facets
 
@@ -295,7 +334,7 @@ def new(
 ) -> None:
     """POST /v1/nodes."""
     state = _state(ctx)
-    facets = _parse_facets(facet)
+    facets = _parse_facets(state, facet)
     payload: dict[str, Any] = {"node_type": node_type, "body": body}
     if facets:
         payload["facets"] = facets
@@ -392,7 +431,7 @@ def token_create(
     """POST /v1/tokens (human only ∅)."""
     state = _state(ctx)
     if token_class not in ("human", "agent"):
-        _usage_error(f"--class must be 'human' or 'agent', got {token_class!r}")
+        _usage_error(state, f"--class must be 'human' or 'agent', got {token_class!r}")
     payload: dict[str, Any] = {"name": name, "token_class": token_class}
     if rate_per_min is not None:
         payload["rate_per_min"] = rate_per_min

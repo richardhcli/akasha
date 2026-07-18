@@ -64,12 +64,45 @@ flag is exposed on the ``WatchedRoot`` dataclass so T5.4's reconcile
 pipeline can read it (e.g. to be more cautious about certain-repairs
 under a cloud-sync provider's own eventual-consistency window) without
 this module needing to know anything about reconcile policy.
+
+Windows locking-retry / AV-noise tolerance (build-plan T9.1)
+----------------------------------------------------------------
+:func:`is_transient_lock_error` and :func:`retry_with_backoff` live here
+(the lower dependency layer — ``sync.reconcile`` already imports
+:func:`detect_cloud_path` from this module, never the reverse) so both
+this module and ``reconcile.py`` share one classifier/backoff
+implementation. Split across the two files by WHERE the OS-level file
+I/O each layer owns actually happens:
+
+- ``reconcile.py``'s ``Reconciler.on_change``/``write_if_diff`` own the
+  actual OS-level file reads/writes (spec §4.8's ``write_if_diff`` is the
+  canonical write-back primitive) — those call sites wrap each
+  individual read/replace in :func:`retry_with_backoff` for a short,
+  tight retry budget (build-plan Step 1, "Retry-with-backoff on Windows
+  sharing-violation/locked-file errors").
+- This module's :class:`Debouncer` — the layer that actually *invokes*
+  ``on_cycle`` (a full reconcile cycle) — additionally catches a
+  transient-lock error that survives ``on_change``'s own short retry
+  budget (e.g. an AV scan that outlasts it) and RE-QUEUES the path for
+  the next debounce window instead of losing it or crashing whatever
+  drives the poll loop (build-plan Step 2, "Tolerate transient AV-held
+  handles"). See :meth:`Debouncer.poll`.
+
+Both the classifier and the backoff loop are plain Python (no
+``msvcrt``/platform import — matching this module's existing "pure logic
+vs. I/O wiring" split), so they and the ``Debouncer`` re-queue behavior
+are fully unit-testable on any host: a test constructs a fake
+``OSError`` with ``.winerror`` set to a known Windows sharing-
+violation/lock-violation/access-denied code (see
+``tests/battery/test_windows.py``) rather than requiring a real Windows
+filesystem.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Protocol
@@ -113,6 +146,75 @@ def detect_cloud_path(path: str) -> str | None:
         if _DROPBOX_MARKER in lowered:
             return "Dropbox"
     return None
+
+
+# --- Windows locking-retry / AV-noise tolerance (build-plan T9.1) -----------
+#
+# See module docstring section of the same name for the reconcile.py vs.
+# watcher.py split. ``OSError.winerror`` is only ever populated by the OS on
+# win32; on POSIX no exception ever carries it, so this classifier never
+# fires on a real Linux/macOS host. Tests simulate the Windows condition by
+# constructing a plain ``OSError``/``PermissionError`` and setting
+# ``.winerror`` manually -- a normal instance attribute, settable on any
+# platform -- rather than requiring a real Windows filesystem.
+#
+# Codes covered: ERROR_ACCESS_DENIED (5, commonly surfaced when an AV
+# scanner briefly holds an exclusive handle open on a just-changed file --
+# this task's "AV noise"), ERROR_SHARING_VIOLATION (32, another process has
+# the file open without FILE_SHARE_READ/WRITE), ERROR_LOCK_VIOLATION (33, a
+# byte-range lock -- e.g. ``daemon.py``'s own ``msvcrt.locking`` -- is held
+# by another handle). This is an implementation-level mapping of the
+# build-plan's plain-English "sharing-violation/locked-file errors" text,
+# not a new schema/grammar element (build-plan rule 0.2).
+TRANSIENT_WINDOWS_LOCK_ERRORS = frozenset({5, 32, 33})
+
+
+def is_transient_lock_error(exc: BaseException) -> bool:
+    """True iff ``exc`` is an ``OSError`` carrying a transient-lock ``winerror``.
+
+    The default ``is_transient=`` predicate for :func:`retry_with_backoff`;
+    passed as a plain callable (not hardcoded into the retry loop) so a
+    caller/test can substitute a narrower or wider classification without
+    touching the loop itself.
+    """
+    return (
+        isinstance(exc, OSError)
+        and getattr(exc, "winerror", None) in TRANSIENT_WINDOWS_LOCK_ERRORS
+    )
+
+
+def retry_with_backoff[T](
+    fn: Callable[[], T],
+    *,
+    attempts: int = 5,
+    base_delay: float = 0.05,
+    is_transient: Callable[[BaseException], bool] = is_transient_lock_error,
+    sleep: Callable[[float], None] | None = None,
+) -> T:
+    """Call ``fn()``, retrying with exponential backoff while ``is_transient`` says so.
+
+    Up to ``attempts`` total calls to ``fn`` (i.e. up to ``attempts - 1``
+    retries after the first attempt); sleeps ``base_delay * 2**n`` before
+    retry number ``n`` (0-indexed) -- with the defaults: 50ms, 100ms, 200ms,
+    400ms between the 5 attempts, then the final failure is raised. An
+    exception ``is_transient`` classifies as NOT transient (e.g. a genuine
+    permission error, or the file simply missing) is re-raised immediately
+    on the very first occurrence, with no delay and no retry -- this is
+    explicitly a retry for a known-transient condition, never a generic
+    "swallow and hope" loop. ``sleep`` is injectable (defaults to
+    ``time.sleep``) so a test can assert on the exact backoff schedule
+    without a real wall-clock wait.
+    """
+    if sleep is None:
+        sleep = time.sleep
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except OSError as exc:
+            if attempt == attempts - 1 or not is_transient(exc):
+                raise
+            sleep(base_delay * (2**attempt))
+    raise AssertionError("unreachable: retry_with_backoff always returns or raises")
 
 
 @dataclass
@@ -174,6 +276,17 @@ class Debouncer:
     in :meth:`poll`, a fresh burst of events arriving *after* a fire is
     treated as a brand-new window producing its own, later cycle — the
     debounce resets rather than being a one-shot per path.
+
+    AV-noise tolerance (build-plan T9.1, module docstring section of the
+    same name): if invoking ``on_cycle`` itself raises a transient
+    Windows lock/AV-hold error (:func:`is_transient_lock_error`) — i.e.
+    one that survived ``on_cycle``'s OWN short retry budget (``reconcile
+    .py``'s ``retry_with_backoff`` calls around its OS-level reads/
+    writes) — :meth:`poll` catches it, logs a warning, and RE-QUEUES the
+    path with a fresh debounce window starting now, rather than losing
+    the path or propagating the exception out of the poll loop. A
+    non-transient exception is never swallowed; it propagates exactly as
+    before this task.
     """
 
     def __init__(
@@ -182,10 +295,12 @@ class Debouncer:
         *,
         debounce_seconds: float = DEFAULT_DEBOUNCE_SECONDS,
         now: Callable[[], float] | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._on_cycle = on_cycle
         self._debounce_seconds = debounce_seconds
         self._clock = now if now is not None else _monotonic
+        self._logger = logger if logger is not None else logging.getLogger("akasha")
         self._lock = threading.Lock()
         # path -> timestamp of its most recent event.
         self._pending: dict[str, float] = {}
@@ -199,9 +314,12 @@ class Debouncer:
     def poll(self, *, at: float | None = None) -> list[str]:
         """Fire ``on_cycle`` for every path whose window has quietly elapsed.
 
-        Returns the list of paths that fired this call (empty if none are
-        ready yet), purely as a convenience for assertions in tests —
-        production callers (:class:`Watcher`'s poll loop) can ignore it.
+        Returns the list of paths that successfully fired ``on_cycle``
+        this call (empty if none are ready yet), purely as a convenience
+        for assertions in tests — production callers (:class:`Watcher`'s
+        poll loop) can ignore it. A path re-queued after a transient
+        lock/AV-hold error (see class docstring) is NOT included — it
+        did not successfully complete this call.
         """
         current = self._current_time(at)
         with self._lock:
@@ -212,9 +330,25 @@ class Debouncer:
             ]
             for path in ready:
                 del self._pending[path]
+        fired: list[str] = []
         for path in ready:
-            self._on_cycle(path)
-        return ready
+            try:
+                self._on_cycle(path)
+            except OSError as exc:
+                if not is_transient_lock_error(exc):
+                    raise
+                self._logger.warning(
+                    "on_cycle(%r) hit a transient Windows lock/AV-hold error "
+                    "(winerror=%s); re-queuing for a later poll: %s",
+                    path,
+                    getattr(exc, "winerror", None),
+                    exc,
+                )
+                with self._lock:
+                    self._pending[path] = current
+                continue
+            fired.append(path)
+        return fired
 
     def _current_time(self, at: float | None) -> float:
         return self._clock() if at is None else at
@@ -276,7 +410,8 @@ class Watcher:
       nothing in this module imports ``sync.reconcile``.
     - ``debounce_seconds`` / ``now``: forwarded to the internal
       :class:`Debouncer` — see its docstring for the injectable-clock
-      testing contract.
+      testing contract. ``logger`` is also forwarded to it (build-plan
+      T9.1's AV-noise re-queue warning).
     - ``origin_tracker`` (T5.2 ``OriginTracker``) + ``content_hash_fn``:
       optional echo suppression — see module docstring. Both must be
       supplied together to take effect; either omitted disables
@@ -328,7 +463,10 @@ class Watcher:
 
     def __post_init__(self) -> None:
         self._debouncer = Debouncer(
-            self.on_cycle, debounce_seconds=self.debounce_seconds, now=self.now
+            self.on_cycle,
+            debounce_seconds=self.debounce_seconds,
+            now=self.now,
+            logger=self.logger,
         )
         self._roots: dict[str, WatchedRoot] = {}
         self._observer: _Scheduler | None = None

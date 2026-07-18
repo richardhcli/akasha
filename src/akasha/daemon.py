@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import threading
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -32,6 +33,16 @@ if TYPE_CHECKING:
 LOCK_FILE_NAME = "tm-daemon.lock"
 LOG_FILE_NAME = "daemon.log"
 
+# T0.6 default rotation sizing, kept as module constants (rather than
+# hardcoded literals in configure_logging's signature) so T9.3's tests can
+# reference the production defaults by name. Neither the spec nor the
+# build-plan Steps pin a rotation size/backup count -- narrowest-reading
+# judgment call, not a SPEC-QUESTION: 10 MB keeps a single file well within
+# "open in a text editor" territory, 5 backups (~50 MB worst case) is a sane
+# bound for a local-first single-user daemon with no log-shipping story.
+LOG_MAX_BYTES = 10_000_000
+LOG_BACKUP_COUNT = 5
+
 
 class JsonLineFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -43,14 +54,28 @@ class JsonLineFormatter(logging.Formatter):
         return json.dumps(payload)
 
 
-def configure_logging(log_file: str | Path, level: int = logging.INFO) -> logging.Logger:
+def configure_logging(
+    log_file: str | Path,
+    level: int = logging.INFO,
+    *,
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUP_COUNT,
+) -> logging.Logger:
+    """Configure the shared ``"akasha"`` logger with a size-rotating file handler.
+
+    ``max_bytes``/``backup_count`` (T9.3, keyword-only, defaulting to the
+    original T0.6 hardcoded values) let tests drive real rotation with a
+    tiny ``max_bytes`` instead of writing 10 MB of log lines; every existing
+    production call site (``serve`` below) is unaffected since it never
+    passes them.
+    """
     logger = logging.getLogger("akasha")
     logger.setLevel(level)
     logger.handlers.clear()
 
     formatter = JsonLineFormatter()
 
-    file_handler = RotatingFileHandler(log_file, maxBytes=10_000_000, backupCount=5)
+    file_handler = RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
@@ -59,6 +84,94 @@ def configure_logging(log_file: str | Path, level: int = logging.INFO) -> loggin
     logger.addHandler(stream_handler)
 
     return logger
+
+
+# M9 "daily tick" (build-plan T9.3 Steps). Neither the spec nor the
+# build-plan make this configurable, so a fixed default is the
+# narrowest-reading judgment call (not a SPEC-QUESTION -- "daily tick" is
+# prescriptive, not silent, about the cadence).
+GC_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+class GcScheduler:
+    """Runs the T1.7 ``kernel.store.gc_objects`` job on a background daily tick.
+
+    Reuses ``gc_objects(conn) -> list[str]`` verbatim (rule 0.4 -- no new
+    SQL lives here; this class only adds the *scheduling* layer M9/T9.3
+    calls for). ``gc_objects``'s own invariant -- never removes an object
+    still referenced by a commit, a node head, or a base snapshot -- is
+    unchanged by running it on a timer instead of synchronously (see
+    ``tests/unit/kernel/test_gc.py`` / T1.7).
+
+    Each tick opens and closes its own short-lived connection to
+    ``db_path`` (mirroring ``api/deps.py::get_conn``'s per-request
+    pattern) rather than sharing ``app.state.conn`` with request handling
+    or the startup reconcile -- the docstring on ``store.connect`` warns a
+    single ``sqlite3.Connection`` is not safe under concurrent
+    cross-thread access, and WAL mode is designed for exactly this
+    "many short-lived connections" usage instead.
+
+    :meth:`start` runs one tick immediately (so a freshly (re)started
+    daemon reclaims anything orphaned since it last ran), then again every
+    ``interval_seconds`` until :meth:`stop`. ``interval_seconds`` is
+    injectable so tests can observe multiple ticks in milliseconds rather
+    than real days; :meth:`run_once` is also public so a test (or a future
+    manual "gc now" trigger) can run exactly one tick synchronously without
+    the background thread at all.
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        interval_seconds: float = GC_INTERVAL_SECONDS,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self._db_path = db_path
+        self._interval_seconds = interval_seconds
+        self._logger = logger if logger is not None else logging.getLogger("akasha")
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def run_once(self) -> list[str]:
+        """Run a single GC tick against a fresh connection; returns deleted hashes."""
+        from akasha.kernel import store
+
+        conn = store.connect(self._db_path, check_same_thread=False)
+        try:
+            deleted = store.gc_objects(conn)
+        finally:
+            conn.close()
+        self._logger.info(f"gc tick complete: removed {len(deleted)} orphaned object(s)")
+        return deleted
+
+    def start(self) -> None:
+        """Start the background tick thread (no-op if already started)."""
+        if self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="akasha-gc-scheduler", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Signal the tick loop to stop and join it (clean, bounded shutdown)."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _loop(self) -> None:
+        while True:
+            try:
+                self.run_once()
+            except Exception:
+                # A failed tick must never crash the daemon's serving thread;
+                # log and retry on the next scheduled tick instead.
+                self._logger.exception("gc tick failed")
+            if self._stop_event.wait(self._interval_seconds):
+                return
 
 
 class AlreadyRunningError(RuntimeError):
@@ -194,10 +307,17 @@ def serve(config: Config) -> None:
     imported lazily here (matching this module's existing deferred-import
     style for ``uvicorn``/``create_app``) so the CLI's other verbs stay
     light.
+
+    Also starts the task T9.3 :class:`GcScheduler` (background daily
+    ``gc_objects`` tick) right before ``uvicorn.run`` -- inside the lock, so
+    it can never race a second instance's own scheduler over the same DB --
+    and stops it in the same ``finally`` as the "daemon shutting down" log,
+    so a clean shutdown always joins the tick thread rather than leaking it.
     """
     import uvicorn
 
     from akasha.api.app import create_app
+    from akasha.config import default_db_path
     from akasha.sync import reconcile
     from akasha.sync.origin import OriginTracker
 
@@ -205,13 +325,22 @@ def serve(config: Config) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     logger = configure_logging(config_dir / LOG_FILE_NAME)
     lock_path = config_dir / LOCK_FILE_NAME
+    # Same resolution `create_app` uses internally for its own connection
+    # (api/app.py) -- computed independently here (rather than read back off
+    # `app.state.db_path`) so `GcScheduler` doesn't depend on `create_app`'s
+    # production-only attribute, which a stubbed/injected `app` (tests) need
+    # not set.
+    db_path = config.db_path if config.db_path is not None else default_db_path()
 
     with single_instance_lock(lock_path):
         logger.info(f"daemon starting on {config.bind}:{config.port}")
+        gc_scheduler = GcScheduler(db_path, logger=logger)
         try:
             app = create_app(config)
             summary = reconcile.reconcile_all(app.state.conn, OriginTracker())
             logger.info(f"startup reconcile complete: {json.dumps(summary)}")
+            gc_scheduler.start()
             uvicorn.run(app, host=config.bind, port=config.port, log_level="warning")
         finally:
+            gc_scheduler.stop()
             logger.info("daemon shutting down")

@@ -1,0 +1,13 @@
+{
+  "cursor_response_json": "",
+  "cursor_task_json": "",
+  "files_changed": [
+    "src/akasha/cli/main.py",
+    "tests/integration/test_cli_dry_run.py"
+  ],
+  "spec_questions": [],
+  "status": "DONE",
+  "verify_command": "uv run pytest tests/integration/test_cli_dry_run.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "19 passed in 0.23s (all tests: test_no_mutating_verb_bypasses_dry_run_via_raw_request, test_dry_run_case_table_matches_discovered_mutating_verbs, test_dry_run_returns_request_and_touches_no_network[new/set/rm/rm_with_redirect/review resolve/token create/token revoke], test_dry_run_json_flag_emits_cli_v1_envelope[same 7], test_dry_run_flag_order_does_not_matter, test_usage_error_respects_json_flag, test_usage_error_plain_text_without_json_flag)"
+}

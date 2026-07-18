@@ -1,0 +1,40 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/metrics.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/api/routes/metrics.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/api/app.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/kernel/store.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/unit/test_metrics.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/api-snapshot/openapi.json"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "All formal checks pass. store.py's 7 new functions are verified read-only (SELECT/fetchone/fetchall only, no write verbs, no `with conn:` transactions) and are all genuinely called from metrics.py (not dead code) -- this was the highest-risk check on the task and it holds. app.py diff is minimal/additive (1 import + 1 include_router line). openapi.json diff is additive-only (new /v1/metrics path), reproduced bit-for-bit by re-running the sanctioned regen command (`uv run python -m tests.integration.test_openapi_snapshot`), and passes the rebrand-invariant grep (no 'akasha' string). Spot-checked 4 test bodies (facet-coverage task/entity exemption, facet-coverage wildcard-vs-concrete-binding ratio, RSS>0 assertion, CPU first-sample-zero-then-bounded) -- all genuine, non-vacuous. Regression slice green: tests/integration/test_api.py 54 passed; ruff clean on the 4 touched src files; pyright 0 errors on metrics.py/routes/metrics.py. The 3 spec_questions are genuine and accurately described (verified matching inline # SPEC-QUESTION: comments in the code at the cited sites), not fabricated-sounding excuses. One non-blocking process note: none of these 3 questions have actually been appended to docs/spec-questions.md yet -- worker's own files_changed list never claimed to touch that file, so this isn't a contradiction of its claim, but the caller/orchestrator should make sure T9.2's questions get batched in before this milestone's human review, or they'll be silently lost.",
+  "task_id": "T9.2",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/unit/test_metrics.py: 26 passed, 1 warning in 0.43s\ntests/integration/test_openapi_snapshot.py: 3 passed, 1 warning in 0.41s"
+}

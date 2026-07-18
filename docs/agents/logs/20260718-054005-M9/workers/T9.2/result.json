@@ -1,0 +1,19 @@
+{
+  "files_changed": [
+    "src/akasha/metrics.py",
+    "src/akasha/api/routes/metrics.py",
+    "src/akasha/api/app.py",
+    "src/akasha/kernel/store.py",
+    "tests/unit/test_metrics.py",
+    "docs/api-snapshot/openapi.json"
+  ],
+  "spec_questions": [
+    "## T9.2: store.py touch outside Files list (read-only aggregation helpers)\n\n**Location:** src/akasha/kernel/store.py (\"T9.2 read-only metrics aggregation helpers\" section, appended after `read_base_snapshot`)\n**Details:** T9.2's Files list (src/akasha/metrics.py, src/akasha/api/routes/health.py (or metrics route), tests/unit/test_metrics.py) omits store.py, but rule 0.4 (all persistent-state reads/writes go through store.py) forces this touch -- same recurring precedent as T4.2/T4.4/T4.5/T4.6/T5.1/T5.4/T5.5/T5.7. Added 7 new READ-ONLY functions (facet_coverage_counts, count_reviews_created_since, count_reviews_resolved_since, list_review_created_at_since, count_violations_total, count_nodes_created_since, earliest_node_created_at); none opens a write transaction. Also touched src/akasha/api/app.py (one import + one include_router call to wire the new metrics route) -- not logged as its own question since T4.5/T5.7 set the precedent that a new route file's app.py registration is necessary wiring, not a separate ambiguity.",
+    "## T9.2: violation_rate / auto_repairs{class} / sync_cycle_ms{p50,p95} have no live producer yet\n\n**Location:** src/akasha/metrics.py (module docstring SPEC-QUESTION; _CycleRecorder, record_sync_cycle_ms, record_auto_repair)\n**Details:** Spec \u00a77 defines violation_rate (violations / sync cycles), auto_repairs{class}, and sync_cycle_ms{p50,p95}, but no existing DB table records per-cycle events -- the \u00a74.4 schema is frozen, and review_queue only records violations needing human review, never a quiet sync cycle or a certain-repair application (which by \u00a74.7 definition never reaches the queue). Accurately observing these requires instrumenting sync/reconcile.py's Reconciler.on_change, which is outside T9.2's Files list and concurrently owned by other build-plan work in this run (T9.1/T9.3 touch reconcile.py/watcher.py/daemon.py). Narrowest-reading resolution: metrics.py exposes record_sync_cycle_ms(duration_ms)/record_auto_repair(code) as an in-process recorder; the three metrics compute from whatever's been recorded so far (0.0/{} until a future task wires the call sites into reconcile.py's certain-repair/cycle-completion points). Satisfies the literal DoD (\"every \u00a77 metric appears in /v1/metrics\") today, but flagging so a future task (or T9.5's soak-test author) adds the reconcile.py call sites rather than assuming these three are already live.",
+    "## T9.2: inflow_variance_30d -- population vs. sample variance unspecified\n\n**Location:** src/akasha/metrics.py (_population_variance)\n**Details:** Spec \u00a77 names inflow_variance_30d but doesn't specify population variance (\u00f7N) vs. sample variance (\u00f7(N-1)). Narrowest reading implemented: population variance, treating the 30-day window (zero-filled per calendar day) as a complete, bounded population rather than a sample. Non-blocking -- flagging in case a dogfood-gate threshold (PRD \u00a711) was calibrated against the other convention."
+  ],
+  "status": "DONE",
+  "verify_command": "uv run pytest tests/unit/test_metrics.py && uv run pytest tests/integration/test_openapi_snapshot.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/unit/test_metrics.py .......................... [100%]\n26 passed, 1 warning in 0.44s\ntests/integration/test_openapi_snapshot.py ... [100%]\n3 passed, 1 warning in 0.41s\n(also independently confirmed: uv run ruff check src tests -> All checks passed; uv run pyright src -> 0 errors; uv run pytest tests/unit tests/property -> 408 passed; uv run pytest tests/integration -> 154 passed)"
+}

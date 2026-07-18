@@ -544,6 +544,29 @@
         ]
       }
     },
+    "/v1/metrics": {
+      "get": {
+        "operationId": "get_metrics_v1_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Metrics V1 Metrics Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Metrics",
+        "tags": [
+          "metrics"
+        ]
+      }
+    },
     "/v1/nodes": {
       "post": {
         "operationId": "create_node_v1_nodes_post",

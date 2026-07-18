@@ -24,11 +24,11 @@ M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 M6 (1 entry: T6.5, 2026-07-14), and M8 (4 entries: T8.0/T8.1/T8.3/T8.5b,
 2026-07-18 via fable rulings).
 
-**Open questions: 6** (all M7, logged 2026-07-14). T7.2 delete_node gap
-RESOLVED 2026-07-15 via follow-up T7.2b; the 4 M8 questions
-(T8.0/T8.1/T8.3/T8.5b) RESOLVED 2026-07-18 via fable rulings (see
-`docs/archived-questions.md`). The remaining 6 M7 entries need a product/spec
-decision before archiving.
+**Open questions: 10** (6 from M7, logged 2026-07-14, plus 4 from M9/T9.2+T9.3,
+logged 2026-07-18). T7.2 delete_node gap RESOLVED 2026-07-15 via follow-up
+T7.2b; the 4 M8 questions (T8.0/T8.1/T8.3/T8.5b) RESOLVED 2026-07-18 via
+fable rulings (see `docs/archived-questions.md`). The remaining 6 M7 entries
+and the 4 new M9 entries need a product/spec decision before archiving.
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
 - **Where:** `src/akasha/tms/invalidate.py` (`_composes_touched_facet`, inline `# SPEC-QUESTION:`).
@@ -64,3 +64,23 @@ decision before archiving.
 - **Where:** `src/akasha/kernel/store.py` (`split_node`, per-inbound-edge `enqueue_review_within_transaction` call, inline `# SPEC-QUESTION:`); consumed by `src/akasha/tms/review.py` `resolve_reassignment`.
 - **Narrowest reading taken:** `review_queue.cause_kind` is a closed enum (4.4): `facet_break|subtasks_closed|evidence_retracted|recheck|conflict|violation|proposal` -- none means "an inbound edge needs human reassignment after a split." Reusing any existing member is UNSAFE (each is load-bearing elsewhere: `recheck` gates triggers idempotence, `violation` makes an item dismissible, `proposal` routes to the mint path -- all in modules T7.6 must not touch), so overloading one would suppress a real review or mis-route resolution. Chose a new, clearly-flagged value `"reassignment"` (`enqueue_review` does no runtime enum validation, and there is no DB CHECK constraint -- verified -- so it is mechanically safe) pending a spec amendment to add it to the closed enum. `resolve_reassignment` records the outcome as `"still_holds"` (the resolution enum likewise has no "reassigned" member -- mirrors the `approve_proposal` precedent, cf. the other T7.5 entry).
 - **Resolution:** open -- needs a spec amendment to add `reassignment` to the `cause_kind` enum (and possibly a `reassigned` resolution value). This is the same class of gap as the T7.5 proposal-approval-resolution question.
+
+## T9.3 — does S0 GC scheduling also cover node-retention deletion (vision A7), or only the object-level `gc_objects` job?
+- **Where:** `src/akasha/daemon.py` (`GcScheduler`, inline `# SPEC-QUESTION:`); the tension is with `docs/archived-questions.md`'s T1.7 entry.
+- **Narrowest reading taken:** the archived T1.7 resolution names T9.3 as the home for a retention-based S0 *node* GC (deleting S0 nodes older than a configurable threshold, default 30 days, per `vision.md` A7) that would run BEFORE `gc_objects` reclaims the now-orphaned objects. But T9.3's actual build-plan Steps ("Run GC on a schedule/daily tick", "GC keeps referenced objects (reuse T1.7 invariant)") and DoD ("removes only orphans") describe only the existing object-level `gc_objects` job — no age-based node deletion, and neither `mvp-spec.md` nor `build-plan.md` defines a retention-days config surface (`Config` has no such field). Implemented `GcScheduler` to schedule only `store.gc_objects` (object-level orphan reclamation) + confirm log rotation, matching the literal Steps/DoD. No S0 node-retention-by-age job exists anywhere in the codebase yet.
+- **Resolution:** open -- if vision A7's 30-day node retention is still required for the MVP, it needs a follow-up task (its own Files list touching `kernel/store.py` for the new age-based query + a `Config` field for the threshold) or an explicit decision that it's out of MVP scope.
+
+## T9.2 — store.py touch outside Files list (read-only metrics aggregation helpers)
+- **Where:** `src/akasha/kernel/store.py` ("T9.2 read-only metrics aggregation helpers" section, appended after `read_base_snapshot`).
+- **Narrowest reading taken:** T9.2's Files list (`src/akasha/metrics.py`, `src/akasha/api/routes/health.py` (or metrics route), `tests/unit/test_metrics.py`) omits `store.py`, but rule 0.4 (all persistent-state reads/writes go through `store.py`) forces this touch — same recurring precedent as T4.2/T4.4/T4.5/T4.6/T5.1/T5.4/T5.5/T5.7. Added 7 new READ-ONLY functions (`facet_coverage_counts`, `count_reviews_created_since`, `count_reviews_resolved_since`, `list_review_created_at_since`, `count_violations_total`, `count_nodes_created_since`, `earliest_node_created_at`); none opens a write transaction (independently confirmed by the verifier). Also touched `src/akasha/api/app.py` (one import + one `include_router` call) — not logged as its own question, matching the T4.5/T5.7 precedent that a new route file's app.py registration is necessary wiring, not a separate ambiguity.
+- **Resolution:** open.
+
+## T9.2 — `violation_rate` / `auto_repairs{class}` / `sync_cycle_ms{p50,p95}` have no live producer yet
+- **Where:** `src/akasha/metrics.py` (module docstring; `_CycleRecorder`, `record_sync_cycle_ms`, `record_auto_repair`).
+- **Narrowest reading taken:** spec §7 defines these three metrics, but no existing DB table records per-cycle events — the §4.4 schema is frozen, and `review_queue` only records violations needing human review, never a quiet sync cycle or a certain-repair application (which by §4.7 definition never reaches the queue). Accurately observing these requires instrumenting `sync/reconcile.py`'s `Reconciler.on_change`, which is outside T9.2's Files list and was concurrently owned by other in-flight build-plan work (T9.1/T9.3) during this run. Implemented `metrics.py` with an in-process recorder (`record_sync_cycle_ms`/`record_auto_repair`); the three metrics compute from whatever's been recorded so far (`0.0`/`{}` until a future task wires the call sites into `reconcile.py`'s certain-repair/cycle-completion points). Satisfies the literal DoD ("every §7 metric appears in /v1/metrics") today.
+- **Resolution:** open -- a future task (or T9.5's soak-test author) should add the `reconcile.py` call sites so these three metrics go live; until then they will read as zero/empty in production, not an error, but not representative either.
+
+## T9.2 — `inflow_variance_30d`: population vs. sample variance unspecified
+- **Where:** `src/akasha/metrics.py` (`_population_variance`).
+- **Narrowest reading taken:** spec §7 names `inflow_variance_30d` but doesn't specify population variance (÷N) vs. sample variance (÷(N-1)). Implemented population variance, treating the 30-day window (zero-filled per calendar day) as a complete, bounded population rather than a sample.
+- **Resolution:** open -- flagging in case a dogfood-gate threshold (PRD §11) was calibrated against the other convention.
