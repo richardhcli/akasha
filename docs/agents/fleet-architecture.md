@@ -495,7 +495,7 @@ No failure path silently weakens guardrails or moves on. Failures surface, are l
 ## Future Enhancements
 
 1. **Bridge implementation of local Verify:** Update `scripts/fleet/cursor_bridge.py` + `compose_prompt` to pass `verify_cmd`, instruct the edit→Verify→fix loop, and parse/return `verify_exit_code` / `verify_stdout_tail` (target contract above; code may lag the doc until this lands).
-2. **Alternative edit executors:** Replace `cursor_bridge.py` with a non-Cursor implementation (e.g., native Claude Code agent that shells out to `git apply` patches). Same JSON contract, including Verify fields.
+2. **Alternative edit executors:** Replace `cursor_bridge.py` with a non-Cursor implementation (e.g., native Claude Code agent that shells out to `git apply` patches). Same JSON contract, including Verify fields. **Partially landed (2026-07-18):** `.cursor/agents/fleet-cursor-editor.md` is a native Cursor Task-tool subagent implementing the same abstract contract (task JSON in → `status`/`files_changed`/`verify_*` JSON out) without the subprocess hop — dispatch it directly with `model: "cursor-grok-4.5-high"` from a Cursor session instead of piping to `cursor_bridge.py`. Same trust rules apply: it is advisory evidence only, never the `DONE` authority.
 3. **Multi-pass refinement:** Orchestrator could retry a failed task at a higher tier (direct Opus edit) if worker+Cursor fails.
 4. **Cost tracking:** Aggregate `usage` from bridge JSON per task/tier/milestone into `manifest.json` for cost reporting (caller-side; still not agent-authored log prose) (determinsitic cost tracking per agent per task / tier / milestone)
 5. **Distributed workers:** Run fleet-worker agents across multiple machines (not planned for MVP).
