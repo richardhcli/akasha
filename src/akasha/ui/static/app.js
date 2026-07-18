@@ -208,12 +208,28 @@ console.debug("tm ui loaded");
 
     var revisedTextarea = document.createElement("textarea");
     li.appendChild(revisedTextarea);
+    // T8.3 ruling: disclose the invalidation blast radius rather than silently
+    // guessing it. The human picks change_class (default minor) — a revision
+    // that removes/renames a facet is MAJOR, and under-classifying it would
+    // suppress downstream invalidation. facets_touched stays [] in this
+    // minimal affordance (SPEC-QUESTION T8.3).
+    var classLabel = el("label", { text: "commit as change_class: " });
+    var classSelect = document.createElement("select");
+    classSelect.className = "revised-change-class";
+    ["minor", "major"].forEach(function (c) {
+      var opt = document.createElement("option");
+      opt.value = c;
+      opt.textContent = c;
+      classSelect.appendChild(opt);
+    });
+    classLabel.appendChild(classSelect);
+    li.appendChild(classLabel);
     var revisedBtn = el("button", { text: "submit revised" });
     revisedBtn.addEventListener("click", function () {
       resolve({
         resolution: "revised",
         new_body: revisedTextarea.value,
-        change_class: "minor",
+        change_class: classSelect.value,
         facets_touched: [],
       });
     });

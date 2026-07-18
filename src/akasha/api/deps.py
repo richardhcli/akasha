@@ -1,8 +1,12 @@
 """Shared FastAPI dependencies + the standard error envelope (task T4.4).
 
-Approved app plumbing (see task-status T4.4 note): a single shared WAL
-``sqlite3`` connection lives on ``app.state.conn`` (opened in ``app.py`` with
-``check_same_thread=False``); ``get_conn`` hands it to routes. ``require_auth``
+Approved app plumbing (see task-status T4.4 note): ``get_conn`` hands each
+request a WAL ``sqlite3`` connection. In production it opens a FRESH connection
+per request (spec §3 / SPEC-QUESTION T8.5b / vision F14 — a single connection
+shared across the ASGI threadpool corrupts reads under concurrency); test/
+embedded callers that inject one via ``create_app(conn=...)`` keep the shared
+``app.state.conn`` (``db_path is None`` branch) and drive the app sequentially.
+``require_auth``
 wraps ``auth.authenticate`` (T4.1) and records the audit row for every
 mutating request (T4.2); ``require_human`` enforces the human-only (∅)
 endpoints (spec §4.11). Every failure is rendered through the spec §4.11

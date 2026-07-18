@@ -21,33 +21,14 @@ closes (context-size optimization — an agent scanning for outstanding
 ambiguities shouldn't have to read past closed ones). See that file for the
 full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
-and M6 (1 entry: T6.5, 2026-07-14).
+M6 (1 entry: T6.5, 2026-07-14), and M8 (4 entries: T8.0/T8.1/T8.3/T8.5b,
+2026-07-18 via fable rulings).
 
-**Open questions: 10** (M7's 6, logged 2026-07-14, still open; +4 M8 entries
-T8.0/T8.1/T8.3/T8.5b, logged 2026-07-17. T7.2 delete_node gap RESOLVED
-2026-07-15 via follow-up T7.2b. All 10 need a product/spec decision before
-archiving.).
-
-## T8.5b — spec §3's "single shared connection" daemon model is unsafe under concurrency (amend §3)
-- **Where:** `docs/mvp-spec.md` §3 ("The daemon uses one shared connection (`check_same_thread=False`, because synchronous FastAPI routes run in a thread pool)... This is the MVP concurrency model"); implemented in `src/akasha/api/deps.py` (`get_conn`) + `src/akasha/api/app.py`.
-- **What was falsified:** §3 asserts one shared `sqlite3.Connection` is the concurrency model, justified by `check_same_thread=False`. But that flag only disables the *same-thread assertion*; it does NOT make concurrent multi-thread use of one connection safe. The Web UI's node view (T8.2) issues **4 concurrent `fetch()`es** (`Promise.all`), which FastAPI runs on separate threadpool threads sharing the one connection. Reproduced directly (240 concurrent requests): ~10% failed with `sqlite3.InterfaceError` (500), a *valid token rejected* (401, corrupted `tokens` read in `auth.authenticate`), and an *existing node missing* (404, corrupted read in `store.get_node`) — i.e. the writer-of-record returns **wrong reads** under concurrency, a data-integrity defect. This is the first client to ever issue concurrent requests, so it was latent until M8.
-- **Narrowest reading / fix taken (T8.5b, user-directed "ensure concurrency is possible"):** `get_conn` now opens a **fresh WAL connection per request** (concurrent readers + one writer; `store.connect` gained `PRAGMA busy_timeout=5000`) and closes it at request end. `app.state.conn` is kept only for the pre-serving startup reconcile (`daemon.py`); test/embedded callers that inject a connection (`create_app(conn=...)`) still get the shared connection via the `db_path is None` branch (they drive the app sequentially, so it's safe). After the fix: 240/240 concurrent requests → 200. Guarded by `tests/integration/test_concurrency.py` (fast) + `tests/integration/test_ui_smoke.py` (end-to-end browser). The serializing-lock alternative was rejected per the user's directive (it would serialize the UI's parallel fetches).
-- **Resolution:** open — **amend spec §3** to specify per-request WAL connections (not one shared connection) as the daemon concurrency model, ratifying the fix.
-
-## T8.3 — "revised" resolution cannot be truly one-click
-- **Where:** `src/akasha/ui/static/app.js` (`renderReviewItem`, Review view, inline `# SPEC-QUESTION`-style comment).
-- **Narrowest reading taken:** §4.13 asks for "one-click resolutions," but the `revised` resolution (spec §4.9) requires a new node body plus `change_class`/`facets_touched` that the server cannot infer — it cannot be literally one-click. Implemented `still_holds`/`retracted` as true one-click buttons, `dismissed` as one-click but only rendered when `cause_kind === "violation"` (mirrors the server's violations-only 409 rule so the UI never offers a guaranteed-fail action), and `revised` as a minimal inline `<textarea>` + "submit revised" button that POSTs `{resolution:"revised", new_body:<textarea>, change_class:"minor", facets_touched:[]}` — the smallest affordance short of a full editor. Cap-10 banner is a display-only signal over the uncapped `GET /v1/review` (renders when open count ≥ 10).
-- **Resolution:** open — confirm the minimal inline-body affordance is the intended `revised` UX, or specify a richer edit flow (e.g. route to the node edit view).
-
-## T8.0 — `/v1/review` HTTP endpoints were spec-defined but never in any task's Files list
-- **Where:** `docs/build-plan.md` (no task created `src/akasha/api/routes/review.py`); spec §4.11 line ~315 defines `GET /review?status=open` + `POST /review/{id}/resolve`; `src/akasha/cli/main.py` docstring expected T7.5 to "land them"; but T7.5's `Files` list was `tms/review.py` + `test_tms.py` only.
-- **Narrowest reading taken:** the endpoints are spec-mandated, so building them is implementation, not invention (rule 0.2 satisfied). Inserted a new focused prerequisite task **T8.0** (Files: `routes/review.py`, `app.py`, regenerated OpenAPI snapshot, `test_api.py`) rather than reopening T7.5 (which delivered exactly its Files list). Endpoint contract decisions: `GET /review?status=open` returns the **uncapped** open set via `store.find_open_reviews` (the §4.9 daily-cap-10 is a T8.3 *display/banner* concern, NOT an endpoint limit — a capped endpoint could not answer "does node X have an open facet_break," which the T8.2 badge needs and which a 1-review seed fixture would mask); added an optional `node` filter param for the badge's per-node query; `POST /review/{id}/resolve` is human-only (∅, `require_human`) and covers the four standard resolutions (`still_holds|revised|retracted|dismissed`) via `tms/review.py` `resolve_review` (proposal-approval / split-reassignment flows are out of T8.0 scope).
-- **Resolution:** open — a spec editor should add `T8.0`'s route to the build-plan §4.11 task coverage (it was an M4→T7.5 sequencing gap) and confirm the uncapped-endpoint + `node`-filter contract.
-
-## T8.1 — build-plan Files list omits the vendored htmx asset and the integration test
-- **Where:** `docs/build-plan.md` T8.1 `Files:` (lists only `base.html`, `static/app.js`, `api/app.py`); actual deliverable also added `src/akasha/ui/static/htmx.min.js` and `tests/integration/test_ui_shell.py`.
-- **Narrowest reading taken:** both additions are mechanically required by the task's own Goal ("Wire htmx"; DoD "static files served directly") and Verify ("assert in a lightweight integration test"), not scope creep — a vendored `htmx.min.js` IS "the static file to copy," and the Verify literally demands a test. Added both, touched no other unlisted file, `pyproject.toml` untouched (no jinja2). Same class as prior incomplete-Files-list cases; a spec editor should add these two paths to T8.1's Files line (and note the M8 rendering architecture: static shells + client-side vanilla-JS render, no jinja2 — recorded in `docs/agents/task-status.md` M8 header).
-- **Resolution:** open.
+**Open questions: 6** (all M7, logged 2026-07-14). T7.2 delete_node gap
+RESOLVED 2026-07-15 via follow-up T7.2b; the 4 M8 questions
+(T8.0/T8.1/T8.3/T8.5b) RESOLVED 2026-07-18 via fable rulings (see
+`docs/archived-questions.md`). The remaining 6 M7 entries need a product/spec
+decision before archiving.
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
 - **Where:** `src/akasha/tms/invalidate.py` (`_composes_touched_facet`, inline `# SPEC-QUESTION:`).

@@ -102,7 +102,7 @@ akasha/
 
 ## 3. Conventions & toolchain
 
-Python 3.12+, managed by `uv`. Lint/format: `ruff` (rule set includes a custom ban on `pickle`, `eval`, `exec`). Types: `pyright --strict` on `src/`. Tests: `pytest`, `hypothesis` for property tests. DB: stdlib `sqlite3`, WAL mode, `PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL`. The daemon uses one shared connection (`check_same_thread=False`, because synchronous FastAPI routes run in a thread pool) at `%APPDATA%/tm-daemon/store.db` on Windows / `~/.config/tm-daemon/store.db` elsewhere. This is the MVP concurrency model for the single-user local daemon. HTTP: FastAPI + uvicorn, port **7433** default, bind `127.0.0.1` only. Config at `%APPDATA%/tm-daemon/config.toml` (Windows) / `~/.config/tm-daemon/config.toml` elsewhere — note neutral dir name per rule 0.6. Logging: structured JSON lines to a rotating file + stderr. Commits: Conventional Commits. CI: GitHub Actions matrix `[windows-latest, ubuntu-latest]`; Windows is the release gate.
+Python 3.12+, managed by `uv`. Lint/format: `ruff` (rule set includes a custom ban on `pickle`, `eval`, `exec`). Types: `pyright --strict` on `src/`. Tests: `pytest`, `hypothesis` for property tests. DB: stdlib `sqlite3`, WAL mode, `PRAGMA foreign_keys=ON; PRAGMA synchronous=NORMAL`. Each HTTP request opens a **fresh WAL connection** (`PRAGMA busy_timeout=5000`) and closes it at request end — WAL gives concurrent readers + one writer. A single connection must **never** be shared across the ASGI request threadpool (falsified T8.5b / vision F14: corrupted reads under concurrent requests — `check_same_thread=False` disables only the same-thread assertion, not concurrent access). A long-lived connection is used only for pre-serving startup work (migrate/reconcile) and for test/embedded callers that inject one (`create_app(conn=...)`) and drive the app sequentially. Store at `%APPDATA%/tm-daemon/store.db` on Windows / `~/.config/tm-daemon/store.db` elsewhere. HTTP: FastAPI + uvicorn, port **7433** default, bind `127.0.0.1` only. Config at `%APPDATA%/tm-daemon/config.toml` (Windows) / `~/.config/tm-daemon/config.toml` elsewhere — note neutral dir name per rule 0.6. Logging: structured JSON lines to a rotating file + stderr. Commits: Conventional Commits. CI: GitHub Actions matrix `[windows-latest, ubuntu-latest]`; Windows is the release gate.
 
 ---
 
@@ -312,7 +312,7 @@ All authenticated application endpoints are under `/v1`, use JSON, and require h
 | POST /nodes/{id}/vet | set S4 | human token only ∅ |
 | POST /edges · DELETE /edges/{id} | create (validates facet_binding rule) / retract | |
 | GET  /search?q= | FTS over bodies | |
-| GET  /review?status=open · POST /review/{id}/resolve | queue · resolutions | resolve: human only ∅ |
+| GET  /review?status=open · POST /review/{id}/resolve | queue · resolutions | resolve: human only ∅; `GET /review` returns the FULL open set (optional `?node=<id>` filter) — the §4.9 daily cap-10 is a client/display concern, never an endpoint limit (T8.0) |
 | GET  /sync/status · POST /sync/rescan | per-sync-root state, violations, pauses | |
 | GET/POST /sync/roots | register/list durable filesystem sync roots | human only ∅ |
 | GET/POST/DELETE /tokens | token management | human only ∅ |
@@ -326,7 +326,7 @@ The generated OpenAPI JSON is snapshotted at `docs/api-snapshot/openapi.json`; C
 
 ### 4.13 Web UI (MVP-minimal)
 
-Daemon-served, htmx + vanilla JS, four views: **Node** (body, facets, 1-hop neighborhood, history, stale badge with cause), **Review** (queue with one-click resolutions, daily-cap banner), **Search**, **Sync** (per-sync-root status, violations, pause&diff inspector; display “Obsidian vault” in Obsidian-specific copy). Badge copy uses "vetted by you" language, never "true" (PRD R9). No SPA framework; no build step beyond copying static files.
+Daemon-served, htmx + vanilla JS, four views: **Node** (body, facets, 1-hop neighborhood, history, stale badge with cause), **Review** (queue with one-click resolutions — `still_holds`/`retracted`; `dismissed` shown for violations only; `revised` uses an inline body editor that submits a new commit, defaults `change_class=minor`/`facets_touched=[]` **disclosed in the UI**, T8.3 — plus a daily-cap banner), **Search**, **Sync** (per-sync-root status, violations, pause&diff inspector; display “Obsidian vault” in Obsidian-specific copy). Badge copy uses "vetted by you" language, never "true" (PRD R9). No SPA framework; no build step beyond copying static files. **Rendering:** static HTML shells (served verbatim from `ui/templates/`) + client-side vanilla JS fetching `/v1` JSON; no server-side templating engine (no jinja2).
 
 ---
 

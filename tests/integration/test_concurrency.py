@@ -109,3 +109,41 @@ def test_concurrent_node_view_fetches_never_corrupt(daemon: dict[str, Any]) -> N
 
     bad = [s for s in statuses if s != 200]
     assert not bad, f"{len(bad)}/{len(statuses)} concurrent requests failed: {sorted(set(bad))}"
+
+
+def test_concurrent_writes_serialize_cleanly(daemon: dict[str, Any]) -> None:
+    """Concurrent mutating requests must all succeed (WAL: one writer at a time,
+    ``busy_timeout`` makes contenders wait rather than raise ``database is
+    locked``). Guards the write edge of the per-request-connection model (T8.5b):
+    no lost creates, no 500s under write contention.
+    """
+    base_url = daemon["base_url"]
+    headers = {"Authorization": f"Bearer {daemon['token']}"}
+    n = 24
+
+    def create(i: int) -> tuple[int, str | None]:
+        resp = httpx.post(
+            base_url + "/v1/nodes",
+            headers=headers,
+            json={"node_type": "claim", "body": f"concurrent write {i}"},
+            timeout=15.0,
+        )
+        node_id = resp.json().get("id") if resp.status_code == 201 else None
+        return resp.status_code, node_id
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
+        results = list(ex.map(create, range(n)))
+
+    statuses = [s for s, _ in results]
+    assert all(s == 201 for s in statuses), (
+        f"non-201 under concurrent writes: {sorted(set(statuses))}"
+    )
+
+    # Every create landed and persisted exactly once (no writes lost to
+    # contention): distinct ids, each retrievable.
+    ids = [node_id for _, node_id in results]
+    assert len(set(ids)) == n, f"expected {n} distinct node ids, got {len(set(ids))}"
+    with httpx.Client(base_url=base_url, headers=headers, timeout=10.0) as client:
+        for node_id in ids:
+            got = client.get(f"/v1/nodes/{node_id}")
+            assert got.status_code == 200, f"node {node_id} not persisted: {got.text}"

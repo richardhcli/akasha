@@ -270,8 +270,16 @@ T8.3 (review view), T8.4 (search+sync), T8.5 (smoke test), T8.5b (concurrency
 fix, inserted after the smoke test exposed a data-integrity defect). Every view
 was driven in a real browser against the seed harness — **except** T8.4's sync
 pause&diff inspector, which is code-verified only (the dev seed registers no sync
-root/pause; a richer seed would close it). 4 open M8 spec-questions (T8.0, T8.1,
-T8.3, T8.5b).
+root/pause; a richer seed would close it). **All 4 M8 spec-questions RESOLVED
+2026-07-18 via fable rulings** (archived to `docs/archived-questions.md`): T8.0
+(uncapped `/v1/review` + `node` filter) and T8.1 (guardrailed Files-list
+completion; static-shell/no-jinja2 architecture) **ratified**; T8.3
+**ratified-with-amendment** — `revised` now shows a disclosed `minor|major`
+`change_class` selector (browser-verified) so invalidation blast radius isn't a
+silent guess; T8.5b **ratified** — spec §3 amended to per-request WAL
+connections + **vision §5 F14** added, plus a concurrent-**write** regression
+test. Spec docs updated: §3, §4.11 (`/review` row), §4.13 (rendering + `revised`
+disclosure), build-plan (T8.1 Files + Files-list-completion guardrail).
 
 **BINDING M8 rendering architecture (decided at T8.1 via fable design review, 2026-07-17).**
 The `.html` files under `src/akasha/ui/templates/` are **static shells served as-is**;

@@ -8,7 +8,7 @@
 ## How to use this plan (read before doing anything)
 
 1. **Do tasks strictly in ID order** within a phase, and never start a task whose `Depends on` tasks are not all `DONE`. When in doubt, stop and ask; do not improvise ordering.
-2. **One task = one focused change.** Touch only the files listed under `Files`. If you feel you must touch a file not listed, that is a signal the task is misunderstood — stop and add a `# SPEC-QUESTION:` note in `docs/spec-questions.md` instead of guessing. Rule 5 is the sole precedence exception: when an API/TMS task necessarily persists state and its Files list accidentally omits `kernel/store.py`, add only the minimal store helper and record/correct the omission; never write SQLite from the higher layer.
+2. **One task = one focused change.** Touch only the files listed under `Files`. If you feel you must touch a file not listed, that is a signal the task is misunderstood — stop and add a `# SPEC-QUESTION:` note in `docs/spec-questions.md` instead of guessing. Rule 5 is the sole precedence exception: when an API/TMS task necessarily persists state and its Files list accidentally omits `kernel/store.py`, add only the minimal store helper and record/correct the omission; never write SQLite from the higher layer. **Files-list completion (ratified T8.0/T8.1):** a file may be added when it is *strictly entailed by the task's own Goal/DoD/Verify text* (e.g. a vendored asset the DoD says to serve, or the integration test the Verify demands) — log the completion in `docs/spec-questions.md` and correct the Files line. This is narrow: anything requiring judgment about *what* to build stays a stop-and-log spec-question, not a completion.
 3. **Never invent** schema, endpoints, ID formats, or grammar beyond the spec (spec rule 0.2). Implement the narrowest reading of any ambiguity.
 4. **Never edit golden files, fixtures, or acceptance tests to make code pass** (spec rule 0.3). If a golden file looks wrong, that is a `# SPEC-QUESTION:`, not an edit.
 5. **All persistent writes go through `kernel/store.py`** (spec rule 0.4); no other module writes SQLite.
@@ -642,7 +642,7 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 ### T8.1 — UI shell + static serving (htmx, no build step)
 - **Goal** — Daemon-served UI shell with htmx + vanilla JS, no SPA framework, no build step beyond copying static files.
 - **Depends on** — T4.3.
-- **Files** — `src/akasha/ui/templates/base.html`, `src/akasha/ui/static/app.js`, `src/akasha/api/app.py` (mount UI).
+- **Files** — `src/akasha/ui/templates/base.html`, `src/akasha/ui/static/app.js`, `src/akasha/ui/static/htmx.min.js` (vendored), `src/akasha/api/app.py` (mount UI), `tests/integration/test_ui_shell.py`.
 - **Spec** — §4.13 (htmx + vanilla JS; no SPA; no build step).
 - **Steps** — (1) Serve a base template + static assets from the daemon. (2) Wire htmx. (3) No bundler/build step.
 - **Verify** — Start daemon; `GET /` returns the shell (assert in a lightweight integration test).
