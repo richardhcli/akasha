@@ -26,6 +26,17 @@ jobs:
     steps:
       - run: echo "windows-latest leg of 'check' is the release gate (spec §3, §6.3)"
 
+  ui-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run playwright install --with-deps chromium
+      # Full UI loop end-to-end (T8.5) + the fast browser-free concurrency
+      # regression guard (T8.5b, the per-request-connection fix).
+      - run: uv run pytest tests/integration/test_ui_smoke.py tests/integration/test_concurrency.py
+
   plugin-build:
     runs-on: ubuntu-latest
     defaults:
