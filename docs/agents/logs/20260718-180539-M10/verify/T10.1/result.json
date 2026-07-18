@@ -1,0 +1,35 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/spec-questions.md"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/api/app.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/ui/static/app.js"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/ui/templates/dashboard.html"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_ui_dashboard.py"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "All claims independently verified. GET /dashboard route in src/akasha/api/app.py (lines 162-169) is real, follows byte-for-byte the same HTMLResponse/include_in_schema=False pattern as /node, /review, /search, /sync, and serves dashboard.html from _TEMPLATES_DIR. tests/integration/test_ui_dashboard.py no longer contains _register_test_dashboard_route (grep returned nothing) and drives the real route via page.goto(f\"{base_url}/dashboard\"). Reran tests/integration/test_openapi_snapshot.py independently: 3 passed, exit 0, confirming the new route (include_in_schema=False) did not leak into the OpenAPI snapshot. docs/spec-questions.md T10.1 Resolution line was genuinely changed from 'open' to a detailed 'resolved -- option (a) taken' entry. git status/diff exactly match the claimed files_changed list with no unclaimed changes.",
+  "task_id": "T10.1",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/integration/test_ui_dashboard.py .                                 [100%]\n\n============================== 1 passed in 1.07s ==============================="
+}

@@ -529,6 +529,86 @@ console.debug("tm ui loaded");
       });
   }
 
+  // Dashboard view (T10.1, spec M10 / §7 / §9 story 6): read-only display of
+  // the four metric groups the milestone names -- facet coverage, review
+  // inflow-vs-resolved with variance, violation rate, crossing rate -- all
+  // sourced verbatim from GET /v1/metrics (T9.2). No new metric definitions:
+  // this view only formats fields compute_metrics() already returns.
+  function formatPct(ratio) {
+    return (ratio * 100).toFixed(1) + "%";
+  }
+
+  function formatRate(rate) {
+    return rate.toFixed(3);
+  }
+
+  function renderFacetCoverage(container, metrics) {
+    container.textContent = "";
+    container.appendChild(el("h2", { text: "Facet coverage" }));
+    container.appendChild(
+      el("p", { text: formatPct(metrics.facet_coverage) })
+    );
+  }
+
+  function renderReviewEconomy(container, metrics) {
+    container.textContent = "";
+    container.appendChild(el("h2", { text: "Review inflow vs. resolution" }));
+    var ul = el("ul");
+    ul.appendChild(
+      el("li", { text: "Inflow (7d): " + metrics.review_inflow_7d })
+    );
+    ul.appendChild(
+      el("li", { text: "Resolved (7d): " + metrics.review_resolved_7d })
+    );
+    ul.appendChild(
+      el("li", {
+        text: "Inflow variance (30d): " + formatRate(metrics.inflow_variance_30d),
+      })
+    );
+    container.appendChild(ul);
+  }
+
+  function renderViolationRate(container, metrics) {
+    container.textContent = "";
+    container.appendChild(el("h2", { text: "Violation rate" }));
+    container.appendChild(
+      el("p", { text: formatRate(metrics.violation_rate) })
+    );
+  }
+
+  function renderCrossingRate(container, metrics) {
+    container.textContent = "";
+    container.appendChild(el("h2", { text: "Crossing rate" }));
+    container.appendChild(
+      el("p", { text: formatRate(metrics.crossing_rate) + " nodes/day" })
+    );
+  }
+
+  function initDashboardView() {
+    var app = document.getElementById("app");
+    var token = getToken();
+    if (!token) {
+      renderNotice(app, "Set tm_token in localStorage to use this view.");
+      return;
+    }
+
+    var facetCoverageEl = document.getElementById("dashboard-facet-coverage");
+    var reviewEconomyEl = document.getElementById("dashboard-review-economy");
+    var violationRateEl = document.getElementById("dashboard-violation-rate");
+    var crossingRateEl = document.getElementById("dashboard-crossing-rate");
+
+    fetchJson("/v1/metrics", token)
+      .then(function (metrics) {
+        renderFacetCoverage(facetCoverageEl, metrics);
+        renderReviewEconomy(reviewEconomyEl, metrics);
+        renderViolationRate(violationRateEl, metrics);
+        renderCrossingRate(crossingRateEl, metrics);
+      })
+      .catch(function (err) {
+        renderNotice(app, "Failed to load metrics: " + err.message);
+      });
+  }
+
   // app.js is loaded in <head>, so defer view init until the DOM (#app and
   // the view containers) is parsed — otherwise getElementById returns null.
   function boot() {
@@ -540,6 +620,8 @@ console.debug("tm ui loaded");
       initSearchView();
     } else if (window.location.pathname === "/sync") {
       initSyncView();
+    } else if (window.location.pathname === "/dashboard") {
+      initDashboardView();
     }
   }
   if (document.readyState === "loading") {

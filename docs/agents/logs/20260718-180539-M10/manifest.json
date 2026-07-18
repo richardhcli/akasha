@@ -1,0 +1,9 @@
+{
+  "cohort": [
+    "T10.1",
+    "T10.2"
+  ],
+  "final_status": "IN_PROGRESS",
+  "notes": "T10.1 finish (worker DONE, verifier pending); T10.2 not yet dispatched. T10.3 held per handoff/build-plan.",
+  "run_id": "20260718-180539-M10"
+}

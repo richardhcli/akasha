@@ -159,6 +159,15 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
         content = (_TEMPLATES_DIR / "sync.html").read_bytes()
         return HTMLResponse(content=content, status_code=200)
 
+    # Dashboard view (T10.1 / spec §7, §9 story 6): same static-shell pattern
+    # as /node -- no auth (the /v1/metrics fetch driven by app.js is
+    # authenticated), excluded from OpenAPI so the /v1 contract snapshot
+    # stays unchanged.
+    @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+    def ui_dashboard() -> HTMLResponse:  # pyright: ignore[reportUnusedFunction]
+        content = (_TEMPLATES_DIR / "dashboard.html").read_bytes()
+        return HTMLResponse(content=content, status_code=200)
+
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
     return app

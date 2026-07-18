@@ -24,11 +24,12 @@ M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 M6 (1 entry: T6.5, 2026-07-14), and M8 (4 entries: T8.0/T8.1/T8.3/T8.5b,
 2026-07-18 via fable rulings).
 
-**Open questions: 10** (6 from M7, logged 2026-07-14, plus 4 from M9/T9.2+T9.3,
-logged 2026-07-18). T7.2 delete_node gap RESOLVED 2026-07-15 via follow-up
-T7.2b; the 4 M8 questions (T8.0/T8.1/T8.3/T8.5b) RESOLVED 2026-07-18 via
-fable rulings (see `docs/archived-questions.md`). The remaining 6 M7 entries
-and the 4 new M9 entries need a product/spec decision before archiving.
+**Open questions: 12** (6 from M7, logged 2026-07-14; 4 from M9/T9.2+T9.3,
+logged 2026-07-18; 2 from M10/T10.1+T10.2, logged 2026-07-18). T7.2 delete_node
+gap RESOLVED 2026-07-15 via follow-up T7.2b; the 4 M8 questions
+(T8.0/T8.1/T8.3/T8.5b) RESOLVED 2026-07-18 via fable rulings (see
+`docs/archived-questions.md`). The remaining 6 M7 entries, the 4 M9 entries,
+and the 2 new M10 entries need a product/spec decision before archiving.
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
 - **Where:** `src/akasha/tms/invalidate.py` (`_composes_touched_facet`, inline `# SPEC-QUESTION:`).
@@ -84,3 +85,8 @@ and the 4 new M9 entries need a product/spec decision before archiving.
 - **Where:** `src/akasha/metrics.py` (`_population_variance`).
 - **Narrowest reading taken:** spec §7 names `inflow_variance_30d` but doesn't specify population variance (÷N) vs. sample variance (÷(N-1)). Implemented population variance, treating the 30-day window (zero-filled per calendar day) as a complete, bounded population rather than a sample.
 - **Resolution:** open -- flagging in case a dogfood-gate threshold (PRD §11) was calibrated against the other convention.
+
+## T10.1 — `dashboard.html` has no production route; serving it needs an `app.py` edit outside this task's Files list
+- **Where:** `src/akasha/ui/templates/dashboard.html` (new file, referenced by no route in `src/akasha/api/app.py`); `tests/integration/test_ui_dashboard.py` (works around the gap, see below).
+- **Narrowest reading taken:** T10.1's Files list is exactly `src/akasha/ui/templates/dashboard.html` + `src/akasha/ui/static/app.js`, and this run's dispatch instructions drew an explicit, stricter line than the M8/T9.2 "Files-list completion" precedent (T8.1-T8.4 each added their own `app.py` route -- e.g. `GET /node`, `GET /sync` -- without stopping to ask, logging it after the fact as a sanctioned completion): for this task, a new `app.py` route was to be treated as a real scope gap requiring a stop-and-log rather than a silent completion. Implemented `dashboard.html` and `app.js`'s `initDashboardView` fully per the build-plan Steps: fetches `GET /v1/metrics` (T9.2) and renders all four named metric groups -- facet coverage, review inflow-vs-resolved with variance, violation rate, crossing rate -- via `createElement`/`textContent` (never `innerHTML`), with no new metric definitions (display-only, exactly the fields `compute_metrics()` already returns). `tests/integration/test_ui_dashboard.py` (a Files-list completion of the same class T8.5 established for its own Playwright test) proves both owned files render correctly against a live daemon by registering a **test-local** `GET /dashboard` route directly on the `FastAPI` instance `create_app()` returns (byte-for-byte mirrors `app.py`'s own HTMLResponse-serving pattern for `/node`/`/review`/`/search`/`/sync`) -- `src/akasha/api/app.py` itself is left completely untouched (confirmed via `git status`/`git diff`, zero bytes changed).
+- **Resolution:** resolved -- option (a) taken. A follow-up completion added `GET /dashboard` to `src/akasha/api/app.py` (`@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)`, byte-for-byte identical pattern to the existing `/node`/`/review`/`/search`/`/sync` routes), following the same "Files-list completion" precedent T8.1-T8.4 and T9.2 each established for their own `app.py` view/route additions. `tests/integration/test_ui_dashboard.py` was simplified to remove its `_register_test_dashboard_route` workaround and now drives the real production route via `page.goto`. `include_in_schema=False` keeps the change out of the OpenAPI surface, so `tests/integration/test_openapi_snapshot.py` is unaffected. `/dashboard` is now reachable on a real running daemon.
