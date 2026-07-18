@@ -4,6 +4,6 @@
     "T10.2"
   ],
   "final_status": "IN_PROGRESS",
-  "notes": "T10.1 finish (worker DONE, verifier pending); T10.2 not yet dispatched. T10.3 held per handoff/build-plan.",
+  "notes": "T10.1 CONFIRMED_DONE, committed (6651334). T10.2: fable ruling resolved both spec-questions (transport=new GET /sync/export endpoint, scope=sync-projection-tracked; mvp-spec.md/build-plan.md amended) and is being committed separately. First T10.2 implementation fleet-worker dispatch was cut off mid-task by an account usage-window limit (API error, no JSON result returned) before touching any src/tests files -- same failure mode the prior overnight run's handoff diagnosed. No worker result to log (none was produced). Re-dispatching.",
   "run_id": "20260718-180539-M10"
 }

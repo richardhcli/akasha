@@ -314,6 +314,7 @@ All authenticated application endpoints are under `/v1`, use JSON, and require h
 | GET  /search?q= | FTS over bodies | |
 | GET  /review?status=open · POST /review/{id}/resolve | queue · resolutions | resolve: human only ∅; `GET /review` returns the FULL open set (optional `?node=<id>` filter) — the §4.9 daily cap-10 is a client/display concern, never an endpoint limit (T8.0) |
 | GET  /sync/status · POST /sync/rescan | per-sync-root state, violations, pauses | |
+| GET  /sync/export | full canonical projection of every managed file | read-only — mutates nothing, not even review items; any token class; items ordered by (sync-root name, POSIX root-relative path), each `{sync_root, relative_path, text}` with `text` the §4.7 canonical render of the hub's current state; top-level `unfiled_node_count` = live nodes present in no managed projection (T10.2 fable ruling, 2026-07-18) |
 | GET/POST /sync/roots | register/list durable filesystem sync roots | human only ∅ |
 | GET/POST/DELETE /tokens | token management | human only ∅ |
 | GET  /metrics | §7 counters (JSON) | |
@@ -322,7 +323,7 @@ The generated OpenAPI JSON is snapshotted at `docs/api-snapshot/openapi.json`; C
 
 ### 4.12 CLI (cli/main.py, typer)
 
-`akasha daemon [--config PATH]` · `akasha new TYPE BODY [--facet name=span ...] [--task]` · `akasha get ID [--as-of ISO]` · `akasha set ID [--body ...] [--class patch|minor|major] [--touch FACET]` · `akasha rm ID [--redirect-to ID...]` · `akasha search Q` · `akasha review [list|resolve ID RESOLUTION]` · `akasha token [create|revoke|list]`. Global flags: `--json` (output schema `cli/v1`, versioned, additive-only), `--dry-run` (mutations return the would-be request), `--token`, `--base-url` (defaults to `http://127.0.0.1:7433`; permits test/non-default daemon endpoints). Omitted `akasha set --class` defaults to `patch`, the least-invalidating class. The review verbs target the §4.11 endpoints even before T7.5 lands them and must fail without a traceback until then. Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 conflict/violation/needs-redirect.
+`akasha daemon [--config PATH]` · `akasha new TYPE BODY [--facet name=span ...] [--task]` · `akasha get ID [--as-of ISO]` · `akasha set ID [--body ...] [--class patch|minor|major] [--touch FACET]` · `akasha rm ID [--redirect-to ID...]` · `akasha search Q` · `akasha review [list|resolve ID RESOLUTION]` · `akasha token [create|revoke|list]` · `akasha export --md DIR`. Global flags: `--json` (output schema `cli/v1`, versioned, additive-only), `--dry-run` (mutations return the would-be request), `--token`, `--base-url` (defaults to `http://127.0.0.1:7433`; permits test/non-default daemon endpoints). Omitted `akasha set --class` defaults to `patch`, the least-invalidating class. The review verbs target the §4.11 endpoints even before T7.5 lands them and must fail without a traceback until then. Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 conflict/violation/needs-redirect. `export` (M10, T10.2 fable ruling 2026-07-18) is a pure client of `GET /v1/sync/export`: it writes each returned file's canonical `text` byte-for-byte to `DIR/<sync_root>/<relative_path>`, and its `--json` summary lists the files written plus the endpoint's `unfiled_node_count`; re-export is byte-stable because the endpoint serves the §4.7 canonical render (T5.8). `daemon` remains the **only** verb that does not speak HTTP — it *is* the server; no other verb may read the store directly (§1 data-flow invariant, PRD §7.11 API-first parity, PRD §7.12 rule 1).
 
 ### 4.13 Web UI (MVP-minimal)
 
@@ -354,7 +355,7 @@ Each milestone lists deliverables, key tasks, and **DoD** (all commands must pas
 
 **M9 — Hardening (dep: M5–M8).** Windows battery items (CRLF, locking retry, AV noise), RSS/CPU sampling into metrics, S0 GC scheduling, log rotation, `--dry-run` coverage, error-message pass. *DoD:* 24-h soak test script (`tests/battery/soak.py`) — RSS < 150 MB, idle CPU ≈ 0%, zero unhandled exceptions.
 
-**M10 — Dogfood instrumentation (dep: all).** Metrics dashboard view (facet coverage, inflow vs resolution + variance, violation rate, crossing rate), export command `akasha export --md DIR`. *DoD:* PRD §8 acceptance stories 1–9 each mapped to a passing test or a checked manual script in `docs/acceptance.md`; **the one-month dogfood gate begins.**
+**M10 — Dogfood instrumentation (dep: all).** Metrics dashboard view (facet coverage, inflow vs resolution + variance, violation rate, crossing rate), export command `akasha export --md DIR` (a pure client of `GET /sync/export` — §4.11/§4.12, T10.2 fable ruling). *DoD:* PRD §8 acceptance stories 1–9 each mapped to a passing test or a checked manual script in `docs/acceptance.md`; **the one-month dogfood gate begins.**
 
 Dependency-critical path: M0→M1→M4→M5→M7→M10; M2→M3 feeds M4/M5; M6, M8 parallelize after their deps.
 

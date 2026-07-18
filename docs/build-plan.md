@@ -760,13 +760,13 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **DoD** — dashboard shows all four metric groups sourced from `/v1/metrics`.
 
 ### T10.2 — Export command (`akasha export --md DIR`)
-- **Goal** — Export the hub to markdown in a target directory.
+- **Goal** — Export the hub to markdown in a target directory, via a new read-only endpoint; the CLI stays a pure HTTP client.
 - **Depends on** — T4.8, T3.3.
-- **Files** — `src/akasha/cli/main.py` (`export` verb), `tests/integration/test_export.py`.
-- **Spec** — M10 (`akasha export --md DIR`).
-- **Steps** — (1) Render every managed node to canonical markdown under `DIR`. (2) Deterministic, canonical output. (3) `--json` summary of what was written.
-- **Verify** — `uv run pytest tests/integration/test_export.py`
-- **DoD** — export writes canonical markdown for all nodes; re-export is byte-stable.
+- **Files** — `src/akasha/api/routes/sync.py` (`GET /sync/export` on the existing router — no `app.py` change), `src/akasha/kernel/store.py` (read-only `unfiled_node_count` helper, rule-0.4 completion per T9.2 precedent), `src/akasha/sync/reconcile.py` (read-only projection mode: suppress `hub_state_for`'s enqueue-on-unprojectable-body side effect for export reads), `src/akasha/cli/main.py` (`export` verb), `docs/api-snapshot/openapi.json` (regenerated in the same change, §6.3 gate), `tests/integration/test_export.py`, `tests/integration/test_api.py` (endpoint coverage).
+- **Spec** — M10 (`akasha export --md DIR`), §4.11 `GET /sync/export`, §4.12 `export` verb (both added by the 2026-07-18 T10.2 fable rulings — see `docs/spec-questions.md` for the full transport + scope resolutions).
+- **Steps** — (1) Endpoint: for every `store.list_sync_files` row with a base snapshot (same skip rule as `ProjectionIndex.build`), serve `render(hub_state_for(parse(base)))` as `{sync_root, relative_path, text}`, ordered by (sync-root name, POSIX root-relative path), plus top-level `unfiled_node_count` (live nodes in no managed projection); strictly read-only — a GET mutates nothing, not even review items; any token class. (2) CLI: pure client of the endpoint — write each `text` byte-for-byte to `DIR/<sync_root>/<relative_path>`. (3) `--json` summary: files written + `unfiled_node_count`. (4) Regenerate the OpenAPI snapshot in the same change.
+- **Verify** — `uv run pytest tests/integration/test_export.py tests/integration/test_openapi_snapshot.py`
+- **DoD** — export writes canonical markdown for every managed projection; re-export is byte-stable; `GET /sync/export` mutates nothing (review queue identical before/after the call, asserted in test); snapshot gate green.
 
 ### T10.3 — Acceptance mapping (`docs/acceptance.md`)
 - **Goal** — Map PRD §8 stories 1–9 each to a passing test or a checked manual script.
