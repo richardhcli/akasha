@@ -1,0 +1,3 @@
+Repo root: /home/richardhcli/projects/personal-projects/akasha. Run id: 20260718-060500-M9. Task id: T9.5.
+
+Independent fleet-verifier check of T9.5 (24h soak test, dispatched as an in-session accelerated proxy + nightly-CI leg per orchestrator judgment call). Checked: real injectable Clock, real production-surface traffic, real reuse of T9.2's metrics.compute_metrics via GET /v1/metrics, real JSON-log error scanning, real fail-fast assertions, soak.py correctly excluded from pytest collection, ci.yml nightly-soak job schedule-gated and YAML-valid, literal verify command re-run independently, full regression gate re-run independently, git diff matches claimed files exactly with metrics.py/reconcile.py untouched, and judged the "no spec_questions" call as defensible.

@@ -1,0 +1,8 @@
+{
+  "cohort": [
+    "T9.5"
+  ],
+  "final_status": "COMPLETE",
+  "notes": "T9.5 CONFIRMED_DONE. Caller fixed a real CI-yaml gating bug the verifier found (schedule trigger missing if-guard on 4 pre-existing jobs) within the same in-scope file before finalizing. M9 is now fully DONE (T9.1-T9.5 all closed).",
+  "run_id": "20260718-060500-M9"
+}

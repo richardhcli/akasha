@@ -4,9 +4,18 @@ on:
   push:
     branches: [main]
   pull_request:
+  # T9.5: nightly trigger for the literal 24-hour soak below. GitHub Actions
+  # schedule events always run against the default branch (main), matching
+  # the build-plan Verify's "(nightly Windows)" parenthetical.
+  schedule:
+    - cron: "0 6 * * *"
 
 jobs:
   check:
+    # Nightly `schedule` fires exist solely to drive `nightly-soak` below;
+    # without this guard every other job would also silently re-run each
+    # night and duplicate the push/PR suite for no reason.
+    if: github.event_name != 'schedule'
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest]
@@ -21,12 +30,14 @@ jobs:
       - run: uv run pytest tests/integration/test_openapi_snapshot.py
 
   windows-gate:
+    if: github.event_name != 'schedule'
     needs: check
     runs-on: ubuntu-latest
     steps:
       - run: echo "windows-latest leg of 'check' is the release gate (spec §3, §6.3)"
 
   ui-smoke:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +49,7 @@ jobs:
       - run: uv run pytest tests/integration/test_ui_smoke.py tests/integration/test_concurrency.py
 
   plugin-build:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -50,6 +62,19 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+  # T9.5: the literal 24-hour soak (build-plan Verify, verbatim), gated to
+  # the schedule trigger only -- a real push/PR run must never block on a
+  # 24h job. Same "code-complete, CI-leg pending first push" framing as
+  # M0/M6/M8: wired and YAML-valid now; its first real execution is whenever
+  # this workflow file first reaches `main` and the nightly schedule fires.
+  nightly-soak:
+    if: github.event_name == 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run python tests/battery/soak.py --hours 24
+
   # Reserved for later milestones:
   # - nightly-battery: `make battery` on a schedule trigger (wired at M5+)
-  # - nightly-soak: long-running soak test (wired at M5+)

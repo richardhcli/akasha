@@ -1,0 +1,19 @@
+{
+  "additional_checks": {
+    "battery": "uv run pytest tests/battery -> 47 passed (soak.py not pytest-collected, confirmed via --collect-only)",
+    "ci_yaml": "python -c \"import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))\" -> YAML_OK",
+    "integration_extra": "uv run pytest tests/integration -> 154 passed",
+    "pyright": "uv run pyright src -> 0 errors, 0 warnings, 0 informations (exit 0)",
+    "ruff": "uv run ruff check src tests -> All checks passed! (exit 0)",
+    "unit_property": "uv run pytest tests/unit tests/property -> 408 passed"
+  },
+  "files_changed": [
+    "tests/battery/soak.py",
+    ".github/workflows/ci.yml"
+  ],
+  "spec_questions": [],
+  "status": "DONE",
+  "verify_command": "uv run python tests/battery/soak.py --hours 0.05",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "{\n \"status\": \"passed\",\n \"log_file\": \"/tmp/akasha-soak-m7a0j0h_.jsonl\",\n \"ticks_completed\": 90,\n \"samples_taken\": 90,\n \"max_rss_bytes\": 65806336,\n \"max_rss_mb\": 62.76,\n \"mean_idle_cpu_pct\": 0.427,\n \"unhandled_exception_count\": 0\n}"
+}

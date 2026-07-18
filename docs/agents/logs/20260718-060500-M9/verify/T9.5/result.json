@@ -1,0 +1,20 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/battery/soak.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": ".github/workflows/ci.yml"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "Full read of soak.py confirms a genuine injectable Clock (RealClock used by both invocations; FakeClock documented but unused by CLI), real production traffic (store.py+reconcile.py bootstrap, then the real FastAPI app via TestClient for every subsequent action), real reuse of T9.2's metrics.compute_metrics via GET /v1/metrics, real JSON-log ERROR/CRITICAL scanning, and real fail-fast SoakFailure assertions for RSS>=150MB, mean idle CPU>=30%, or any unhandled exception. soak.py is excluded from pytest collection purely by filename (no pytest.ini/conftest.py anywhere); tests/battery yields 47 passed. ci.yml's nightly-soak job runs the literal --hours 24 command, schedule-gated, YAML-valid. Independently re-ran --hours 0.05: exit 0, RSS ~63MB, mean idle CPU 0.43%, 0 unhandled exceptions. Full regression gate green: ruff clean, pyright 0 errors, 562 unit+property+integration passed, 47 battery passed. git diff confirms only ci.yml modified + soak.py added; metrics.py/reconcile.py untouched (scope guard held). CAUGHT AND FIXED (by caller, same in-scope file, before finalizing): the new top-level `schedule:` trigger had no `if` gate on the 4 pre-existing jobs (check/windows-gate/ui-smoke/plugin-build), which would have caused them to also silently re-run every night alongside nightly-soak, duplicating the whole push/PR suite. Fixed by adding `if: github.event_name != 'schedule'` to all 4 pre-existing jobs; re-validated YAML, re-ran the literal verify command, and re-ran the full gate (ruff/pyright/562 unit+property+integration/47 battery) after the fix -- all still green. Worker's silence on wiring violation_rate/auto_repairs/sync_cycle_ms live producers (T9.2's forward-looking note) is correct and defensible -- not part of T9.5's own DoD or Files list.",
+  "task_id": "T9.5",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "{\n \"status\": \"passed\",\n \"ticks_completed\": 90,\n \"samples_taken\": 90,\n \"max_rss_bytes\": 65822720,\n \"max_rss_mb\": 62.77,\n \"mean_idle_cpu_pct\": 0.432,\n \"unhandled_exception_count\": 0\n}"
+}
