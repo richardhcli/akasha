@@ -254,7 +254,16 @@ milestone **M6 (Obsidian plugin)** and **M7 (TMS loop)** both unblock on M5.
 | T7.6 | Split/merge inbound-reassignment queue | DONE | Run 20260714-M7. Layered on existing split/merge (T1.6): `store.split_node` now enqueues one reassignment review per live inbound edge (KEEPS the eager auto-reassign-to-first-successor safe default — additive human correction, zero-dangling never regresses); `merge_nodes` enqueues none (single unambiguous survivor). New `store.resolve_redirect_chain` (transitive, cycle-safe) + `store.reassign_edge`; `review.resolve_reassignment(conn, review_id, chosen_successor)` follows redirects transitively, re-points the edge, resolves as still_holds (separate top-level txns, no nesting). `tests/property/test_split_merge.py`: Hypothesis st.data() CHAINED split/merge/resolve sequences (later ops target earlier products) asserting zero **transitively**-dangling live edges after each step, + 4 explicit queue tests (exact-K enqueue on split, zero on merge, multi-hop redirect resolution, post-resolve invariant). `cause_kind="reassignment"` has no enum member → SPEC-QUESTION T7.6 (open; needs spec amendment — reuse of any existing member is unsafe). **Cursor-delegated** (pins pre-resolved). Verify exit 0; full gate green (unit+property 382). |
 | T7.7 | Facets-from-spans capture (`POST /edges` with `facet_span`) | DONE | Run 20260714-M7 (parallel cohort w/ T7.1). `CreateEdgeBody` gains `facet_span: str\|None`; when present, route mints a facet on `dst` via new `store.mint_facet_from_span(conn, node_id, span, *, author, message)` (id8 via existing `ids.mint`, appends `Facet(version=1)`, `commit_node(change_class="minor")`) then forces edge `facet_binding` to that concrete id (non-`*`). 3 holistic integration tests (`-k facet_span`): mint-on-target + concrete binding + neighborhood visibility + zero spurious reviews; no-span path unchanged; justification-binding invariant satisfied. OpenAPI snapshot regenerated (sanctioned command, not hand-edited) — diff is exactly the new field. `Facet.name` not supplied by capture flow → narrowest reading `name=facet_id` + SPEC-QUESTION T7.7 (open). Direct edit (Facet.name ambiguity + cross-module wiring, not Cursor). Verify exit 0 (both cmds); independently re-verified (full gate green). |
 
-## M8 — Web UI (Depends on: M7)
+## M8 — Web UI (Depends on: M7) — **COMPLETE** (all tasks DONE + browser-verified; milestone DoD met)
+
+**Milestone DoD met:** the Playwright smoke test (`tests/integration/test_ui_smoke.py`)
+drives the full loop **create → link with span → break facet → see badge → resolve**
+headless against a live daemon, deterministically. Tasks: T8.0 (review API,
+inserted prerequisite), T8.1 (shell), T8.2 (node view), T8.3 (review view),
+T8.4 (search+sync), T8.5 (smoke test), T8.5b (per-request-connection concurrency
+fix, inserted after the smoke test exposed a data-integrity defect). Every view
+was driven in a real browser against the seed harness. 4 open M8 spec-questions
+(T8.0, T8.1, T8.3, T8.5b) + a verification note on T8.4's pause&diff inspector.
 
 **BINDING M8 rendering architecture (decided at T8.1 via fable design review, 2026-07-17).**
 The `.html` files under `src/akasha/ui/templates/` are **static shells served as-is**;
