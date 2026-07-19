@@ -1,0 +1,11 @@
+{
+  "blocked_reason": null,
+  "files_changed": [
+    "docs/acceptance.md"
+  ],
+  "spec_questions": [],
+  "status": "DONE",
+  "verify_command": "uv run pytest tests/integration/test_ui_dashboard.py tests/unit/test_metrics.py ; uv run pytest tests/integration/test_ui_dashboard.py tests/unit/test_metrics.py tests/integration/test_crash_recovery.py::test_crash_recovery_idempotent",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "dashboard+metrics only: 27 passed, 1 warning in 1.15s (1 test_ui_dashboard + 26 test_metrics). dashboard+metrics+crash-recovery three-file batch: 28 passed, 1 warning in 1.22s (1+26+1). Both commands run independently, each exited 0; both re-run twice during this correction to confirm determinism. (Correction pass over attempt 1, which mis-stated the story-6 two-file command as 28; original full-gate legs \u2014 make check 408, make battery 47, accelerated soak 90/90 ticks 0 exceptions \u2014 unchanged and unaffected by this doc-only edit.)"
+}

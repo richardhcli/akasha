@@ -1,0 +1,15 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/acceptance.md"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "Attempt 1 was CONTRADICTS_CLAIM (story-6 claimed 28, actual 27). Root cause: the doc conflated two batch compositions. Fixed and re-verified. Story-6 row = two-file command (test_ui_dashboard.py + test_metrics.py) = 27 passed (verified exact). Story-9 crash-recovery row = three-file batch (+ test_crash_recovery_idempotent) = 28 passed (verified exact). Summary table consistent. Full local gate re-run clean (408 + 47, ruff/pyright clean). Honesty audit re-confirmed: story 1 <=3s timing still pending manual execution (no fabricated number); story 7 Windows-FS + story 9 24h/real-OS legs still marked pending first CI push / first scheduled nightly run -- no external leg overclaimed. docs/acceptance.md is the only content-bearing change; log/manifest bookkeeping reflects the contradict->fix->reverify cycle.",
+  "task_id": "T10.3",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "RE-VERIFICATION (attempt 2, after count fix). make check: ruff clean, pyright 0/0/0, pytest tests/unit tests/property: 408 passed. make battery: 47 passed. Re-ran the two disputed commands: test_ui_dashboard.py + test_metrics.py -> 27 passed (matches reconciled story-6 count); + test_crash_recovery.py::test_crash_recovery_idempotent (three-file batch) -> 28 passed (matches reconciled story-9 count). Both exact matches."
+}

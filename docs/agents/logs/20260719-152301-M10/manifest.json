@@ -1,8 +1,9 @@
 {
   "cohort": [
-    "T10.2b"
+    "T10.2b",
+    "T10.3"
   ],
-  "final_status": "IN_PROGRESS",
-  "notes": "T10.2b CONFIRMED_DONE by independent verifier; status flipped + committed. T10.3 (acceptance mapping) dispatched next in this run.",
+  "final_status": "COMPLETE",
+  "notes": "T10.2b CONFIRMED_DONE + committed (e1bc58f). T10.3 acceptance.md: attempt-1 verify CONTRADICTS_CLAIM (story-6 count 28 vs real 27); worker reconciled 3 count refs by batch composition; re-verification CONFIRMED_DONE. Both DONE. M10 and the whole MVP build plan now CODE-COMPLETE (Windows-CI/soak/manual legs pending, per M0/M6/M8/M9 framing).",
   "run_id": "20260719-152301-M10"
 }
