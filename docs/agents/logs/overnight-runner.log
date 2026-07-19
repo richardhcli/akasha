@@ -1,0 +1,3 @@
+2026-07-18T05:10:37Z invoking claude -p (model=sonnet) — output -> docs/agents/logs/overnight-invocation-20260718T051037Z.json
+2026-07-18T05:10:39Z invocation failed (exit 1) — see docs/agents/logs/overnight-invocation-20260718T051037Z.json.stderr
+2026-07-18T05:10:39Z parsed an exact usage-window reset time from the output — sleeping 1281s (skips the consecutive-failure guess entirely)
