@@ -3,7 +3,7 @@
     "T10.1",
     "T10.2"
   ],
-  "final_status": "IN_PROGRESS",
-  "notes": "T10.1 CONFIRMED_DONE, committed (6651334). T10.2: fable ruling resolved both spec-questions (transport=new GET /sync/export endpoint, scope=sync-projection-tracked; mvp-spec.md/build-plan.md amended) and is being committed separately. First T10.2 implementation fleet-worker dispatch was cut off mid-task by an account usage-window limit (API error, no JSON result returned) before touching any src/tests files -- same failure mode the prior overnight run's handoff diagnosed. No worker result to log (none was produced). Re-dispatching.",
+  "final_status": "COMPLETE",
+  "notes": "Both T10.1 and T10.2 CONFIRMED_DONE, verified, gated, and committed (6651334, 7eb34b6, 2d0dfdc). T10.3 intentionally held per build-plan/handoff -- its DoD needs real Windows-CI-green rows, the nightly-soak 24h run, and a completed docs/acceptance.md pass, none of which are confirmable from this environment.",
   "run_id": "20260718-180539-M10"
 }
