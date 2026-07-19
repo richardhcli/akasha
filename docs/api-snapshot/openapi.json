@@ -1191,6 +1191,30 @@
         ]
       }
     },
+    "/v1/sync/export": {
+      "get": {
+        "description": "Full canonical projection of every managed file (spec \u00a74.11, task T10.2).\n\nStrictly read-only -- see module docstring. For every ``store.\nlist_sync_files`` row with a base snapshot (same skip rule as\n``ProjectionIndex.build``), parses the base snapshot to a skeleton\n``BlockSet``, projects the hub's current state onto it\n(``reconcile.hub_state_for(..., read_only=True)``), and renders the\ncanonical text (``contract.render.render``) -- identical to the\nrecipe ``Reconciler`` already runs internally, just exposed read-only\nover HTTP. Items are ordered by ``(sync_root name, POSIX\nroot-relative path)``. ``unfiled_node_count`` is the count of live\nnodes whose id never appeared in any parsed base snapshot's block ids\nacross every managed file (``store.list_live_node_ids`` minus the\nunion of parsed skeleton ids collected below).",
+        "operationId": "sync_export_v1_sync_export_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Sync Export V1 Sync Export Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Sync Export",
+        "tags": [
+          "sync"
+        ]
+      }
+    },
     "/v1/sync/rescan": {
       "post": {
         "description": "Trigger a full \u00a74.8 reconcile of every managed file; return a convergence summary.\n\nBuilds one fresh ``Reconciler``/``OriginTracker`` pair per request \u2014 a\nmanual rescan has no live filesystem watcher to share state with (T5.6\nwires the long-lived daemon watcher+reconciler pair separately), and\n\u00a74.8's ``on_change`` is idempotent (verified crash-replay-safe by\nT5.5/T5.6), so a fresh tracker is safe: at worst it fails to suppress\none of *this request's own* write-back echoes, which only matters to a\nlive filesystem watcher, not to this synchronous HTTP call.\n\nA path whose file has since been removed from disk (tracked in\n``sync_files`` but no longer present in the vault) is skipped rather\nthan failing the whole rescan -- one stale entry must not 500 an\notherwise-successful convergence of every other file.",

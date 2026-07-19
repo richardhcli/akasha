@@ -45,20 +45,37 @@ looks that path up in ``store.list_sync_files`` to find the owning
 ``cause_ref`` has no resolvable path (or a path that isn't presently a
 tracked ``sync_files`` row) is not silently dropped — it lands in a
 top-level ``"unresolved"`` bucket instead.
+
+``GET /sync/export`` (task T10.2, spec §4.11, fable ruling 2026-07-18): a
+third read-only ``/sync/*`` row, added by the same-day transport/scope
+rulings logged in ``docs/spec-questions.md``. Carries no ``∅`` marker
+either, so it also uses ``require_auth`` (any token class -- reads are
+never proposal-rewritten). Reuses the exact projection recipe
+``Reconciler``/``ProjectionIndex.build`` already run internally for every
+managed file (parse the base snapshot skeleton, project current hub state
+onto it via ``reconcile.hub_state_for``, render to canonical text) -- this
+route only adds the HTTP surface, never new projection logic. Strictly
+read-only: passes ``read_only=True`` through to ``hub_state_for`` so this
+GET suppresses even that function's enqueue-on-unprojectable-body side
+effect (see its docstring) -- a GET must mutate nothing, not even a
+review-queue insert.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends
 
 from akasha.api import auth
 from akasha.api.deps import get_conn, require_auth
+from akasha.contract.parser import parse
+from akasha.contract.render import render
 from akasha.kernel import store
 from akasha.sync.origin import OriginTracker
-from akasha.sync.reconcile import Reconciler
+from akasha.sync.reconcile import Reconciler, hub_state_for
 
 router = APIRouter(prefix="/v1/sync", tags=["sync"])
 
@@ -190,3 +207,73 @@ def sync_rescan(
         "files_missing": files_missing,
         "reviews_open": reviews_open,
     }
+
+
+def _posix_relative_path(root_path: str, file_path: str) -> str:
+    """POSIX-style (forward-slash) ``file_path`` relative to ``root_path``.
+
+    ``sync_files.path`` is stored as the file's real (absolute, OS-native)
+    filesystem path (see ``reconcile.Reconciler._normalize`` / the watcher,
+    which always deal in absolute paths); §4.11's export row explicitly
+    calls for a "POSIX root-relative path" for the response/output-layout
+    key, so this normalizes ``os.sep`` (``\\`` on Windows) to ``/`` after
+    computing the relative path -- deterministic across platforms.
+    """
+    return os.path.relpath(file_path, root_path).replace(os.sep, "/")
+
+
+@router.get("/export")
+def sync_export(
+    conn: Any = Depends(get_conn),
+    _ctx: auth.AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    """Full canonical projection of every managed file (spec §4.11, task T10.2).
+
+    Strictly read-only -- see module docstring. For every ``store.
+    list_sync_files`` row with a base snapshot (same skip rule as
+    ``ProjectionIndex.build``), parses the base snapshot to a skeleton
+    ``BlockSet``, projects the hub's current state onto it
+    (``reconcile.hub_state_for(..., read_only=True)``), and renders the
+    canonical text (``contract.render.render``) -- identical to the
+    recipe ``Reconciler`` already runs internally, just exposed read-only
+    over HTTP. Items are ordered by ``(sync_root name, POSIX
+    root-relative path)``. ``unfiled_node_count`` is the count of live
+    nodes whose id never appeared in any parsed base snapshot's block ids
+    across every managed file (``store.list_live_node_ids`` minus the
+    union of parsed skeleton ids collected below).
+    """
+    roots_by_id = {root["id"]: root for root in store.list_sync_roots(conn)}
+    items: list[dict[str, Any]] = []
+    filed_ids: set[str] = set()
+
+    for f in store.list_sync_files(conn):
+        sync_root_id = f["sync_root_id"]
+        path = f["path"]
+        root = roots_by_id.get(sync_root_id)
+        if root is None:
+            # No durable sync-root row exists for this sync_files row's
+            # sync_root_id. §4.11's /sync/roots table offers no delete
+            # verb, so this should never happen in practice; skipped
+            # defensively rather than 500ing the whole export on one
+            # orphaned row.
+            continue
+        base_text = store.read_base_snapshot(conn, sync_root_id, path)
+        if base_text is None:
+            continue
+        skeleton = parse(base_text)
+        filed_ids.update(skeleton.blocks.keys())
+        hub_blockset = hub_state_for(conn, skeleton, path=path, read_only=True)
+        text = render(hub_blockset)
+        items.append(
+            {
+                "sync_root": root["name"],
+                "relative_path": _posix_relative_path(root["root_path"], path),
+                "text": text,
+            }
+        )
+
+    items.sort(key=lambda item: (item["sync_root"], item["relative_path"]))
+
+    unfiled_node_count = len(store.list_live_node_ids(conn) - filed_ids)
+
+    return {"items": items, "unfiled_node_count": unfiled_node_count}

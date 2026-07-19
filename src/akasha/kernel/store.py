@@ -2243,3 +2243,32 @@ def earliest_node_created_at(conn: sqlite3.Connection) -> str | None:
     # NULL (Python None) when the table is empty, never a missing row.
     row = conn.execute("SELECT MIN(created_at) FROM nodes").fetchone()
     return row[0]
+
+
+# ---------------------------------------------------------------------------
+# T10.2 read-only ``GET /sync/export`` support (spec §4.11 ``unfiled_node_count``).
+#
+# design note (rule 0.4): added outside T10.2's own Files list narrowly
+# defined route/CLI files -- same recurring precedent as the T4.2/T4.4/T4.5/
+# T4.6/T9.2 store.py touches documented above. ``GET /sync/export`` needs
+# the set of every LIVE node id to diff against the ids it finds while
+# parsing every managed file's base snapshot (a caller-side computation --
+# it requires ``contract.parser.parse``, which lives outside this module,
+# same "arithmetic/derivation stays out of store.py" reasoning as
+# ``count_reviews_created_since``'s sibling helpers above). This function
+# only exposes the raw read; the set-difference against parsed anchor ids
+# is computed by the route (``api/routes/sync.py``).
+# ---------------------------------------------------------------------------
+
+
+def list_live_node_ids(conn: sqlite3.Connection) -> set[str]:
+    """Read-only: ids of every live (non-tombstoned) node.
+
+    ``status='live'`` excludes tombstoned (S1+ soft-deleted) nodes, matching
+    the §4.11 ``unfiled_node_count`` definition ("live nodes present in no
+    managed projection") -- a tombstoned node has nothing left to export
+    regardless of whether some stale anchor for it still lingers in a vault
+    file.
+    """
+    rows = conn.execute("SELECT id FROM nodes WHERE status='live'").fetchall()
+    return {row[0] for row in rows}

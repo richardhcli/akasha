@@ -645,7 +645,11 @@ def _body_line(body: str) -> str:
 
 
 def hub_state_for(
-    conn: sqlite3.Connection, structure: BlockSet, *, path: str | None = None
+    conn: sqlite3.Connection,
+    structure: BlockSet,
+    *,
+    path: str | None = None,
+    read_only: bool = False,
 ) -> BlockSet:
     """Project the hub's CURRENT state onto ``structure``'s skeleton (spec §4.8).
 
@@ -679,6 +683,15 @@ def hub_state_for(
     # text and one violation review item is enqueued so a human can
     # resolve the mismatch (e.g. by splitting the node or editing it back
     # to a single line).
+
+    ``read_only`` (task T10.2, ``GET /sync/export``): when ``True``,
+    suppresses the ``store.enqueue_review`` call above -- a read-only HTTP
+    GET must mutate nothing, not even a review-queue insert. The block's
+    original skeleton text is still kept for that entry either way (the
+    render output is byte-identical regardless of ``read_only``; only the
+    DB write is skipped). Defaults to ``False``, preserving every existing
+    caller's exact prior behavior (``Reconciler.on_change``'s two call
+    sites, which must keep enqueuing the review during a real reconcile).
     """
     new_blocks: dict[str, Block] = {}
     for node_id, block in structure.blocks.items():
@@ -691,22 +704,23 @@ def hub_state_for(
             continue
         line = _body_line(node.body)
         if "\n" in line:
-            store.enqueue_review(
-                conn,
-                node_id,
-                "violation",
-                cause_ref=canonical_json(
-                    {
-                        "code": "E_UNPROJECTABLE_BODY",
-                        "path": path,
-                        "id": node_id,
-                        "message": (
-                            "hub body contains a newline; the line-oriented contract "
-                            "grammar cannot project it -- base text kept for this block"
-                        ),
-                    }
-                ).decode(),
-            )
+            if not read_only:
+                store.enqueue_review(
+                    conn,
+                    node_id,
+                    "violation",
+                    cause_ref=canonical_json(
+                        {
+                            "code": "E_UNPROJECTABLE_BODY",
+                            "path": path,
+                            "id": node_id,
+                            "message": (
+                                "hub body contains a newline; the line-oriented contract "
+                                "grammar cannot project it -- base text kept for this block"
+                            ),
+                        }
+                    ).decode(),
+                )
             new_blocks[node_id] = block
             continue
         update: dict[str, Any] = {"text": line}

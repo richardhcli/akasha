@@ -11,14 +11,16 @@ by the (non-store) contract layer (``contract/render.py``,
 ``contract/linter.py``) for the same reason, so this is not a rule-0.4
 violation.
 
-Verbs (spec §4.12): ``new/get/set/rm/search/review/token/daemon``. Unlike
-every other verb, ``daemon`` does not speak HTTP to an already-running
-server -- it *is* the server process: it loads config, acquires the
-single-instance lock (``akasha.daemon.single_instance_lock``, build-plan
-task T4.9), and serves the API in-process via uvicorn. That work lives in
-``akasha/daemon.py`` (not here) so this module's "pure HTTP client, no
-SQLite" contract holds for every other verb; the ``daemon`` command below
-is a thin dispatch to ``akasha.daemon.serve``.
+Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon``.
+Unlike every other verb, ``daemon`` does not speak HTTP to an
+already-running server -- it *is* the server process: it loads config,
+acquires the single-instance lock (``akasha.daemon.single_instance_lock``,
+build-plan task T4.9), and serves the API in-process via uvicorn. That
+work lives in ``akasha/daemon.py`` (not here) so this module's "pure HTTP
+client, no SQLite" contract holds for every other verb (including
+``export``, task T10.2, a pure client of ``GET /v1/sync/export`` -- see
+its own docstring below); the ``daemon`` command below is a thin dispatch
+to ``akasha.daemon.serve``.
 
 Global flags: ``--json`` (versioned ``cli/v1`` output, additive-only),
 ``--dry-run`` (mutating verbs print the would-be request and exit 0
@@ -63,6 +65,7 @@ from __future__ import annotations
 import json as json_lib
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, NoReturn
 
 import httpx
@@ -453,6 +456,42 @@ def token_list(ctx: typer.Context) -> None:
     state = _state(ctx)
     result = _request(state, "GET", "/v1/tokens")
     _echo_ok(state, result)
+
+
+# --- export ----------------------------------------------------------------
+
+
+@app.command()
+def export(
+    ctx: typer.Context,
+    md: str = typer.Option(
+        ..., "--md", help="target directory to write canonical markdown into"
+    ),
+) -> None:
+    """GET /v1/sync/export (task T10.2, spec §4.12).
+
+    A pure client of the endpoint: writes each returned item's canonical
+    ``text`` byte-for-byte to ``DIR/<sync_root>/<relative_path>`` (creating
+    parent directories as needed), never re-encoding or adding/stripping a
+    newline -- ``text`` is already the §4.7 canonical render, so writing it
+    verbatim is what makes re-export byte-stable (T5.8). Prints a
+    ``--json``-compatible summary of the files written plus the endpoint's
+    ``unfiled_node_count``.
+    """
+    state = _state(ctx)
+    result = _request(state, "GET", "/v1/sync/export")
+    target_dir = Path(md)
+    files_written: list[str] = []
+    for item in result["items"]:
+        dest = target_dir / item["sync_root"] / item["relative_path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(item["text"].encode("utf-8"))
+        files_written.append(str(dest))
+    summary = {
+        "files_written": files_written,
+        "unfiled_node_count": result["unfiled_node_count"],
+    }
+    _echo_ok(state, summary)
 
 
 if __name__ == "__main__":

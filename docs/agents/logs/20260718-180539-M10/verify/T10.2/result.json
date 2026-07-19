@@ -1,0 +1,45 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/api-snapshot/openapi.json"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/api/routes/sync.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/cli/main.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/kernel/store.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/sync/reconcile.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_api.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_export.py"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "All 7 claimed files genuinely changed, no unclaimed source diffs. read_only gate on hub_state_for verified as a real conditional (git diff HEAD~1 shows the exact minimal 'if not read_only:' wrap), not a claimed-but-unused flag; both pre-existing Reconciler.on_change call sites left untouched (still default read_only=False). Control test in test_export.py directly proves the suppression is a real side-effect difference, not dead code. Re-export byte-stability and unfiled_node_count are tested against real seeded scenarios, not asserted in prose. OpenAPI snapshot diff against HEAD~1 is additive-only (new /v1/sync/export path block, zero removed lines beyond the diff header); independently re-running the snapshot generator produced no further diff, confirming genuine (not hand-edited) regeneration. Full gate run independently and green: ruff (all checks passed), pyright (0 errors), tests/unit+tests/property (408 passed), full tests/integration (169 passed), tests/battery (47 passed).",
+  "task_id": "T10.2",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "............                                                             [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.14/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n12 passed, 1 warning in 2.41s"
+}

@@ -865,6 +865,75 @@ def test_sync_status_and_rescan_allow_agent_tokens(api):
     assert resp.json() == {"files_reconciled": 0, "files_missing": 0, "reviews_open": 0}
 
 
+# --- T10.2: GET /sync/export --------------------------------------------
+
+
+def test_sync_export_empty_store_returns_empty_items_and_zero_unfiled(api):
+    client, h = api["client"], api["human"]
+    resp = client.get("/v1/sync/export", headers=h)
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [], "unfiled_node_count": 0}
+
+
+def test_sync_export_returns_canonical_text_and_unfiled_node_count(api, tmp_path):
+    client, h, conn = api["client"], api["human"], api["conn"]
+    root = client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    ).json()
+    filed = _create(client, h, body="filed body").json()
+    _create(client, h, body="unfiled body")  # never put into a base snapshot
+    path = str(tmp_path / "note.md")
+    base_text = render(parse(_managed(f"filed body {contract_anchor(filed['id'])}\n")))
+    base_store.put(conn, root["id"], path, base_text)
+
+    resp = client.get("/v1/sync/export", headers=h)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["items"] == [
+        {"sync_root": "vault", "relative_path": "note.md", "text": base_text}
+    ]
+    assert body["unfiled_node_count"] == 1
+
+
+def test_sync_export_allows_agent_tokens(api):
+    """``/sync/*`` carries no ∅ marker in the spec table -- agents may call it too."""
+    client, agent = api["client"], api["agent"]
+    resp = client.get("/v1/sync/export", headers=agent)
+    assert resp.status_code == 200
+    assert resp.json() == {"items": [], "unfiled_node_count": 0}
+
+
+def test_sync_export_requires_auth_missing_token_401(api):
+    client = api["client"]
+    resp = client.get("/v1/sync/export")
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "E_AUTH"
+
+
+def test_sync_export_mutates_no_review_queue_row(api, tmp_path):
+    """A GET must mutate nothing -- not even a review-queue insert, even in
+    the unprojectable-body scenario that would otherwise enqueue one."""
+    client, h, conn = api["client"], api["human"], api["conn"]
+    root = client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    ).json()
+    node = _create(client, h, body="line one").json()
+    client.patch(
+        f"/v1/nodes/{node['id']}",
+        json={"body": "line one\nline two", "change_class": "patch"},
+        headers=h,
+    )
+    path = str(tmp_path / "note.md")
+    base_text = render(parse(_managed(f"line one {contract_anchor(node['id'])}\n")))
+    base_store.put(conn, root["id"], path, base_text)
+
+    open_before = store.find_open_reviews(conn)
+    resp = client.get("/v1/sync/export", headers=h)
+    assert resp.status_code == 200
+    open_after = store.find_open_reviews(conn)
+    assert open_after == open_before
+
+
 def test_review_list_open_returns_seeded_reviews(api):
     client, h, conn = api["client"], api["human"], api["conn"]
     node = _create(client, h).json()
