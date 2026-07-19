@@ -304,7 +304,7 @@ All authenticated application endpoints are under `/v1`, use JSON, and require h
 |---|---|---|
 | GET  /health | liveness, version, contract version | no auth |
 | GET  /nodes/{id} | node + maturity (+`?as_of=ISO`) | |
-| POST /nodes | create node (type, body, facets?, task_state?) | |
+| POST /nodes | create node (type, body, facets?, task_state?) | 201 response carries `contradiction_candidates` (see the surfacing paragraph below — story 2, T10.2b) |
 | PATCH /nodes/{id} | commit edit (body/facets, change_class, facets_touched, message) | |
 | DELETE /nodes/{id} | S0 delete; S1+ needs `redirect_to` body | 409 `E_NEEDS_REDIRECT` |
 | GET  /nodes/{id}/history · /neighborhood?hops=1 | commit DAG · 1-hop graph | |
@@ -318,6 +318,8 @@ All authenticated application endpoints are under `/v1`, use JSON, and require h
 | GET/POST /sync/roots | register/list durable filesystem sync roots | human only ∅ |
 | GET/POST/DELETE /tokens | token management | human only ∅ |
 | GET  /metrics | §7 counters (JSON) | |
+
+**Contradiction surfacing at capture (PRD §8 story 2, non-LLM — T10.2b fable ruling, 2026-07-18).** Every human-token `POST /nodes` 201 response carries an additive field `contradiction_candidates: []` — non-empty only when the created node's `type == "claim"`. Candidates are computed by a **non-LLM FTS5 heuristic reusing the existing `nodes_fts` index via a read-only `kernel/store.py` helper** (no new index, no new table, no embedding, no model call — PRD §5 F-list discipline: the truth path stays machine-free): the new claim's canonicalized body is tokenized to alphanumeric terms, each FTS5-quoted and OR-joined (an empty term set yields `[]`), matched against `nodes_fts` ranked by bm25, filtered to `status='live'` nodes of `type='claim'`, excluding the new node itself; a byte-equal canonical body (exact duplicate) ranks first; cap **5**. Each candidate is `{node_id, body, created_at, evidence: [{node_id, body}]}` — text, date, and attached evidence per story 2 — where `evidence` lists the Evidence-type dst nodes of the candidate's live `cites` edges. The surfacing is **strictly read-only**: it enqueues no review item, files no proposal, writes nothing; adjudication uses the existing machinery (`POST /edges` with `edge_type=contradicts`, or later review resolution), and deferral is simply taking no action (narrowest reading of story 2's "both recorded" — see `docs/spec-questions.md` T10.3). Agent-token creates are proposal-rewritten to 202 per the preamble above and never carry candidates (no node exists yet). Verifier: `tests/integration/test_contradiction_surfacing.py` (§9 row 2).
 
 The generated OpenAPI JSON is snapshotted at `docs/api-snapshot/openapi.json`; CI fails if the served spec diverges without the snapshot being deliberately updated in the same PR (PRD §7.12 rule 1).
 
@@ -355,7 +357,7 @@ Each milestone lists deliverables, key tasks, and **DoD** (all commands must pas
 
 **M9 — Hardening (dep: M5–M8).** Windows battery items (CRLF, locking retry, AV noise), RSS/CPU sampling into metrics, S0 GC scheduling, log rotation, `--dry-run` coverage, error-message pass. *DoD:* 24-h soak test script (`tests/battery/soak.py`) — RSS < 150 MB, idle CPU ≈ 0%, zero unhandled exceptions.
 
-**M10 — Dogfood instrumentation (dep: all).** Metrics dashboard view (facet coverage, inflow vs resolution + variance, violation rate, crossing rate), export command `akasha export --md DIR` (a pure client of `GET /sync/export` — §4.11/§4.12, T10.2 fable ruling). *DoD:* PRD §8 acceptance stories 1–9 each mapped to a passing test or a checked manual script in `docs/acceptance.md`; **the one-month dogfood gate begins.**
+**M10 — Dogfood instrumentation (dep: all).** Metrics dashboard view (facet coverage, inflow vs resolution + variance, violation rate, crossing rate), export command `akasha export --md DIR` (a pure client of `GET /sync/export` — §4.11/§4.12, T10.2 fable ruling), contradiction surfacing at capture (§4.11 surfacing paragraph — story 2, T10.2b fable ruling; the gap was found by T10.3's audit). *DoD:* PRD §8 acceptance stories 1–9 each mapped to a passing test or a checked manual script in `docs/acceptance.md`; **the one-month dogfood gate begins.**
 
 Dependency-critical path: M0→M1→M4→M5→M7→M10; M2→M3 feeds M4/M5; M6, M8 parallelize after their deps.
 
@@ -394,11 +396,11 @@ Explicit non-goals for MVP (do not build even if easy): LLM calls of any kind, e
 
 | PRD story | Verified by |
 |---|---|
-| 1 capture ≤3s (syntax path) | M4 CLI/API timing test + manual script |
-| 2 contradiction surface (non-LLM) | M7 near-duplicate FTS heuristic test |
-| 3 invalidation on major edit | `test_tms.py::test_facet_break_flags_subscribers` |
+| 1 capture ≤3s (syntax path) | manual capture-timing script (the DoD's checked-manual-script leg — no automated timing test exists; see `docs/spec-questions.md` T10.3 citation-drift entry) |
+| 2 contradiction surface (non-LLM) | `tests/integration/test_contradiction_surfacing.py` (T10.2b) |
+| 3 invalidation on major edit | `test_tms.py::test_review_revised_reclassifies_and_cascades` + `test_tms.py::test_s1_node_retraction_flags_dependents`; `*`-binding-on-any-break: `tests/unit/tms/test_invalidate.py` (coverage distributed per the M7 milestone note) |
 | 4 split/merge zero dangling | property test in M7 |
-| 5 as-of time travel | `test_api.py::test_as_of` |
+| 5 as-of time travel | `test_api.py::test_nodes_get_as_of_returns_earlier_body` |
 | 6 review economy (cap, dashboard) | M10 dashboard + metrics assertions |
 | 7 contract sync losslessness | M5 battery E01–E20 |
 | 8 tasks + supertask trigger + S0 lifecycle | `test_tms.py::test_supertask_flag`, battery E06/E08 |

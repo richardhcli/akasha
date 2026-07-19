@@ -768,20 +768,29 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 - **Verify** — `uv run pytest tests/integration/test_export.py tests/integration/test_openapi_snapshot.py`
 - **DoD** — export writes canonical markdown for every managed projection; re-export is byte-stable; `GET /sync/export` mutates nothing (review queue identical before/after the call, asserted in test); snapshot gate green.
 
+### T10.2b — Contradiction surfacing at capture (story 2, non-LLM)
+- **Goal** — On human-token claim creation, `POST /v1/nodes` returns exact/near-duplicate candidate claims (existing claim's text, date, and attached evidence) via a non-LLM FTS5 heuristic over the **existing** `nodes_fts` index; display-only and strictly read-only.
+- **Depends on** — T1.4, T4.4 (both DONE). *Inserted 2026-07-19 by the story-2 gap fable ruling: spec §9 row 2 named an "M7 near-duplicate FTS heuristic test" that no M7 task (T7.1–T7.7) ever produced, and no contradiction-surfacing code exists anywhere in `src/akasha/` — yet PRD §8.2, PRD §9's Phase-2 exit ("contradiction surfacing for exact/near-duplicate claims (non-LLM heuristics first)"), PRD §11's first-contradiction-within-week-one Value metric, and PRD §2's north-star paragraph all require it. See `docs/spec-questions.md` T10.3 entries.*
+- **Files** — `src/akasha/api/routes/nodes.py` (201 response field), `src/akasha/kernel/store.py` (read-only `find_contradiction_candidates` helper — rule-0.4 completion, T9.2 precedent), `docs/api-snapshot/openapi.json` (regenerated in the same change via the sanctioned command, §6.3 gate), `tests/integration/test_contradiction_surfacing.py` (new).
+- **Spec** — §4.11 `POST /nodes` row + the contradiction-surfacing paragraph (both added by the same ruling), §9 row 2, PRD §8.2, PRD §5 F-list (no LLM anywhere in the truth path).
+- **Steps** — (1) `store.py`: read-only helper — tokenize the new claim's canonicalized body to alphanumeric terms, FTS5-quote each, OR-join (empty term set ⇒ `[]`); `nodes_fts MATCH` ranked by bm25; filter `type='claim' AND status='live'`, exclude the new node itself; byte-equal canonical body ranks first; cap 5. Evidence per candidate via the existing `find_live_edges(src=candidate, edge_type='cites')` filtered to Evidence-type dst nodes. No write verbs, no transaction, no new table/index (schema stays frozen per rule 2). (2) `routes/nodes.py`: compute only on the human 201 path; field present on every 201 (`[]` for non-claim types); the agent 202 proposal path (T4.6) is untouched. (3) Regenerate the OpenAPI snapshot. (4) Tests: exact-duplicate ranks first and carries evidence text + `created_at`; near-duplicate (shared terms) surfaces; non-claim create ⇒ `[]`; agent create ⇒ 202 unchanged, no candidates; **read-only proof** — `review_queue` contents and node/commit state byte-identical before/after the surfacing computation (mirror T10.2's read-only-gate test discipline); an FTS5-syntax-hostile body (quotes, operators, only punctuation) returns 201 with a sane candidate list, never a 500.
+- **Verify** — `uv run pytest tests/integration/test_contradiction_surfacing.py tests/integration/test_openapi_snapshot.py`
+- **DoD** — exact + near-duplicate candidates returned with text/date/evidence on human claim creation; zero writes from the surfacing path (asserted in test); no new schema, index, or `cause_kind`; snapshot gate green; `make check` green.
+
 ### T10.3 — Acceptance mapping (`docs/acceptance.md`)
 - **Goal** — Map PRD §8 stories 1–9 each to a passing test or a checked manual script.
-- **Depends on** — all prior milestones DONE.
+- **Depends on** — all prior milestones DONE; T10.2b (row 2's verifier).
 - **Files** — `docs/acceptance.md`.
 - **Spec** — §9 acceptance table, M10 DoD.
 - **Steps** — (1) For each story below, record the verifying test/script and confirm it is green. (2) Any gap is a `# SPEC-QUESTION:`, not a silent pass.
 
   | PRD story | Verified by |
   |---|---|
-  | 1 capture ≤3s (syntax path) | M4 CLI/API timing test + manual script (T4.4/T4.8) |
-  | 2 contradiction surface (non-LLM) | M7 near-duplicate FTS heuristic test |
-  | 3 invalidation on major edit | `test_tms.py::test_facet_break_flags_subscribers` (T7.1) |
+  | 1 capture ≤3s (syntax path) | manual capture-timing script over the T4.8 CLI path — the DoD's checked-manual-script leg; no automated timing test exists (grep-verified 2026-07-19), so the row stays *pending manual execution* until a human runs it (see `docs/spec-questions.md` T10.3 citation-drift entry) |
+  | 2 contradiction surface (non-LLM) | `tests/integration/test_contradiction_surfacing.py` (T10.2b) |
+  | 3 invalidation on major edit | `test_tms.py::test_review_revised_reclassifies_and_cascades` + `test_tms.py::test_s1_node_retraction_flags_dependents` (T7.5/T7.2b); `*`-binding-on-any-break: `tests/unit/tms/test_invalidate.py` (T7.1) — coverage distributed per the M7 milestone note |
   | 4 split/merge zero dangling | property test `test_split_merge.py` (T7.6) |
-  | 5 as-of time travel | `test_api.py::test_as_of` (T4.4) |
+  | 5 as-of time travel | `test_api.py::test_nodes_get_as_of_returns_earlier_body` (T4.4) |
   | 6 review economy (cap, dashboard) | dashboard + metrics assertions (T10.1/T9.2) |
   | 7 contract sync losslessness | battery E01–E20 (T5.8) |
   | 8 tasks + supertask trigger + S0 lifecycle | `test_tms.py::test_supertask_flag` (T7.4), battery E06/E08 |
