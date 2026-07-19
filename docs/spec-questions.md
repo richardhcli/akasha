@@ -24,14 +24,16 @@ M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 M6 (1 entry: T6.5, 2026-07-14), and M8 (4 entries: T8.0/T8.1/T8.3/T8.5b,
 2026-07-18 via fable rulings).
 
-**Open questions: 10** (6 from M7, logged 2026-07-14; 4 from M9/T9.2+T9.3,
+**Open questions: 11** (6 from M7, logged 2026-07-14; 4 from M9/T9.2+T9.3,
 logged 2026-07-18; 3 from M10, logged 2026-07-18, all now RESOLVED in place —
 T10.1 2026-07-18 via a Files-list completion, and both T10.2 entries
 (transport, scope) 2026-07-18 via fable rulings (see their entries; kept here
 pending the M10-close batch move); plus 2 from T10.3's acceptance audit,
 logged AND RESOLVED in place 2026-07-19 via fable rulings — the story-2
 implementation gap (→ new task T10.2b) and the story→verifier citation drift
-(→ both tables corrected). T7.2 delete_node
+(→ both tables corrected); plus 1 new **open** entry from implementing T10.2b
+(2026-07-19): the "Evidence-type" ambiguity, narrowest reading taken and
+proceeded, needing an eventual product/spec decision. T7.2 delete_node
 gap RESOLVED 2026-07-15 via follow-up T7.2b; the 4 M8 questions
 (T8.0/T8.1/T8.3/T8.5b) RESOLVED 2026-07-18 via fable rulings (see
 `docs/archived-questions.md`). The remaining 6 M7 entries and the 4 M9
@@ -120,3 +122,9 @@ entries need a product/spec decision before archiving.
 - **Details (grep-verified against the test tree, 2026-07-19):** Row 3 named `test_tms.py::test_facet_break_flags_subscribers` — no test of that name exists; per the M7 milestone note the coverage is deliberately distributed: `test_review_revised_reclassifies_and_cascades` and `test_s1_node_retraction_flags_dependents` in `tests/integration/test_tms.py`, with `*`-binding-on-any-break in `tests/unit/tms/test_invalidate.py`. Row 5 named `test_api.py::test_as_of` — the actual test is `test_nodes_get_as_of_returns_earlier_body`. Row 1 named an "M4 CLI/API timing test" — no timing/elapsed assertion exists anywhere in `tests/integration/` (the only perf test is T1.9's neighborhood p95), so story 1 rests entirely on the M10 DoD's alternative leg ("a passing test **or** a checked manual script").
 - **Narrowest reading taken:** rows 3/5 are name drift over existing, green coverage — corrected citations, no code change needed. Row 1 is a real absence of the automated leg: `docs/acceptance.md` must carry/reference the manual capture-timing script and word the row *pending manual execution* until a human actually runs it (an unchecked script must never be represented as checked — vision invariant 5, "flagged, never guessed").
 - **Resolution:** **RESOLVED 2026-07-19 (fable ruling).** Both tables corrected in the same stroke (rows 1/2/3/5; row 2 via the T10.2b entry above). An automated ≤3s capture-timing test remains an optional future hardening item, not an M10 DoD requirement — the DoD's manual-script leg suffices, provided the acceptance doc reports its checked/unchecked status honestly.
+
+## T10.2b — "Evidence-type dst nodes" undefined against the closed NodeType enum
+- **Where:** `src/akasha/kernel/store.py`, `find_contradiction_candidates` (inline `# SPEC-QUESTION:` comment at the evidence-collection site).
+- **Details:** §4.11's contradiction-surfacing paragraph says a candidate's `evidence` list contains "the Evidence-type dst nodes of the candidate's live `cites` edges," but never defines "Evidence-type" against the closed `NodeType` enum (`{entity, definition, claim, relation, proof, evidence, task}`, `kernel/model.py`). Both `evidence` and `proof` are plausibly "evidence-type": a `proof` node cited as support would justify a claim just as an `evidence` node does.
+- **Narrowest reading taken:** literal `node_type == "evidence"` only, excluding `proof`. Implemented and shipped that way (T10.2b, run `20260719-152301-M10`). Widening to `{"evidence", "proof"}` is a deferrable product decision — surface it only if dogfood feedback shows proof-typed citations should also appear in the contradiction-evidence list. No schema/enum change either way (both are existing `NodeType` members).
+- **Resolution:** open — narrowest reading taken and proceeded (non-blocking); needs an eventual product/spec confirmation of whether `proof` nodes count as evidence for surfacing.

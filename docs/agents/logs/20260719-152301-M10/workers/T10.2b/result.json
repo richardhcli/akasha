@@ -1,0 +1,14 @@
+{
+  "files_changed": [
+    "src/akasha/kernel/store.py",
+    "src/akasha/api/routes/nodes.py",
+    "tests/integration/test_contradiction_surfacing.py"
+  ],
+  "spec_questions": [
+    "## T10.2b: \"Evidence-type dst nodes\" ambiguity for contradiction-candidate evidence\n\n**Location:** src/akasha/kernel/store.py, find_contradiction_candidates (inline # SPEC-QUESTION: comment)\n**Details:** \u00a74.11's surfacing paragraph says a candidate's `evidence` list contains \"the Evidence-type dst nodes of the candidate's live cites edges\" but never defines \"Evidence-type\" against the closed NodeType enum ({entity, definition, claim, relation, proof, evidence, task}). Narrowest reading taken: literal node_type == \"evidence\" only, excluding \"proof\" (a distinct enum member) even though proof nodes can also be cited as support. Widening to {\"evidence\",\"proof\"} is a future decision if product feedback shows proof-typed citations should also surface."
+  ],
+  "status": "DONE",
+  "verify_command": "uv run pytest tests/integration/test_contradiction_surfacing.py tests/integration/test_openapi_snapshot.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "9 passed, 1 warning in 0.60s"
+}

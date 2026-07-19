@@ -31,6 +31,7 @@ live only on the ``nodes`` row (not versioned by commits).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1379,6 +1380,104 @@ def search(conn: sqlite3.Connection, q: str) -> list[Node]:
         "SELECT id FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank", (q,)
     ).fetchall()
     return [get_node(conn, row[0]) for row in rows]
+
+
+_CONTRADICTION_TERM_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def find_contradiction_candidates(
+    conn: sqlite3.Connection,
+    node_id: str,
+    body: str,
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Read-only: exact/near-duplicate LIVE claim candidates for a just-created claim.
+
+    Non-LLM FTS5 heuristic backing "Contradiction surfacing at capture"
+    (spec §4.11, PRD §8 story 2, T10.2b fable ruling, added outside this
+    task's own Files list per the T9.2/T10.2 rule-0.4 recurring precedent —
+    ``routes/nodes.py``'s human ``POST /nodes`` 201 path needs a read-only
+    lookup and no existing store function exposes one). Reuses the
+    EXISTING ``nodes_fts`` index verbatim — no new table, index, embedding,
+    or model call (PRD §5 F-list: the truth path stays machine-free).
+
+    ``body`` is canonicalized here (this function's own responsibility,
+    mirroring every other store.py entry point that canonicalizes on the
+    way in) and tokenized to alphanumeric terms; each term is FTS5-quoted
+    (double-quoted — terms are alnum-only by construction, so no
+    embedded-quote escaping is ever needed) and OR-joined into one MATCH
+    query. An empty term set (e.g. a body of only punctuation/whitespace)
+    issues no MATCH at all and returns ``[]`` immediately — this is the
+    documented defense against FTS5 raising ``sqlite3.OperationalError`` on
+    a raw, un-tokenized body containing quotes/colons/hyphens/bareword
+    operators (AND/OR/NOT/NEAR).
+
+    Matches are filtered to live claims (``node_type='claim' AND
+    status='live'``), excluding ``node_id`` itself (the node that was just
+    created and is already present in ``nodes_fts``, inserted by
+    ``create_node`` in the same request). Ranked by FTS5 bm25 (lower score
+    = better match), with one explicit override: a byte-equal canonical
+    body (exact duplicate) is always sorted first regardless of its raw
+    bm25 score — the spec paragraph requires "a byte-equal canonical body
+    ranks first" as a hard guarantee, and bm25 alone does not guarantee
+    that for every term distribution, so exact-match is an explicit
+    primary sort key ahead of the bm25 secondary key. Capped at ``limit``
+    (default 5, per spec).
+
+    Each returned dict is ``{node_id, body, created_at, evidence}`` where
+    ``evidence`` is every ``{node_id, body}`` of the candidate's live
+    ``cites``-edge destination nodes, queried via the existing
+    ``find_live_edges`` (no new query pattern).
+
+    # SPEC-QUESTION: the spec paragraph says "evidence lists the
+    # Evidence-type dst nodes of the candidate's live cites edges" without
+    # defining "Evidence-type" against the closed NodeType enum
+    # ({entity,definition,claim,relation,proof,evidence,task}). Narrowest
+    # reading taken here: literal node_type == "evidence" only (NOT
+    # "proof", a distinct enum member) — see docs/spec-questions.md's
+    # T10.2b entry.
+
+    Strictly read-only: issues only SELECT statements (via this function
+    and the ``find_live_edges``/``get_node`` helpers it calls), no INSERT/
+    UPDATE/DELETE, no transaction, no new schema.
+    """
+    canonical_body = canonicalize_text(body)
+    terms = _CONTRADICTION_TERM_RE.findall(canonical_body)
+    if not terms:
+        return []
+    match_query = " OR ".join(f'"{term}"' for term in terms)
+    rows = conn.execute(
+        "SELECT nodes_fts.id, nodes_fts.body, nodes.created_at, bm25(nodes_fts) AS score "
+        "FROM nodes_fts JOIN nodes ON nodes.id = nodes_fts.id "
+        "WHERE nodes_fts MATCH ? AND nodes.node_type='claim' AND nodes.status='live' "
+        "AND nodes_fts.id != ?",
+        (match_query, node_id),
+    ).fetchall()
+
+    def _sort_key(row: Any) -> tuple[int, float]:
+        cand_body, score = row[1], row[3]
+        is_exact = 0 if cand_body == canonical_body else 1
+        return (is_exact, score)
+
+    ranked = sorted(rows, key=_sort_key)[:limit]
+
+    candidates: list[dict[str, Any]] = []
+    for cand_id, cand_body, created_at, _score in ranked:
+        evidence: list[dict[str, Any]] = []
+        for edge in find_live_edges(conn, src=cand_id, edge_type="cites"):
+            dst_node = get_node(conn, edge.dst)
+            if dst_node.node_type == "evidence":
+                evidence.append({"node_id": dst_node.id, "body": dst_node.body})
+        candidates.append(
+            {
+                "node_id": cand_id,
+                "body": cand_body,
+                "created_at": created_at,
+                "evidence": evidence,
+            }
+        )
+    return candidates
 
 
 def append_audit(

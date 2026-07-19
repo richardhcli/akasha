@@ -117,7 +117,16 @@ def create_node(
         )
     except (ValueError, ValidationError) as exc:
         raise ApiError(400, "E_INVALID", str(exc)) from exc
-    return _node_out(conn, node)
+    # Contradiction surfacing at capture (spec §4.11, PRD §8 story 2, T10.2b
+    # fable ruling): additive on the human 201 path only, non-empty only for
+    # freshly-created claims; strictly read-only (no proposal, no review
+    # item, no write of any kind beyond the create_node above).
+    candidates = (
+        store.find_contradiction_candidates(conn, node.id, node.body)
+        if node.node_type == "claim"
+        else []
+    )
+    return {**_node_out(conn, node), "contradiction_candidates": candidates}
 
 
 @router.patch("/nodes/{node_id}")
