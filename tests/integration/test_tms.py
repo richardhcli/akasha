@@ -239,7 +239,13 @@ def test_supertask_flag(api):
         == []
     )
 
-    # (4) close the last remaining open child.
+    # (4) close the last remaining open child. Task T10.2c note: since
+    # store.commit_node's own commit-path wiring now evaluates
+    # all_subtasks_closed for the committed node's parent supertask(s) in
+    # the SAME transaction (see store.commit_node's T10.2c comment), this
+    # single commit_node call is itself what fires the trigger — flagging
+    # the supertask is a direct, immediate side effect of this commit, not
+    # something a caller must separately trigger by calling evaluate().
     store.commit_node(
         conn,
         children[2]["id"],
@@ -249,20 +255,19 @@ def test_supertask_flag(api):
         author="test",
     )
 
-    # (5) fires once: enqueue subtasks_closed; supertask stays open.
-    result = triggers.evaluate(
-        conn, supertask["id"], triggers.TriggerContext(now="2026-07-14")
-    )
-    assert len(result) == 1
-    assert result[0]["cause_kind"] == "subtasks_closed"
-    assert result[0]["node_id"] == supertask["id"]
+    # (5) fires exactly once, as a side effect of the commit above: enqueue
+    # subtasks_closed; supertask stays open.
     open_reviews = store.find_open_reviews(
         conn, node_id=supertask["id"], cause_kind="subtasks_closed"
     )
     assert len(open_reviews) == 1
+    assert open_reviews[0]["cause_kind"] == "subtasks_closed"
+    assert open_reviews[0]["node_id"] == supertask["id"]
     assert store.get_node(conn, supertask["id"]).task_state == "open"
 
-    # (6) idempotent: second evaluate enqueues nothing.
+    # (6) idempotent: a manual evaluate() after the fact finds the review
+    # already open (via its own find_open_reviews gate) and enqueues
+    # nothing new — the commit-path wiring got there first.
     result = triggers.evaluate(
         conn, supertask["id"], triggers.TriggerContext(now="2026-07-14")
     )
@@ -273,6 +278,109 @@ def test_supertask_flag(api):
     assert len(open_reviews_again) == 1
 
     # (7) sole lasting side effect is the review row — task_state still open.
+    assert store.get_node(conn, supertask["id"]).task_state == "open"
+
+
+# --- T10.2c: all_subtasks_closed wired into the REAL commit path -------------
+#
+# T7.4's test_supertask_flag above (edited by T10.2c: see its step (4)/(5)
+# comments) already exercises store.commit_node as its closing mechanism, so
+# the wiring this task adds is implicitly covered there too. This test is
+# the task's dedicated, explicit end-to-end coverage: it never calls
+# triggers.evaluate() at all (unlike test_supertask_flag, which still uses
+# it in step (6) to check idempotence) -- every assertion is driven purely
+# through store.commit_node, the real production commit path (the same
+# function PATCH /nodes and the sync/reconcile checkbox-toggle path both
+# call). PatchNodeBody (api/routes/nodes.py) does not accept task_state
+# today (out of this task's Files list to add), so store.commit_node is the
+# narrowest "real path" available, exactly as api/routes/nodes.py's own
+# patch_node route uses it.
+
+
+def test_supertask_flag_fires_via_real_commit_path_not_direct_evaluate(api):
+    """Drives story 8 end-to-end through store.commit_node only (no evaluate() call)."""
+    client, h, conn = api["client"], api["human"], api["conn"]
+
+    supertask = _create_node(
+        client, h, node_type="task", body="real-path supertask", task_state="open"
+    )
+    children = [
+        _create_node(client, h, node_type="task", body=f"real-path child-{i}", task_state="open")
+        for i in range(3)
+    ]
+    for child in children:
+        resp = client.post(
+            "/v1/edges",
+            json={
+                "src": supertask["id"],
+                "dst": child["id"],
+                "edge_type": "composes",
+                "facet_binding": None,
+                "provenance": "human",
+            },
+            headers=h,
+        )
+        assert resp.status_code == 201
+
+    def open_reviews():
+        return store.find_open_reviews(
+            conn, node_id=supertask["id"], cause_kind="subtasks_closed"
+        )
+
+    # (b) not flagged while any subtask remains open.
+    for child in children[:2]:
+        store.commit_node(
+            conn,
+            child["id"],
+            task_state="done",
+            change_class="patch",
+            facets_touched=[],
+            author="test",
+        )
+        assert open_reviews() == []
+
+    # (a) closing the LAST open subtask through the real commit path flags
+    # the parent exactly once, as a direct side effect of that one commit.
+    store.commit_node(
+        conn,
+        children[2]["id"],
+        task_state="done",
+        change_class="patch",
+        facets_touched=[],
+        author="test",
+    )
+    first_pass = open_reviews()
+    assert len(first_pass) == 1
+    assert first_pass[0]["cause_kind"] == "subtasks_closed"
+    assert first_pass[0]["node_id"] == supertask["id"]
+
+    # (d) the supertask's own task_state is never auto-closed by this path.
+    assert store.get_node(conn, supertask["id"]).task_state == "open"
+
+    # (c) re-committing after all subtasks are already closed (e.g. an
+    # idempotent re-application of the same "done" state, or an unrelated
+    # patch commit on an already-done child) must not enqueue a duplicate.
+    store.commit_node(
+        conn,
+        children[2]["id"],
+        task_state="done",
+        change_class="patch",
+        facets_touched=[],
+        author="test",
+    )
+    store.commit_node(
+        conn,
+        children[0]["id"],
+        new_body="child-0, edited after supertask already flagged",
+        change_class="patch",
+        facets_touched=[],
+        author="test",
+    )
+    second_pass = open_reviews()
+    assert len(second_pass) == 1
+    assert second_pass[0]["id"] == first_pass[0]["id"]  # same row, not a duplicate
+
+    # (d) still never auto-closed after the extra commits above.
     assert store.get_node(conn, supertask["id"]).task_state == "open"
 
 

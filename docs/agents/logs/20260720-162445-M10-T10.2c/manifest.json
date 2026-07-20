@@ -1,0 +1,8 @@
+{
+  "cohort": [
+    "T10.2c"
+  ],
+  "final_status": "COMPLETE",
+  "notes": "T10.2c: wired \u00a74.10 all_subtasks_closed trigger into store.commit_node's real transaction path (story 8). Solo cohort per fleet-orchestrator scan. Worker CONFIRMED_DONE by independent verifier (14 passed on named Verify; full regression 664 passed whole tree). docs/acceptance.md row 8 PARTIAL->GREEN, task-status.md T10.2c TODO->DONE, M10 header IN PROGRESS->CODE-COMPLETE.",
+  "run_id": "20260720-162445-M10-T10.2c"
+}

@@ -1,0 +1,15 @@
+{
+  "files_changed": [
+    "src/akasha/kernel/store.py",
+    "tests/integration/test_tms.py",
+    "docs/acceptance.md",
+    "docs/agents/task-status.md"
+  ],
+  "notes": "In commit_node, after the major-change-class invalidate block, still inside the same with-conn transaction, added a block that walks the committed node's live composes parent edge(s); for each task-type parent, rebuilds its live task-children set and evaluates triggers.CONDITIONS['all_subtasks_closed'] directly, guarded by find_open_reviews, enqueues via enqueue_review_within_transaction (not standalone enqueue_review, to avoid double-committing the in-flight transaction -- T7.2 gotcha). Deferred import of tms.triggers mirrors the existing invalidate pattern. Edited T7.4's test_supertask_flag (old assertion pattern broke because the enqueue now fires as a side effect of the last child's commit) and added test_supertask_flag_fires_via_real_commit_path_not_direct_evaluate covering all four DoD legs. Full regression: ruff clean, pyright 0 errors, tests/unit+property 408 passed, tests/integration 176 passed, tests/battery 47 passed, whole tree 664 passed. Updated docs/acceptance.md row 8 PARTIAL->GREEN with fresh counts; flipped T10.2c TODO->DONE in task-status.md; M10 header corrected to CODE-COMPLETE. Flagged (not fixed, separate pre-existing gap): PatchNodeBody has no task_state field so PATCH /nodes alone cannot close a task today.",
+  "spec_questions": [],
+  "status": "DONE",
+  "task_id": "T10.2c",
+  "verify_command": "uv run pytest tests/integration/test_tms.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "14 passed, 1 warning in 0.78s"
+}

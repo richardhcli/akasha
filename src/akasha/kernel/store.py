@@ -953,6 +953,65 @@ def commit_node(
 
             invalidate.invalidate(conn, node_id, commit_hash, set(facets_touched))
 
+        # task T10.2c (spec §4.10a, PRD §8 story 8): evaluate the
+        # `all_subtasks_closed` trigger condition for node_id's parent
+        # supertask(s) after EVERY commit (unlike the `invalidate` block
+        # above, this is NOT gated on change_class == "major" -- closing a
+        # subtask is ordinarily a "patch" commit that only flips
+        # task_state, per spec §4.10a's own wording, "after every commit
+        # touching the node or its children"; gating this on major would
+        # mean it never fires in practice). Scope-narrowed to
+        # `all_subtasks_closed` only (see docs/build-plan.md T10.2c "Scope
+        # narrowing"): `facet_interface_changed` is already live above *as*
+        # this same invalidate() call (spec §4.10 says so explicitly --
+        # calling `triggers.evaluate()` wholesale here would double-fire
+        # it), `evidence_retracted` is covered by T7.2b's delete path, and
+        # `recheck_after` has no persisted schedule (out of scope). Deferred
+        # import for the same reason as `invalidate` above (avoids a
+        # store.py <-> tms/triggers.py import cycle).
+        #
+        # Deliberately does NOT call `triggers.evaluate()` or its private
+        # `_act_all_subtasks_closed` action: both call the standalone,
+        # transactional `store.enqueue_review`, which opens its own nested
+        # `with conn:` and would prematurely commit this still-open
+        # transaction (the same T7.2 gotcha `invalidate()` above avoids by
+        # using `enqueue_review_within_transaction`). Instead this block
+        # reuses only `triggers.CONDITIONS["all_subtasks_closed"]` (the
+        # pure, side-effect-free condition function) and
+        # `triggers.TriggerContext`, then performs the enqueue itself via
+        # `enqueue_review_within_transaction`, mirroring
+        # `_act_all_subtasks_closed`'s own idempotence gate
+        # (`find_open_reviews(node_id=..., cause_kind="subtasks_closed")`)
+        # so re-committing an already-fully-closed supertask's subtask
+        # never enqueues a duplicate. Never writes `task_state` itself --
+        # flagging for human review is the only action, per spec §4.10/§9
+        # story 8.
+        from akasha.tms import triggers
+
+        for parent_edge in find_live_edges(conn, dst=node_id, edge_type="composes"):
+            try:
+                parent_node = get_node(conn, parent_edge.src)
+            except NodeNotFoundError:  # pragma: no cover - defensive, dangling edge
+                continue
+            if parent_node.task_state is None:
+                continue  # not a supertask (composes is also used for non-task hierarchy)
+            task_children: list[Node] = []
+            for child_edge in find_live_edges(conn, src=parent_node.id, edge_type="composes"):
+                try:
+                    task_children.append(get_node(conn, child_edge.dst))
+                except NodeNotFoundError:  # pragma: no cover - defensive, dangling edge
+                    continue
+            trigger_ctx = triggers.TriggerContext(
+                now=now, commit=commit_hash, children=tuple(task_children)
+            )
+            if triggers.CONDITIONS["all_subtasks_closed"](parent_node, trigger_ctx):
+                if not find_open_reviews(
+                    conn, node_id=parent_node.id, cause_kind="subtasks_closed"
+                ):
+                    enqueue_review_within_transaction(
+                        conn, parent_node.id, "subtasks_closed", cause_ref=commit_hash
+                    )
+
     return Node(
         id=node_id,
         node_type=node_type,
