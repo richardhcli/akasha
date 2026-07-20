@@ -3,14 +3,25 @@
 Maps each PRD `docs/vision.md` §8 MVP user story (1–9) to its verifying
 automated test or checked manual script, and states — honestly, per rule
 0.2/0.9 and vision invariant 5 ("flagged, never guessed") — whether that
-verifier is **GREEN (local Linux)**, **pending manual execution**, **pending
-first CI push** (the Windows-CI attestation), or **pending first scheduled
-nightly run** (the literal 24h soak).
+verifier is **GREEN (local Linux)**, **PARTIAL** (some legs green, a named
+gap open), **pending manual execution**, **pending first CI push** (the
+Windows-CI attestation), or **pending first scheduled nightly run** (the
+literal 24h soak).
 
 **No bare checkmarks.** Every row states the verifier by its real on-disk
 name, exactly what was run and where/when, and an explicit per-leg status.
 Nothing below is represented as checked/green that was not personally run to
 completion during this task.
+
+> **Open implementation gap (added 2026-07-19, post-authoring audit):**
+> **row 8 is PARTIAL, not green.** Spec §4.10's trigger evaluation has zero
+> production call sites — `tms/triggers.py`'s `evaluate`/`run_daily_tick` are
+> called only by tests, never by `store.commit_node` or a daily tick — so the
+> supertask trigger does not fire in a really-running daemon. Registered as
+> **T10.2c**; see row 8 and `docs/spec-questions.md`. All other rows are
+> unaffected. This gap was found by auditing the acceptance mapping itself,
+> which is exactly what T10.3 Step 2 exists to do ("any gap is a
+> `# SPEC-QUESTION:`, not a silent pass").
 
 **Environment for every "local Linux" run below:** Ubuntu (`Linux
 richardhcli-Virtual-Machine 6.8.0-1062-azure`, x86_64), Python 3.14.6 (uv
@@ -196,7 +207,28 @@ lifecycle) + E08 (create-tm-new). Run 2026-07-19:
 `test_supertask_flag` — **1 passed** (in the 4-passed batch with rows 3/5
 above). E06/E08 run standalone by their parametrized ID:
 `test_reused_golden_case_passes_under_its_e_number[E06-delete-s0]` and
-`[E08-create-tm-new]` — **2 passed**, 0.17s. **GREEN (local Linux).**
+`[E08-create-tm-new]` — **2 passed**, 0.17s.
+
+**Status: PARTIAL — S0 lifecycle GREEN (local Linux); the supertask-trigger
+production path is NOT yet wired (pending T10.2c).** The S0 half of this
+story (inline definition born at S0, freely deleted when unlinked) is fully
+attested by E06/E08 above. The supertask half is **not**: `test_supertask_flag`
+invokes `tms/triggers.py`'s `evaluate` **directly**, and as of 2026-07-19 that
+evaluator has **zero production call sites** — grep-verified: nothing under
+`src/akasha/` imports `tms.triggers` at all; the sole in-`src/` reference is
+`run_daily_tick`'s own internal call to `evaluate` (`triggers.py:237`), and
+`run_daily_tick` has no caller either. Every external caller is a test
+(`tests/unit/tms/test_triggers.py`, `tests/integration/test_tms.py`).
+Spec §4.10 requires evaluation "(a) after every commit touching the
+node or its children, (b) on a daily tick"; T7.3 deferred that wiring to "a
+later task" and no task picked it up. So in a really-running daemon, closing
+the last open subtask (via `PATCH /nodes` or an Obsidian checkbox toggle)
+currently fires nothing, and the supertask would not appear in the review
+queue. The trigger *semantics* are correct and tested; the *wiring* is
+missing. Registered as **T10.2c** (wire `triggers.evaluate` into
+`store.commit_node`, same precedent as T7.2's `invalidate` wiring); see
+`docs/spec-questions.md`. This row cannot read GREEN until T10.2c lands and
+an integration test drives the real API path end-to-end.
 
 ### 9. Residency (`docs/vision.md` §8 story 9)
 
@@ -251,22 +283,42 @@ pending, not silently assumed:
 | 5 | Time travel | GREEN (1 passed) | none |
 | 6 | Review economy | GREEN (cap: 1 passed; dashboard+metrics: 27 passed) | none (conversion moment is a dogfood-gate outcome, not a pre-gate test) |
 | 7 | Contract sync | GREEN (47 passed) | Windows-filesystem lock/retry reality — pending first CI push |
-| 8 | Tasks/supertask/S0 | GREEN (1+2 passed) | none |
+| 8 | Tasks/supertask/S0 | **PARTIAL** — S0 lifecycle GREEN (E06/E08, 2 passed); supertask trigger GREEN only under *direct* evaluator invocation (1 passed) | **supertask-trigger production path unwired** — `tms/triggers.py`'s `evaluate` has zero call sites in `src/akasha/` (spec §4.10 (a)+(b) never wired; T7.3 deferred it, no task picked it up), so in a live daemon closing the last subtask fires nothing. Pending **T10.2c** |
 | 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions) | literal 24h duration — pending first scheduled nightly run; real-OS autostart/kill-9 — pending first CI push / first deployment |
 
-Eight of nine stories are fully GREEN on local Linux with no automated gap.
-Story 1's attention-timing clause and story 9's literal-duration/real-OS
-clauses are the genuinely pending legs — both explicitly flagged here as
-**pending**, never represented as checked. This mirrors the M0/M6/M8/M9
+**Seven of nine stories are fully GREEN on local Linux with no automated
+gap** (2, 3, 4, 5, 6, 7, 9 — the latter two carrying only external
+Windows/24h legs). The two that are not:
+
+- **Story 8 — PARTIAL, a real implementation gap.** Its S0-lifecycle half is
+  green (E06/E08), but the supertask-trigger half has **no production call
+  site**: spec §4.10's evaluation is never invoked by `store.commit_node` or
+  a daily tick, so the trigger cannot fire in a live daemon. This is unbuilt
+  wiring, not a pending attestation — the distinction matters. Registered as
+  **T10.2c**.
+- **Story 1 — functional path green, ≤3s timing clause pending manual
+  execution** (no automated timing test exists).
+
+Story 9's literal-duration/real-OS clauses and story 7's Windows-filesystem
+clause are the genuinely *pending-attestation* legs — flagged here as
+**pending**, never represented as checked. That part mirrors the M0/M6/M8/M9
 "code-complete, CI-leg pending first push" framing
-(`docs/agents/task-status.md` milestone headers): **all locally-runnable
-legs pass; the Windows-CI attestation and the literal 24h nightly soak are
-the pending runtime legs.**
+(`docs/agents/task-status.md` milestone headers). **Story 8's gap is a
+different class and must not be read as attestation debt.**
 
 Per the M10 DoD, when all rows are green **on Windows CI**, the MVP is
 code-complete and the one-month dogfood gate (`docs/vision.md` §9 Phase 2)
-begins. This document establishes that the local-Linux leg of every row is
-green today (2026-07-19); the Windows-CI leg awaits the first push to a
-runner, and the literal 24h soak awaits its first scheduled nightly
-trigger — both are attestations this document cannot itself produce from
-this environment, and it does not claim to.
+begins. Two things stand between here and that gate, and they are different
+kinds of thing:
+
+1. **One implementation gap — T10.2c** (story 8's trigger wiring). This is
+   code that must be written; no amount of CI will turn it green. Until it
+   lands, the MVP is code-complete *except* this task.
+2. **The external attestations** — the Windows-CI leg awaits the first push
+   to a runner, the literal 24h soak awaits its first scheduled nightly
+   trigger, and story 1's ≤3s timing awaits a manual run. These are
+   attestations this document cannot itself produce from this environment,
+   and it does not claim to.
+
+The local-Linux legs of every row **except story 8's supertask half** are
+green today (2026-07-19).
