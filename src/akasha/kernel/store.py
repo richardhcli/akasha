@@ -2430,3 +2430,36 @@ def list_live_node_ids(conn: sqlite3.Connection) -> set[str]:
     """
     rows = conn.execute("SELECT id FROM nodes WHERE status='live'").fetchall()
     return {row[0] for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# T9.3b read-only support for age-based S0 node-retention GC (vision.md §14
+# A7: "S0 default GC retention 30 days (configurable); GC blocked at S1
+# automatically").
+#
+# design note (rule 0.4): added outside T9.3b's own Files list narrowly
+# defined scheduler/config files -- same recurring precedent as the
+# T4.2/T4.4/T4.5/T4.6/T9.2/T10.2 store.py touches documented above. This
+# function only exposes the raw read (which S0 nodes are old enough to be
+# eligible); the actual deletion still goes through the existing, unchanged
+# ``delete_node`` S0 hard-delete branch (T1.6) -- no new write path.
+# ---------------------------------------------------------------------------
+
+
+def list_expired_s0_node_ids(conn: sqlite3.Connection, older_than_iso: str) -> list[str]:
+    """Read-only: ids of live S0 nodes created before ``older_than_iso``.
+
+    Filters ``maturity='S0' AND status='live' AND created_at < ?`` exactly
+    -- an S1+ node is NEVER eligible for age-based deletion regardless of
+    age (vision.md §14 A7: "GC blocked at S1 automatically"), and a
+    tombstoned node has nothing left to age-delete. ``older_than_iso`` must
+    be a lexically-sortable ISO 8601 string in the same fixed-width format
+    ``_now()`` produces (``created_at`` is stored in that format), so plain
+    string comparison is correct. Ordered by ``created_at`` for determinism.
+    """
+    rows = conn.execute(
+        "SELECT id FROM nodes WHERE maturity='S0' AND status='live' AND created_at < ? "
+        "ORDER BY created_at",
+        (older_than_iso,),
+    ).fetchall()
+    return [row[0] for row in rows]

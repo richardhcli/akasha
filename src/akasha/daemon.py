@@ -21,9 +21,12 @@ import logging
 import sys
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
+
+from akasha.config import DEFAULT_S0_GC_RETENTION_DAYS
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -103,6 +106,18 @@ class GcScheduler:
     unchanged by running it on a timer instead of synchronously (see
     ``tests/unit/kernel/test_gc.py`` / T1.7).
 
+    Each tick also runs the task T9.3b age-based S0 *node* retention GC
+    (vision.md §14 A7: "S0 default GC retention 30 days (configurable); GC
+    blocked at S1 automatically") -- the archived T1.7 resolution's
+    two-step lifecycle: (1) hard-delete every live S0 node older than
+    ``s0_gc_retention_days`` via the EXISTING, unchanged ``delete_node`` S0
+    hard-delete branch (T1.6 -- no new deletion path), THEN (2) run
+    ``gc_objects`` in the SAME tick, so the objects those node deletions
+    just orphaned are reclaimed immediately rather than lagging a tick.
+    Node deletion never touches S1+ nodes: ``store.list_expired_s0_node_ids``
+    filters ``maturity='S0' AND status='live'`` exactly, and ``delete_node``
+    itself only hard-deletes when the (freshly recomputed) maturity is S0.
+
     Each tick opens and closes its own short-lived connection to
     ``db_path`` (mirroring ``api/deps.py::get_conn``'s per-request
     pattern) rather than sharing ``app.state.conn`` with request handling
@@ -125,24 +140,43 @@ class GcScheduler:
         db_path: str | Path,
         *,
         interval_seconds: float = GC_INTERVAL_SECONDS,
+        s0_gc_retention_days: int = DEFAULT_S0_GC_RETENTION_DAYS,
         logger: logging.Logger | None = None,
     ) -> None:
         self._db_path = db_path
         self._interval_seconds = interval_seconds
+        self._s0_gc_retention_days = s0_gc_retention_days
         self._logger = logger if logger is not None else logging.getLogger("akasha")
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
     def run_once(self) -> list[str]:
-        """Run a single GC tick against a fresh connection; returns deleted hashes."""
+        """Run a single GC tick against a fresh connection; returns deleted object hashes.
+
+        Step order within the tick (T9.3b): expired S0 *node* deletion
+        first, then ``gc_objects`` -- so objects orphaned by this tick's own
+        node deletions are reclaimed now, not on a later tick.
+        """
         from akasha.kernel import store
 
         conn = store.connect(self._db_path, check_same_thread=False)
         try:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(days=self._s0_gc_retention_days)
+            ).isoformat(timespec="microseconds")
+            expired_node_ids = store.list_expired_s0_node_ids(conn, cutoff)
+            for node_id in expired_node_ids:
+                store.delete_node(conn, node_id)
             deleted = store.gc_objects(conn)
         finally:
             conn.close()
-        self._logger.info(f"gc tick complete: removed {len(deleted)} orphaned object(s)")
+        if expired_node_ids:
+            self._logger.info(
+                f"gc tick complete: removed {len(expired_node_ids)} expired S0 node(s) "
+                f"and {len(deleted)} orphaned object(s)"
+            )
+        else:
+            self._logger.info(f"gc tick complete: removed {len(deleted)} orphaned object(s)")
         return deleted
 
     def start(self) -> None:
@@ -308,8 +342,9 @@ def serve(config: Config) -> None:
     style for ``uvicorn``/``create_app``) so the CLI's other verbs stay
     light.
 
-    Also starts the task T9.3 :class:`GcScheduler` (background daily
-    ``gc_objects`` tick) right before ``uvicorn.run`` -- inside the lock, so
+    Also starts the task T9.3/T9.3b :class:`GcScheduler` (background daily
+    S0-node-retention + ``gc_objects`` tick, configured with
+    ``config.s0_gc_retention_days``) right before ``uvicorn.run`` -- inside the lock, so
     it can never race a second instance's own scheduler over the same DB --
     and stops it in the same ``finally`` as the "daemon shutting down" log,
     so a clean shutdown always joins the tick thread rather than leaking it.
@@ -334,7 +369,9 @@ def serve(config: Config) -> None:
 
     with single_instance_lock(lock_path):
         logger.info(f"daemon starting on {config.bind}:{config.port}")
-        gc_scheduler = GcScheduler(db_path, logger=logger)
+        gc_scheduler = GcScheduler(
+            db_path, s0_gc_retention_days=config.s0_gc_retention_days, logger=logger
+        )
         try:
             app = create_app(config)
             summary = reconcile.reconcile_all(app.state.conn, OriginTracker())

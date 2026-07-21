@@ -222,7 +222,7 @@ The 10 spec-questions raised during M5 (T5.1 base-store shape/rule-0.4, T5.5 con
 
 ## Pre-dogfood spec-question triage (archived 2026-07-20 — fable ruling ahead of the one-month dogfood gate)
 
-Full triage of the 11 entries open as of M10 code-complete. Two (T9.3 node-retention GC, T9.2 metrics-producer wiring) were judged buildable-now with no schema change and no dogfood data required — see the M10-post-close batch below for their implementation record. The remaining nine are archived here.
+Full triage of the 11 entries open as of M10 code-complete. Two (T9.3 node-retention GC, T9.2 metrics-producer wiring) were judged buildable-now with no schema change and no dogfood data required. Nine are archived immediately below; T9.3's build landed and was independently verified 2026-07-21 and is archived in its own entry further down (see "T9.3 — S0 node-retention-by-age GC").
 
 ## T7.1 — `composes_touched_facet` predicate is undefined in §4.9
 - **Where:** `src/akasha/tms/invalidate.py` (`_composes_touched_facet`).
@@ -262,6 +262,12 @@ Full triage of the 11 entries open as of M10 code-complete. Two (T9.3 node-reten
 - **Where:** `src/akasha/metrics.py` (`_population_variance`).
 - **Narrowest reading taken:** population variance (÷N), treating the 30-day zero-filled window as a complete bounded population.
 - **Resolution:** **CONFIRMED FINAL** (fable, 2026-07-20). Neither §7 nor vision §11/§14/R13 pins a convention or a numeric threshold that would depend on the choice — §11 uses inflow variance only qualitatively ("route through branch-and-migrate... never bulk-approve"). No textual entailment either way; population variance is the more natural reading of a fixed window statistic (no larger population being sampled from). No code change. If a future dogfood-gate threshold is ever attached with an explicit convention in mind, that is new spec text at that time, not a retroactive correction.
+
+## T9.3 — S0 node-retention-by-age GC (vision A7)
+- **Where:** `src/akasha/daemon.py` (`GcScheduler`).
+- **Details:** `docs/vision.md` §14 assumption A7: "S0 default GC retention 30 days (configurable); GC blocked at S1 automatically." The archived T1.7 resolution above already named the intended two-step lifecycle and explicitly assigned the scheduled age-based S0 *node* deletion job to T9.3 — but T9.3's actual build-plan Steps/DoD only described the existing object-level `gc_objects` orphan-reclamation job.
+- **Narrowest reading taken (superseded by the build below):** T9.3 shipped object-level GC only; node-retention-by-age remained unimplemented.
+- **Resolution:** **BUILT 2026-07-21, task T9.3b, independently CONFIRMED_DONE.** No schema change: `Config` gained `s0_gc_retention_days: int = 30` (TOML-loaded, mirrors the existing `port`/`bind` pattern; vision A7's literal default) and `store.py` gained one read-only helper `list_expired_s0_node_ids(conn, older_than_iso)` querying the existing `nodes.created_at`/`nodes.maturity` columns (`maturity='S0' AND status='live' AND created_at < ?`) — `gc_objects`'s own T1.7 reachability logic is byte-for-byte unchanged. `GcScheduler`'s tick now calls the helper, then the EXISTING `store.delete_node` S0 hard-delete branch (T1.6, no new deletion path) for each expired id, **before** `store.gc_objects` in the same tick, so freshly-orphaned objects reclaim same-tick (matches T1.7's stated two-step lifecycle exactly). Verified: an S1+ node (given a genuine live inbound edge, confirmed `maturity=='S1'` before aging) survives regardless of age — the single most safety-critical assertion, independently re-checked by the verifier as real (not vacuous). `tests/integration/test_gc_schedule.py` 9→14 passed; full regression (ruff/pyright/411 unit+property/181 integration/47 battery) green, independently re-run by the verifier with matching counts.
 
 ## T10.2b — "Evidence-type dst nodes" undefined against the closed NodeType enum
 - **Where:** `src/akasha/kernel/store.py`, `find_contradiction_candidates`.

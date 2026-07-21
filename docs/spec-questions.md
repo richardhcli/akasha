@@ -25,21 +25,15 @@ M6 (1 entry: T6.5, 2026-07-14), M8 (4 entries: T8.0/T8.1/T8.3/T8.5b,
 2026-07-18 via fable rulings), and the **pre-dogfood triage** (9 entries,
 2026-07-20 via a fable ruling: T7.1, T7.7, T7.3, T7.5×2, T7.6, T9.2×2,
 T10.2b — see that file's "Pre-dogfood spec-question triage" section for the
-full ruling on each).
+full ruling on each; T9.3 moved into that same batch 2026-07-21 once T9.3b
+landed and was independently verified).
 
-**Open questions: 2** (both from the same 2026-07-20 pre-dogfood triage;
-unlike the 9 archived alongside them, these two were judged **buildable now**
-— no schema change, no dogfood data required — and are actively being
-registered + fleet-built in this session rather than merely documented. They
-move to `docs/archived-questions.md` once their build-plan task lands and is
-independently verified; until then they stay here as in-progress, not
+**Open questions: 1** (from the same 2026-07-20 pre-dogfood triage; judged
+**buildable now** — no schema change, no dogfood data required — and is
+actively being fleet-built in this session rather than merely documented. It
+moves to `docs/archived-questions.md` once its build-plan task lands and is
+independently verified; until then it stays here as in-progress, not
 theoretical.)
-
-## T9.3 — S0 GC scheduling covers only object-level GC, not vision A7's node-retention-by-age
-- **Where:** `src/akasha/daemon.py` (`GcScheduler`).
-- **Details:** `docs/vision.md` §14 assumption A7: "S0 default GC retention 30 days (configurable); GC blocked at S1 automatically." The archived **T1.7** resolution (`docs/archived-questions.md`) already named the intended two-step lifecycle and explicitly assigned the scheduled age-based S0 *node* deletion job to **T9.3** — but T9.3's actual build-plan Steps/DoD text only describes the existing object-level `gc_objects` orphan-reclamation job. No age-based node deletion exists anywhere in the codebase; no `Config` field for a retention threshold exists either.
-- **Narrowest reading taken:** none — flagged as a real, entailed gap rather than silently left at T9.3's narrower literal scope. Fable ruling (2026-07-20): buildable now, no schema change (uses existing `nodes.created_at`/`nodes.maturity` columns; the only new state is a config value, not DB schema).
-- **Resolution:** in progress — registered as build-plan task **T9.3b** (see `docs/build-plan.md`), being fleet-built this session. Will archive on independent verification.
 
 ## T9.2 — `violation_rate` / `auto_repairs{class}` / `sync_cycle_ms{p50,p95}` have no live producer
 - **Where:** `src/akasha/metrics.py` (`_CycleRecorder`, `record_sync_cycle_ms`, `record_auto_repair` — all already built); `src/akasha/sync/reconcile.py` (`Reconciler.on_change` — zero call sites into the recorder).

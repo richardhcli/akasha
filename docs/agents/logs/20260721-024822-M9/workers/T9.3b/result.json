@@ -1,0 +1,16 @@
+{
+  "files_changed": [
+    "src/akasha/config.py",
+    "src/akasha/kernel/store.py",
+    "src/akasha/daemon.py",
+    "tests/integration/test_gc_schedule.py",
+    "docs/agents/task-status.md"
+  ],
+  "notes": "Added DEFAULT_S0_GC_RETENTION_DAYS=30 + Config.s0_gc_retention_days (TOML-loaded, mirrors port/bind pattern) to config.py. Added list_expired_s0_node_ids(conn, older_than_iso) to store.py -- read-only, queries nodes WHERE maturity='S0' AND status='live' AND created_at < ?; gc_objects's own T1.7 reachability logic byte-for-byte unchanged. GcScheduler gained s0_gc_retention_days kwarg; run_once() computes a UTC cutoff, calls the new helper, then store.delete_node (existing T1.6 S0 hard-delete branch) for each expired id, BEFORE store.gc_objects in the same tick. 5 new tests in test_gc_schedule.py: expired S0 deleted, younger S0 survives, S1+ node (real inbound edge, confirmed maturity=='S1' pre-tick) survives regardless of age, same-tick object reclamation verified against real objects table rows, default-value regression test. Full regression: ruff clean, pyright 0 errors, tests/unit+property 411 passed, tests/integration 181 passed, tests/battery 47 passed.",
+  "spec_questions": [],
+  "status": "DONE",
+  "task_id": "T9.3b",
+  "verify_command": "uv run pytest tests/integration/test_gc_schedule.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "14 passed in 0.51s"
+}

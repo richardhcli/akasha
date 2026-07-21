@@ -1,0 +1,35 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/config.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/kernel/store.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/daemon.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_gc_schedule.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/agents/task-status.md"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "All 5 claimed files match the real diff exactly. store.py helper is genuinely read-only (single SELECT, no INSERT/UPDATE/DELETE) and gc_objects' own body is byte-for-byte unchanged (diff is a pure append at EOF). daemon.py orders node-deletion strictly before gc_objects in the same tick. Re-ran independently: test_gc_schedule.py 14 passed; ruff clean; pyright 0 errors; tests/unit+property 411 passed; full tests/integration 181 passed; tests/battery 47 passed -- all match claimed counts exactly. The S1+ survival test is genuine: real inbound edge created, maturity=='S1' asserted before backdating, real scheduled tick, real post-tick assertions that node/edge/maturity survive. Same-tick object-reclamation test checks real objects table rows, not a mock. No pickle/eval/exec, no golden-file or migration changes, no new SQLite write path outside store.py. Minor non-blocking discrepancy: worker's narrative said '6 new tests' but diff shows 5 -- self-report miscount only.",
+  "task_id": "T9.3b",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "14 passed in 0.51s"
+}

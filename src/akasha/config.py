@@ -15,6 +15,8 @@ from pathlib import Path
 DEFAULT_PORT = 7433
 DEFAULT_BIND = "127.0.0.1"
 NEUTRAL_DIR_NAME = "tm-daemon"
+# vision.md §14 A7: "S0 default GC retention 30 days (configurable)".
+DEFAULT_S0_GC_RETENTION_DAYS = 30
 
 
 def default_config_dir() -> Path:
@@ -44,6 +46,10 @@ class Config:
     bind: str = DEFAULT_BIND
     path: Path | None = None
     db_path: Path | None = None
+    # T9.3b / vision.md §14 A7: S0 node-retention-by-age GC threshold, in
+    # days. Not a DB column -- purely a scheduler input consumed by
+    # ``daemon.GcScheduler`` (see ``store.list_expired_s0_node_ids``).
+    s0_gc_retention_days: int = DEFAULT_S0_GC_RETENTION_DAYS
 
 
 def load_config(config_path: str | Path | None = None) -> Config:
@@ -62,4 +68,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
         bind=data.get("bind", DEFAULT_BIND),
         path=path,
         db_path=Path(db) if db else default_db_path(),
+        s0_gc_retention_days=data.get(
+            "s0_gc_retention_days", DEFAULT_S0_GC_RETENTION_DAYS
+        ),
     )
