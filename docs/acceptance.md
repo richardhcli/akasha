@@ -25,6 +25,27 @@ completion during this task.
 > supertask for review. **Row 8 is GREEN**, not PARTIAL. See row 8 below for
 > the re-run test evidence.
 
+> **Gap closed 2026-07-20 (T9.2c):** `metrics.py`'s `violation_rate`,
+> `auto_repairs{class}`, and `sync_cycle_ms{p50,p95}` (spec §7, part of row
+> 6's dashboard-display sub-claim below) had a complete recorder API
+> (`record_sync_cycle_ms`/`record_auto_repair`, already exercised by
+> `tests/unit/test_metrics.py`) but zero production call sites, so all
+> three read `0.0`/`{}` in a really-running daemon regardless of actual
+> sync activity — a disclosure gap this file did not previously name (row
+> 6 below cited only the aggregation/rendering tests; the gap was tracked
+> in `metrics.py`'s own module docstring and `docs/spec-questions.md`'s T9.2
+> entry, still open there pending archival once this task's landing is
+> independently verified — never surfaced in this file). Now fixed:
+> `sync/reconcile.py`'s `Reconciler.on_change` times every real sync cycle
+> (`time.monotonic()`, `try`/`finally`, covering the quiet, hub-only,
+> pause&diff, and normal-completion exit paths — the guard for an
+> unregistered path is excluded, since it does zero reconciliation) and
+> records each certain-repair (`E_LOST_ANCHOR`/`E_DUP_ID`, spec §4.7)
+> actually applied silently — never the same repairs when a conservative
+> (cloud-synced) root instead routes them to review (T5.4). See row 6
+> below for the re-run test evidence and a real, freshly observed
+> non-zero sample of all three metrics from a live `on_change` run.
+
 **Environment for every "local Linux" run below:** Ubuntu (`Linux
 richardhcli-Virtual-Machine 6.8.0-1062-azure`, x86_64), Python 3.14.6 (uv
 venv), commit `e1bc58f4c1a4f1dceefee50b99b6d1fc202a6595`, run 2026-07-19
@@ -168,7 +189,33 @@ This story has two distinct sub-claims — cap *enforcement* and dashboard
   **27 passed** (1 in `test_ui_dashboard.py` + 26 in `test_metrics.py`), 0
   failed, 1.15s.
 
-**GREEN (local Linux)** for both sub-claims. The "conversion moment" clause
+**GREEN (local Linux)** for both sub-claims. Both were GREEN before
+2026-07-20 on the strength of aggregation-math and rendering tests alone —
+they did not attest that `violation_rate`, `auto_repairs{class}`, and
+`sync_cycle_ms{p50,p95}` (three of the counters this same dashboard
+displays) had a live production producer; see the "Gap closed 2026-07-20
+(T9.2c)" note above this table. That gap is now closed:
+`tests/unit/sync/test_reconcile.py` gained three tests
+(`test_on_change_records_sync_cycle_ms_for_quiet_cycle`,
+`test_on_change_records_auto_repair_for_silently_applied_certain_repair`,
+`test_conservative_root_routing_does_not_record_auto_repair`) driving the
+real `Reconciler.on_change` path, and `uv run pytest
+tests/unit/test_metrics.py tests/integration/test_openapi_snapshot.py
+tests/unit/sync/test_reconcile.py` — **70 passed**, 0 failed, 1.04s (run
+2026-07-20). Independently confirmed with fresh, freshly observed
+live values (not seeded directly into the recorder): three real
+`Reconciler.on_change` cycles against a real in-memory store + real temp
+files (one non-conservative certain-repair applied silently, one quiet
+re-run of the same file, one threshold-triggered pause&diff violation
+— checksum-invalid anchor, 1/1 blocks = 100% > the 25% pause threshold —
+on a second, single-block file) produced `compute_metrics(conn)` == `violation_rate:
+0.333...` (1 violation / 3 cycles), `auto_repairs: {'E_LOST_ANCHOR': 1}`,
+`sync_cycle_ms: {'p50': 0.539, 'p95': 0.782}` (milliseconds) — all three
+previously-zero counters now non-zero/non-empty under real traffic, run
+2026-07-20. Full `make check` (**411 passed**) and `make battery`
+(**47 passed**) re-confirmed unregressed the same run.
+
+The "conversion moment" clause
 (a genuine contradiction-with-source surfaced in week one) is a real-usage
 outcome of story 2's mechanism (row 2, now built and green) observed during
 the one-month dogfood gate itself, not something a unit/integration test

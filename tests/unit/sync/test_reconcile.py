@@ -27,6 +27,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from akasha import metrics
 from akasha.contract.parser import parse
 from akasha.contract.render import render
 from akasha.kernel import ids, store
@@ -37,6 +38,19 @@ from akasha.sync.origin import OriginTracker
 from akasha.sync.reconcile import ProjectionIndex, Reconciler, diff_blocks
 
 GOLDEN_ROOT = Path(__file__).resolve().parents[2] / "golden" / "reconcile"
+
+
+@pytest.fixture(autouse=True)
+def _reset_metrics_recorder():
+    """T9.2c: ``metrics._recorder`` is a module-level singleton (spec §7);
+
+    isolate every test in this file from cycle/repair counts left over by
+    a previous test (and from leaking its own counts into a later one),
+    the same isolation ``tests/unit/test_metrics.py`` already applies.
+    """
+    metrics.reset_recorder()
+    yield
+    metrics.reset_recorder()
 
 
 # --- shared test helpers --------------------------------------------------------
@@ -870,6 +884,126 @@ def test_conservative_root_routes_certain_repairs_to_review_instead_of_applying(
         "SELECT cause_ref FROM review_queue WHERE cause_kind='violation'"
     ).fetchall()
     assert any(json.loads(r[0]).get("code") == "E_LOST_ANCHOR" for r in rows)
+
+
+# =================================================================================
+# §7 metrics producers (task T9.2c): real on_change cycles feed
+# metrics.record_sync_cycle_ms / metrics.record_auto_repair.
+# =================================================================================
+
+
+def test_on_change_records_sync_cycle_ms_for_quiet_cycle(tmp_path):
+    """A quiet cycle (V == B == H) still counts as one attempted sync cycle."""
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    text = _managed("")
+    path = tmp_path / "note.md"
+    path.write_text(text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), text)
+
+    origin = OriginTracker()
+    reconciler = Reconciler(conn, origin)
+    reconciler.on_change(str(path))
+
+    durations, auto_repairs = metrics._recorder.snapshot()
+    assert len(durations) == 1
+    assert durations[0] >= 0.0
+    assert auto_repairs == {}
+
+
+def test_on_change_records_auto_repair_for_silently_applied_certain_repair(tmp_path):
+    """A non-conservative root's certain E_LOST_ANCHOR repair is silently applied
+    (never routed to review) -- exactly one repair must be recorded for it.
+    """
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    x = "vqwr7yne"
+    _seed_node(conn, x, "claim", "Keep this text")
+    # Four extra, untouched blocks so the single lost-anchor id stays under
+    # the 25% pause threshold (1/5 == 20%) -- isolates the silently-applied
+    # certain-repair case from the (separately tested) pause&diff guard.
+    padding_ids = ["ys5ek7ih", "zzqowp2r", "23zl56h5", "24qmgnvr"]
+    for i, pid in enumerate(padding_ids):
+        _seed_node(conn, pid, "claim", f"padding {i}")
+    padding_lines = "".join(
+        f"padding {i} {contract_anchor(pid)}\n" for i, pid in enumerate(padding_ids)
+    )
+
+    base_text = render(
+        parse(_managed(f"Keep this text {contract_anchor(x)}\n{padding_lines}"))
+    )
+    path = tmp_path / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    # Strip the anchor but keep the text byte-identical -> a CERTAIN
+    # E_LOST_ANCHOR repair (spec §4.7), applied silently under a normal
+    # (non-conservative) root.
+    vault_text = _managed(f"Keep this text\n{padding_lines}")
+    path.write_text(vault_text, encoding="utf-8")
+
+    origin = OriginTracker()
+    reconciler = Reconciler(conn, origin)
+    reconciler.on_change(str(path))
+
+    # The repair really was applied silently: the anchor is back, live, and
+    # never went to review.
+    assert store.get_node(conn, x).status == "live"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM review_queue WHERE cause_kind='violation'"
+    ).fetchone()[0] == 0
+
+    durations, auto_repairs = metrics._recorder.snapshot()
+    assert len(durations) == 1
+    assert auto_repairs == {"E_LOST_ANCHOR": 1}
+    assert metrics.compute_metrics(conn)["auto_repairs"] == {"E_LOST_ANCHOR": 1}
+
+
+def test_conservative_root_routing_does_not_record_auto_repair(tmp_path):
+    """The SAME certain-repair, under a conservative (cloud-synced) root, is
+    routed to review instead of applied -- must NOT be recorded (no double-count
+    against the silently-applied case above).
+    """
+    conn = _conn()
+    cloud_dir = tmp_path / "OneDrive" / "vault"
+    cloud_dir.mkdir(parents=True)
+    root_id = _register_root(conn, cloud_dir)
+    x = "vqche7yn"
+    _seed_node(conn, x, "claim", "Keep this text")
+    # Four extra, untouched blocks so the single lost-anchor id stays under
+    # the 25% pause threshold (1/5 == 20%) -- isolates conservative-profile
+    # repair routing from the (separately tested) pause&diff guard.
+    padding_ids = ["ys5ek7ih", "zzqowp2r", "23zl56h5", "24qmgnvr"]
+    for i, pid in enumerate(padding_ids):
+        _seed_node(conn, pid, "claim", f"padding {i}")
+    padding_lines = "".join(
+        f"padding {i} {contract_anchor(pid)}\n" for i, pid in enumerate(padding_ids)
+    )
+
+    base_text = render(
+        parse(_managed(f"Keep this text {contract_anchor(x)}\n{padding_lines}"))
+    )
+    path = cloud_dir / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    vault_text = _managed(f"Keep this text\n{padding_lines}")
+    path.write_text(vault_text, encoding="utf-8")
+
+    origin = OriginTracker()
+    reconciler = Reconciler(conn, origin)
+    reconciler.on_change(str(path))
+
+    # Confirm the repair really was routed to review, not applied.
+    rows = conn.execute(
+        "SELECT cause_ref FROM review_queue WHERE cause_kind='violation'"
+    ).fetchall()
+    assert any(json.loads(r[0]).get("code") == "E_LOST_ANCHOR" for r in rows)
+
+    # The cycle itself still counts (timing), but no repair was applied.
+    durations, auto_repairs = metrics._recorder.snapshot()
+    assert len(durations) == 1
+    assert auto_repairs == {}
 
 
 # =================================================================================

@@ -22,21 +22,13 @@ ambiguities shouldn't have to read past closed ones). See that file for the
 full resolved history: M1 (T1.3/T1.5/T1.6/T1.7), M3 (T3.1/T3.2/T3.5/T3.6×2),
 M4 (13 entries, 2026-07-12), M5 (10 entries: T5.1/T5.5/T5.8-*, 2026-07-13),
 M6 (1 entry: T6.5, 2026-07-14), M8 (4 entries: T8.0/T8.1/T8.3/T8.5b,
-2026-07-18 via fable rulings), and the **pre-dogfood triage** (9 entries,
-2026-07-20 via a fable ruling: T7.1, T7.7, T7.3, T7.5×2, T7.6, T9.2×2,
-T10.2b — see that file's "Pre-dogfood spec-question triage" section for the
-full ruling on each; T9.3 moved into that same batch 2026-07-21 once T9.3b
-landed and was independently verified).
+2026-07-18 via fable rulings), and the **pre-dogfood triage** (11 entries,
+2026-07-20/21 via a fable ruling: T7.1, T7.7, T7.3, T7.5×2, T7.6, T9.2×3,
+T9.3, T10.2b — see that file's "Pre-dogfood spec-question triage" section
+for the full ruling on each).
 
-**Open questions: 1** (from the same 2026-07-20 pre-dogfood triage; judged
-**buildable now** — no schema change, no dogfood data required — and is
-actively being fleet-built in this session rather than merely documented. It
-moves to `docs/archived-questions.md` once its build-plan task lands and is
-independently verified; until then it stays here as in-progress, not
-theoretical.)
-
-## T9.2 — `violation_rate` / `auto_repairs{class}` / `sync_cycle_ms{p50,p95}` have no live producer
-- **Where:** `src/akasha/metrics.py` (`_CycleRecorder`, `record_sync_cycle_ms`, `record_auto_repair` — all already built); `src/akasha/sync/reconcile.py` (`Reconciler.on_change` — zero call sites into the recorder).
-- **Details:** spec §7 defines these three metrics; `metrics.py`'s recorder API already exists and is exercised directly by `tests/unit/test_metrics.py`, but nothing in production ever calls it, so all three read `0.0`/`{}` in a real running daemon regardless of actual sync activity. `docs/acceptance.md` row 6 (story 6, review economy dashboard) is GREEN on the strength of tests that verify aggregation math and rendering, not live production values for these three fields — a disclosure gap, not a test gap.
-- **Narrowest reading taken:** none — flagged as buildable-now (fable ruling, 2026-07-20): pure wiring, no schema (the recorder is in-process, same precedent as `auth.py`'s rate limiter), no dogfood data needed. Exact call sites: wrap `Reconciler.on_change` in a `time.monotonic()`-based timer covering every exit path (`record_sync_cycle_ms`), and call `record_auto_repair(repair.code)` for each certain-repair actually applied in the non-conservative branch (not the conservative/pause&diff branch, where repairs route to review instead).
-- **Resolution:** in progress — registered as build-plan task **T9.2c** (see `docs/build-plan.md`), being fleet-built this session alongside a `docs/acceptance.md` row 6 update. Will archive on independent verification.
+**Open questions: 0.** Every entry open as of M10's first code-complete
+milestone (2026-07-19) has been triaged, resolved, and archived — see
+`docs/archived-questions.md`. New ambiguities encountered during the
+one-month dogfood gate or any future work should be logged here per the
+entry format above.

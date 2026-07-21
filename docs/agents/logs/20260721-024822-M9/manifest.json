@@ -1,0 +1,9 @@
+{
+  "cohort": [
+    "T9.2c",
+    "T9.3b"
+  ],
+  "final_status": "COMPLETE",
+  "notes": "M9 pre-dogfood cohort: T9.2c (metrics producer wiring) + T9.3b (S0 node-retention GC), parallel file-disjoint pair. Both CONFIRMED_DONE by independent verifiers. M9 re-closes CODE-COMPLETE; M10 re-closes CODE-COMPLETE; all 11 pre-dogfood spec-questions now archived, 0 open.",
+  "run_id": "20260721-024822-M9"
+}

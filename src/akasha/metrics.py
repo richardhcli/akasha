@@ -10,27 +10,14 @@ serializes to JSON. Every DB read goes through ``kernel/store.py`` (rule
 that module's "T9.2 read-only metrics aggregation helpers" section) --
 this module never issues SQL of its own.
 
-# SPEC-QUESTION (T9.2): ``violation_rate`` (violations / sync cycles),
-# ``auto_repairs{class}``, and ``sync_cycle_ms{p50,p95}`` each need a live
-# producer that observes sync cycles as they happen -- ``sync/reconcile.py``'s
-# ``Reconciler.on_change`` is the only call site that knows a cycle ran, how
-# long it took, or which certain-repair codes it silently applied (spec
-# §4.7's "Certain auto-repairs (silent, logged, undoable)"). No existing DB
-# table records per-cycle events: §4.4's schema is frozen, and
-# ``review_queue`` only ever records violations that need human review --
-# never a *quiet* cycle, and never a certain-repair (which by definition
-# never reaches the queue). ``reconcile.py``/``watcher.py`` are outside this
-# task's Files list (`src/akasha/metrics.py`,
-# `src/akasha/api/routes/health.py` (or metrics route),
-# `tests/unit/test_metrics.py`) and are concurrently owned by other
-# build-plan work in this run, so this module exposes
-# ``record_sync_cycle_ms``/``record_auto_repair`` as the intended future
-# call site (a minimal, additive follow-up -- no further schema/API
-# decisions needed) and computes the three affected metrics from whatever
-# has been recorded in-process so far: all-zero/empty until that wiring
-# lands. That is still an honest, correctly-shaped value -- this task's
-# literal DoD is "every §7 metric appears in /v1/metrics", which holds
-# either way. See docs/spec-questions.md (T9.2 entry).
+# ``violation_rate``, ``auto_repairs{class}``, and ``sync_cycle_ms{p50,p95}``
+# are live-wired as of build-plan task T9.2c: ``sync/reconcile.py``'s
+# ``Reconciler.on_change`` calls ``record_sync_cycle_ms``/``record_auto_repair``
+# below on every real cycle (timing via a ``try/finally`` covering every exit
+# path; repair codes recorded only when a certain-repair is actually, silently
+# applied -- never when the same repair routes to review under a conservative
+# root). Before T9.2c these three metrics read all-zero/empty in every real
+# daemon; see docs/archived-questions.md's T9.2 entry for the full history.
 """
 
 from __future__ import annotations

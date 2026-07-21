@@ -1,0 +1,25 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/sync/reconcile.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/unit/sync/test_reconcile.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/acceptance.md"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "metrics.py has zero diff (out of scope, correctly untouched). reconcile.py's try/finally genuinely wraps every real exit path of on_change (quiet/hub-only/pause&diff/normal completion) after the unregistered-sync-root guard, confirmed by reading full control flow; record_auto_repair fires only in the non-conservative/silently-applied branch, never the conservative/pause&diff branch, confirmed by reading both branches side by side. The 3 new tests genuinely drive the real Reconciler.on_change path (real conn, real temp files) rather than calling the recorder directly; E_LOST_ANCHOR is a real linter code path, not fabricated; the conservative-root negative test proves no double-count. Re-ran verify command: 70 passed exact match. Re-ran full regression: ruff clean, pyright 0 errors, unit+property 411 passed, integration 181 passed, battery 47 passed -- all exact matches. tests/battery/soak.py has zero diff (not modified to fake a pass). No pickle/eval/exec, no golden/migration files touched. docs/acceptance.md row 6 wording honest -- explicitly frames cited numbers as freshly-observed from 3 real test cycles, not a production/steady-state claim.",
+  "task_id": "T9.2c",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "70 passed, 1 warning in 1.04s"
+}

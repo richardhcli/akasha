@@ -1,0 +1,14 @@
+{
+  "files_changed": [
+    "src/akasha/sync/reconcile.py",
+    "tests/unit/sync/test_reconcile.py",
+    "docs/acceptance.md"
+  ],
+  "notes": "Reconciler.on_change wrapped in try/finally with a time.monotonic() timer covering every real exit path (quiet, hub-only, pause&diff, normal completion), calling metrics.record_sync_cycle_ms. record_auto_repair(repair.code) called only in the non-conservative branch where certain-repairs are actually applied, never in the conservative/pause&diff branch. 3 new tests in test_reconcile.py driving the real on_change path (not direct recorder calls): quiet cycle, real E_LOST_ANCHOR certain-repair, conservative-root no-double-count negative test. docs/acceptance.md row 6 updated with fresh evidence from 3 real cycles (violation_rate 0.333, auto_repairs {E_LOST_ANCHOR: 1}, non-zero sync_cycle_ms), worded as test evidence not production claim. Full regression: ruff clean, pyright 0 errors, tests/unit+property 411 passed, tests/integration 181 passed, tests/battery 47 passed, soak.py --hours 0.05 passed (90/90 ticks, 0 unhandled exceptions) on the changed hot path.",
+  "spec_questions": [],
+  "status": "DONE",
+  "task_id": "T9.2c",
+  "verify_command": "uv run pytest tests/unit/test_metrics.py tests/integration/test_openapi_snapshot.py tests/unit/sync/test_reconcile.py",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "70 passed, 1 warning in 1.07s"
+}
