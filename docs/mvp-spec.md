@@ -189,7 +189,7 @@ CREATE INDEX ix_edges_dst ON edges(dst) WHERE retracted_at IS NULL;
 CREATE INDEX ix_edges_src ON edges(src) WHERE retracted_at IS NULL;
 CREATE TABLE redirects  (old_id TEXT PRIMARY KEY, successors TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE review_queue (id TEXT PRIMARY KEY, node_id TEXT,
-                        cause_kind TEXT NOT NULL,  -- facet_break|subtasks_closed|evidence_retracted|recheck|conflict|violation|proposal
+                        cause_kind TEXT NOT NULL,  -- facet_break|subtasks_closed|evidence_retracted|recheck|conflict|violation|proposal|reassignment
                         cause_ref TEXT, facet TEXT, created_at TEXT NOT NULL,
                         resolved_at TEXT, resolution TEXT);  -- still_holds|revised|retracted|dismissed
 CREATE TABLE triggers   (id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
@@ -290,7 +290,7 @@ def invalidate(node_id, commit, touched: set[facet_id]):
             enqueue_review(e.src, cause='facet_break', cause_ref=commit, facet=e.facet_binding)
 ```
 
-Resolutions (`review.py`): `still_holds` (clear, record), `revised` (client submits a new commit; that commit is itself classified), `retracted`, `dismissed` (violations only). Daily active-queue cap: 10 items, ordered by (staleness age, inbound-edge count, user flag).
+Resolutions (`review.py`): `still_holds` (clear, record), `revised` (client submits a new commit; that commit is itself classified), `retracted`, `dismissed` (violations only). For `cause_kind='proposal'` items, `approve_proposal` also records `still_holds` on approval — read as "accepted as proposed, no revision" — and for `cause_kind='reassignment'` items (split/merge inbound-edge reassignment, §4.11), the resolver records `still_holds` on completion for the same reason; neither case mints a fifth resolution value. Daily active-queue cap: 10 items, ordered by (staleness age ascending, inbound-edge count descending). A user-flagged-importance third key is not present in the MVP: the frozen §4.4 schema has no backing column, and no §4.11/§4.13 affordance to set such a flag is specified either.
 
 ### 4.10 Triggers v1 (tms/triggers.py)
 
@@ -318,6 +318,8 @@ All authenticated application endpoints are under `/v1`, use JSON, and require h
 | GET/POST /sync/roots | register/list durable filesystem sync roots | human only ∅ |
 | GET/POST/DELETE /tokens | token management | human only ∅ |
 | GET  /metrics | §7 counters (JSON) | |
+
+`reassignment` (T7.6): the `cause_kind` a split/merge's per-inbound-edge review item carries — an edge orphaned by the refactor, awaiting one-click reassignment (§4.4's `review_queue.cause_kind` enum); resolved via `still_holds` (see the resolutions note in §4.9 above).
 
 **Contradiction surfacing at capture (PRD §8 story 2, non-LLM — T10.2b fable ruling, 2026-07-18).** Every human-token `POST /nodes` 201 response carries an additive field `contradiction_candidates: []` — non-empty only when the created node's `type == "claim"`. Candidates are computed by a **non-LLM FTS5 heuristic reusing the existing `nodes_fts` index via a read-only `kernel/store.py` helper** (no new index, no new table, no embedding, no model call — PRD §5 F-list discipline: the truth path stays machine-free): the new claim's canonicalized body is tokenized to alphanumeric terms, each FTS5-quoted and OR-joined (an empty term set yields `[]`), matched against `nodes_fts` ranked by bm25, filtered to `status='live'` nodes of `type='claim'`, excluding the new node itself; a byte-equal canonical body (exact duplicate) ranks first; cap **5**. Each candidate is `{node_id, body, created_at, evidence: [{node_id, body}]}` — text, date, and attached evidence per story 2 — where `evidence` lists the Evidence-type dst nodes of the candidate's live `cites` edges. The surfacing is **strictly read-only**: it enqueues no review item, files no proposal, writes nothing; adjudication uses the existing machinery (`POST /edges` with `edge_type=contradicts`, or later review resolution), and deferral is simply taking no action (narrowest reading of story 2's "both recorded" — see `docs/spec-questions.md` T10.3). Agent-token creates are proposal-rewritten to 202 per the preamble above and never carry candidates (no node exists yet). Verifier: `tests/integration/test_contradiction_surfacing.py` (§9 row 2).
 
