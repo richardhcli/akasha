@@ -1,27 +1,62 @@
-# Overnight run halted — no eligible cohort
+# Overnight run halt: no eligible cohort
 
-**Invocation:** 2026-07-24, headless Sonnet overnight-dispatch loop (worker mode `claude-only`).
+**Invocation:** `overnight-invocation-20260725T071214Z` (this session), run
+`20260725-071700-M11-scaled-dogfood`, `AKASHA_FLEET_WORKER_MODE=claude-only`.
 
-## Why halted
+## What landed this invocation
 
-`fleet-orchestrator` scanned `docs/agents/task-status.md` + `docs/build-plan.md` and found no eligible cohort. Independently re-verified by this session (not taken on the subagent's word alone):
+**T11.4 — Scaled dogfood ingestion smoke test (1 → 10 → 100 real notes) —
+DONE.** Commit `9618516` on `main` (pushed). Independently
+`CONFIRMED_DONE` by a separate `fleet-verifier` (direct sqlite
+cross-checks against the three scratch DBs left on disk under
+`$HOME/.local/share/akasha-dogfood/`, not just the report's prose). Full
+run log: `docs/agents/logs/20260725-071700-M11-scaled-dogfood/`.
 
-- `grep -nE 'TODO|IN PROGRESS|BLOCKED' docs/agents/task-status.md` — the only non-DONE task row is **T11.2**, status `BLOCKED: human-only`. No `TODO` or `IN PROGRESS` rows exist anywhere in the file.
-- Task-ID parity check: extracted all `T<n>.<n>` IDs from both `docs/build-plan.md` and `docs/agents/task-status.md`, sorted+deduped, diffed with `comm`. Both files contain exactly the same 81 task IDs — no task exists in one file but not the other, so the scanner is not structurally blind to any task.
-- `advisor` checkpoint (Opus-backed review of this session's transcript) confirmed the halt reasoning before this file was written, and additionally recommended the independent greps above (done) rather than trusting the orchestrator's prose alone.
+## Why there is no next cohort
 
-78 of 81 tasks are `DONE`. The sole remaining task, **T11.2**, is deliberately fenced off from autonomous dispatch — `docs/agents/task-status.md` (line ~452) and `docs/build-plan.md` M11 header both state it requires a human judgment call (which real personal-note spans become tracked claims/entities — vision.md human-in-the-loop invariant, PRD R9) and must not be flipped to `TODO` by an agent. This session did **not** flip it, and did not edit `task-status.md` or `build-plan.md`.
+A full scan of `docs/agents/task-status.md` (all 82 task rows across
+M0–M11) after this update:
 
-## Three things the next human/agent should know
+- Zero rows with literal status `TODO`.
+- Zero rows with status `IN PROGRESS` (checked explicitly — two prior
+  invocations tonight, `04:19:25` and `06:42:01`, ended abnormally
+  mid-run and could plausibly have left a row mid-flight; confirmed
+  neither did — `grep -niE "in progress" docs/agents/task-status.md`
+  matches only the status-legend line, no task row).
+- Exactly one row is not `DONE`: **T11.2** (`BLOCKED: human-only`), and
+  it is blocked *by design*, not by a fixable dependency or ambiguity —
+  deciding which real personal-note spans become tracked claims/entities
+  is reserved for a human by `docs/vision.md`'s human-in-the-loop
+  invariant (PRD §5 F-list, R9). The M11 header note in
+  `docs/agents/task-status.md` explicitly says not to flip it to `TODO`
+  without a human doing so. This invocation did not touch it.
 
-1. **Product gap surfaced by T11.1 (DONE, but with a caveat):** `sync/watcher.py`'s `Watcher` has zero production call sites in `daemon.py`/`api/app.py`. Neither startup `reconcile_all` nor `POST /v1/sync/rescan` scans a newly-registered root's filesystem on first pass — empirically reproduced during T11.1: `files_reconciled: 0` against 5 real on-disk files. This is a **hard prerequisite** for T11.2 step 2 ("confirm ingestion... let the watcher/rescan pick it up") but has no build-plan task of its own and no `TODO` row — it is not dispatchable by the scanner. A human needs to either open a new build-plan task for it or explicitly accept a workaround. See `docs/spec-questions.md` and `docs/dogfood/README.md`'s "Known limitation" section for prior write-ups.
-2. **Doc drift in `docs/agents/task-status.md`:** the M11 "Eligibility note for the overnight/fleet scanner" prose (around lines 447–457) still says T11.1 "is left `TODO`, eligible for normal autonomous dispatch." The actual T11.1 table row is `DONE` (run `20260725-030653-M11`). The table row is authoritative; the prose is stale. Not fixed by this session (out of scope for a halt-only invocation — one task = one focused change, and this isn't a task).
-3. **M10 gate ambiguity:** M11 build-plan header states `Depends on: M10`. M10's own status is `CODE-COMPLETE`, not explicitly `CLOSED`. If a human later flips T11.2 to `TODO`, whether `CODE-COMPLETE` satisfies M11's dependency gate needs a human ruling — not resolved here.
+`docs/agents/overnight-goals.md`'s two dispatchable priorities are both
+now `DONE`: item 1 (T11.3) landed in a prior invocation tonight
+(`20260725-064544-M11-discovery-wiring`), item 2 (T11.4) landed in this
+one. Its item 3 (the bootstrap-token spec-question) was never eligible
+regardless of priority ordering — it explicitly has no registered
+build-plan task row, and eligibility is literal `TODO` rows in
+`task-status.md` only; goal-list priority text cannot create a second
+work-selection path.
 
-## Note on repeat halts
+**Advisor checkpoint called before writing this file** (per
+`overnight_prompt.md`'s "When to stop instead of guessing" step 1) —
+confirmed the eligibility scan was sound and caught one real gap fixed
+before this halt: the initial scan had only checked for `TODO` and
+`BLOCKED` rows, not `IN PROGRESS`, which mattered given two abnormal
+prior-invocation endings tonight. Re-scanned and confirmed empty.
 
-If `scripts/fleet/overnight_runner.sh` does not check for the presence of this file before dispatching another invocation, every subsequent invocation tonight will likely repeat this same full scan and halt again. Flagging for a human to check — this session was not asked to and did not modify the runner script's behavior.
+## Next step (human decision, not autonomous)
 
-## Files touched by this invocation
+Per `overnight-goals.md`'s own "When the list is empty" section: generate
+the next goal set by auditing `docs/mvp-spec.md` section by section
+against the shipped code — for each spec'd behavior, confirm a real
+production call site exists (not just a test invoking it directly) and
+that the end-to-end path actually fires under normal use. This is the
+same method that previously found T10.2c, T9.2c, T9.3b, and the T11.1 gap
+T11.3 fixed. Once a human refreshes `overnight-goals.md` with a new goal
+set (or simply registers a new `TODO` row directly in `task-status.md`),
+the loop picks it up automatically on its next invocation.
 
-None in `src/`, `docs/build-plan.md`, or `docs/agents/task-status.md`. Only this halt file was written. No run log via `scripts/fleet/log_run.py` — there were no task dispatch results to log (cohort was empty).
+No cohort was spawned this invocation beyond T11.4, already landed above.

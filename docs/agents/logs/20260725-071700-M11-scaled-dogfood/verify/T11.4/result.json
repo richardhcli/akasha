@@ -1,7 +1,14 @@
 {
-  "files_exist": true,
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/dogfood/scaled-smoke-report.md"
+    }
+  ],
   "git_status_matches_claim": true,
-  "notes": "All DoD items independently re-derived from disk, not trusted from the report's prose. Report exists with real (non-placeholder) per-scale table; exact required closing line present verbatim (hex-checked); no real filename/content leak; only docs/dogfood/scaled-smoke-report.md is new repo content (other tracked/untracked diffs in docs/agents/logs/ and scripts/fleet/.overnight_runner.pid predate this task, plus one new orchestration run-log directory docs/agents/logs/20260725-071700-M11-scaled-dogfood/ which is expected worker/verifier bookkeeping infrastructure). Scratch DBs and vaults for all three scales were left in place as claimed and were queried directly (python sqlite3) rather than trusting the report: node counts, sync_files counts, review_queue empty counts, and fixed-template-only claim bodies all match the report's claimed numbers exactly at N=1, 10, and 100. No crash evidence, no unbounded RSS growth, daemon log greps confirm zero errors/warnings recorded during the actual runs.",
+  "notes": "All DoD items independently re-derived from disk, not trusted from the report's prose. Report exists with real (non-placeholder) per-scale table; exact required closing line present verbatim (hex-checked); no real filename/content leak; only docs/dogfood/scaled-smoke-report.md is new repo content (other tracked/untracked diffs in docs/agents/logs/ and scripts/fleet/.overnight_runner.pid predate this task per the initial git snapshot provided in the task context, plus one new orchestration run-log directory docs/agents/logs/20260725-071700-M11-scaled-dogfood/ which is expected worker/verifier bookkeeping infrastructure, not a src/tests/docs scope violation). Scratch DBs and vaults for all three scales were left in place as claimed and were queried directly (python sqlite3, since the sqlite3 CLI binary was not installed on this host) rather than trusting the report: node counts, sync_files counts, review_queue empty counts, and fixed-template-only claim bodies all match the report's claimed numbers exactly at N=1, 10, and 100. No crash evidence, no unbounded RSS growth in the report's own numbers, and daemon log greps confirm zero errors/warnings recorded during the actual runs.",
+  "task_id": "T11.4",
   "verdict": "CONFIRMED_DONE",
   "verify_exit_code": 0,
   "verify_stdout_tail": "N/A per task spec (manual/live-daemon leg, no pytest). Manual re-verification performed instead: closing line grep matched exactly; content-leak grep across all 16 top-level data/(10) Concepts/ names + broader grep found zero hits; sqlite3 (via python) cross-check against daemon-scale-{1,10,100}/store.db showed node_type='claim' counts = 1/10/100, sync_files rows = 1/10/100, review_queue rows = 0/0/0, all claim node bodies byte-identical to the fixed template at every scale (distinct-body count = 1 per scale); vault-scale-{1,10,100} each contain exactly 1/10/100 .md files; daemon.log/daemon.out grepped for error|traceback|exception|warn|W_|E_ = zero matches at all three scales; rescan.json/db_ground_truth.json/sync_status.json on disk agree with the report's table."
