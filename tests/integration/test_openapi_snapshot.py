@@ -67,7 +67,11 @@ def _canonical_snapshot_text(spec: dict[str, Any]) -> str:
 
 
 def _write_snapshot(spec: dict[str, Any]) -> None:
-    SNAPSHOT_PATH.write_text(_canonical_snapshot_text(spec), encoding="utf-8")
+    # newline="" prevents Windows' default text-mode CRLF translation from
+    # corrupting this LF-only canonical file on regeneration (same class of
+    # bug as reconcile.py's write_if_diff -- see docs/acceptance.md's
+    # 2026-07-24 Windows callout, fix #3).
+    SNAPSHOT_PATH.write_text(_canonical_snapshot_text(spec), encoding="utf-8", newline="")
 
 
 def test_served_spec_equals_committed_snapshot():
