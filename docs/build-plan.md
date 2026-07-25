@@ -1,7 +1,7 @@
 # akasha — Fine-Grained Agent Build Plan
 
 **Derived from:** MVP Implementation Specification v1.0 (that document is authoritative; this one only sequences it into small, verifiable steps).
-**Purpose:** Turn milestones M0–M10 into per-file tasks that a *less-capable agent* can execute one at a time, each with an explicit verification step and a machine-checkable Definition of Done (DoD).
+**Purpose:** Turn milestones M0–M10 into per-file tasks that a *less-capable agent* can execute one at a time, each with an explicit verification step and a machine-checkable Definition of Done (DoD). **M11** is a post-MVP addendum (M0–M10 all reached DONE 2026-07-21) — a real-vault dogfood smoke test requested directly by the user rather than derived from `mvp-spec.md`'s milestone list; it invents no new schema/endpoint/grammar, it only exercises the existing API/CLI surface against real personal content instead of synthetic battery fixtures.
 
 ---
 
@@ -36,12 +36,12 @@ Mark each task `TODO → IN PROGRESS → DONE` (or `BLOCKED: <reason>`). A phase
 ### Dependency map (critical path in bold)
 
 ```
-M0 ─┬─► M1 ─┬──────────────► **M4** ─► **M5** ─┬─► **M7** ─► M8 ─► **M10**
+M0 ─┬─► M1 ─┬──────────────► **M4** ─► **M5** ─┬─► **M7** ─► M8 ─► **M10** ─► M11
     │       │                                  │
     └─► M2 ─► M3 ──────────────► (feeds M4/M5)  └─► M9 (deps M5–M8)
                                                 M6 (deps M5)  ─► M9
 ```
-Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
+Parallelizable once deps are met: M6 and M8. Everything else follows the arrows. M11 (post-MVP addendum) depends on M10 only.
 
 ---
 
@@ -828,6 +828,52 @@ Parallelizable once deps are met: M6 and M8. Everything else follows the arrows.
 
 - **Verify** — `make check && make battery && uv run python tests/battery/soak.py` all green; every row references a passing test/script.
 - **DoD** — all nine rows green on Windows CI; `docs/acceptance.md` complete. **The one-month dogfood gate begins.**
+
+---
+
+## M11 — Dogfood smoke test (Depends on: M10)
+
+**Milestone DoD (user-directed, not spec-derived):** a real subset of the
+user's own Obsidian vault (`data/(10) Concepts/` — YAML frontmatter,
+wikilinks, native Obsidian `^block-id` references, meta-bind plugin
+embeds, none of it synthetic) is registered as a live sync root against a
+real running daemon, at least one real span becomes a genuinely minted node
+through the actual reconcile pipeline, and the result is exercised through
+the real CLI/API — before committing to vision.md §Phase-2's full
+one-month dogfood gate on the founder's real vault. This is the first time
+the sync/contract pipeline runs against real, messy personal content
+instead of `tests/battery`'s scripted E01–E20 fixtures.
+
+**Human-in-the-loop boundary (load-bearing, do not blur):** T11.1 is pure
+mechanical plumbing — safe for an autonomous worker. T11.2 requires a
+human to decide *which real personal-note spans become tracked
+claims/entities*; that decision is explicitly reserved for the human
+throughout `mvp-spec.md`/`vision.md` (no LLM/agent autonomously curates
+what counts as "true" or worth tracking — vision.md PRD §5 F-list, R9). Do
+not reassign T11.2 to an autonomous worker even if it looks mechanically
+similar to T11.1; `docs/agents/task-status.md` marks it `BLOCKED:
+human-only` for exactly this reason, and `fleet-orchestrator`'s scan only
+picks up literal `TODO` rows (confirmed against
+`.claude/agents/fleet-orchestrator.md`'s eligibility rules) — this keeps it
+out of the overnight loop by construction, not by prompting discipline.
+
+### T11.1 — Stage a scratch dogfood vault + register it as a live sync root
+- **Goal** — Mechanically stand up a small, disposable, never-git-tracked copy of real notes from `data/(10) Concepts/` as a genuine sync root on a real running daemon instance. Pure plumbing — no judgment about note content.
+- **Depends on** — (milestone gate: M10 DONE).
+- **Files** — `docs/dogfood/README.md` (new — the runbook itself: exact commands, no personal note content). Everything this task touches on disk beyond that (the scratch vault dir, the scratch `config.toml`/DB) lives **outside the repo entirely** (e.g. `$HOME/.local/share/akasha-dogfood/vault-1/`) — never under this repo's working tree, so it can never be `git add`ed regardless of `.gitignore`.
+- **Spec** — §4.11 `GET/POST /sync/roots` (existing endpoint, T4.10 — do not add a CLI verb for it: the literal §4.12 CLI verb list has no sync-root verb, confirmed by grep against `src/akasha/cli/main.py`; register via direct HTTP, e.g. `curl`/`httpx`, exactly as an Obsidian-plugin-less human would today), §4.12 `akasha daemon [--config PATH]` / `akasha token create`.
+- **Steps** — (1) Confirm `/data/` is present in the repo's `.gitignore` (already added — this step just verifies, does not re-add). (2) Create a scratch directory outside the repo, e.g. `$HOME/.local/share/akasha-dogfood/vault-1/`. (3) Copy exactly 5 real files verbatim, unmodified, from `data/(10) Concepts/(1) Universal/` into that scratch dir (small, self-contained concept notes — avoid anything under `Personal Workflow/`). (4) Write a scratch `config.toml` next to it with its own `db_path` inside the same scratch tree — never the default `~/.config/tm-daemon/` location, so this can never collide with or pollute a future real production DB. (5) Start `akasha daemon --config <scratch config.toml>`. (6) `akasha token create dogfood-smoke --class human` against that daemon; capture the token. (7) `POST /v1/sync/roots {"name": "dogfood-smoke", "root_path": "<scratch vault dir>"}` via direct HTTP against the running daemon (human-class token; the endpoint is `∅` human-only per §4.11). (8) Write `docs/dogfood/README.md` documenting steps 2–7 as copy-pasteable commands, generalized (no literal personal file names or content — path patterns and command shapes only).
+- **Verify** — `GET /v1/sync/roots` against the scratch daemon includes the new root by name; `GET /v1/sync/status` shows 0 violations for it (expected — the 5 files have no `^tm-` anchors yet, so 0 managed blocks, not a bug); `git status --porcelain` run from the repo root shows nothing under the scratch path (it's outside the repo) and confirms `data/` stays untracked.
+- **DoD** — a real personal-note directory (5 files, copied verbatim, never git-tracked) is a live, watched sync root on a real running daemon instance backed by a throwaway DB; `docs/dogfood/README.md` exists and its commands are copy-pasteable.
+
+### T11.2 — MANUAL: mark real spans, confirm ingestion, and use it (human-only, story: "then use it")
+- **Goal** — A human adds `^tm-new` anchors to a handful of real spans across the T11.1 scratch vault, confirms the daemon's real reconcile pipeline mints real node IDs and rewrites the files in place (no echo — spec §4.7/§4.8), then exercises `akasha search`, `akasha get`, `akasha review list` against the real resulting content, and records what real-world linter/violation behavior looked like against messy real content (existing wikilinks, YAML frontmatter, native non-`^tm-` Obsidian block IDs, meta-bind embeds) versus the synthetic `tests/battery` E01–E20 fixtures.
+- **Depends on** — T11.1.
+- **Files** — `docs/dogfood/smoke-test-log.md` (new — the human-authored observation record; never the source vault content itself, only summary counts/observations).
+- **Spec** — §4.7/§4.8 (contract parse/render, anchor minting, reconcile), §4.11 `GET /search`, `GET /review`, §4.12 `akasha search`/`akasha review list`/`akasha get`.
+- **Steps (manual runbook — explicitly not automated, same DoD category as M6's `plugin-obsidian/TESTPLAN.md`)** — (1) In 2–3 of the T11.1 scratch vault's files, hand-pick a real span the human actually wants tracked and add a `^tm-new` anchor per §4.7 grammar. (2) Save; let the daemon's watcher pick it up (or `POST /v1/sync/rescan`). (3) Confirm the file was rewritten in place with a real minted `^tm-<id>` anchor (no echo — the anchor changes, the body text doesn't). (4) `akasha search <a real term from the captured text>` — confirm the new node comes back. (5) `akasha get <minted id>` — confirm body/facets match. (6) `akasha review list` — confirm no unexpected violations from the *unrelated* real content in the same files (existing wikilinks, frontmatter, native Obsidian `^block-id`s must be ignored by the linter, not misparsed as akasha anchors). (7) Record in `docs/dogfood/smoke-test-log.md`: node count minted, any violation/linter codes actually hit, and a one-line verdict on real-content parser robustness.
+- **Verify** — N/A (manual leg — same framing as M0/M6/M8/M9/M10's human/CI-pending legs already in this plan). DoD is the completed, dated log entry.
+- **DoD** — at least 1 real node exists in the scratch DB, minted through the genuine sync pipeline from the user's own vault content, confirmed retrievable via `akasha search`/`akasha get`; observations logged in `docs/dogfood/smoke-test-log.md`.
 
 ---
 

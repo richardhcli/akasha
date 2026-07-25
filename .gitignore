@@ -11,3 +11,7 @@ dist/
 build/
 node_modules/
 .claude/settings.local.json
+
+# Personal vault content used for dogfood smoke testing (M11) — never
+# belongs in this repo's history, even accidentally via a broad `git add`.
+/data/

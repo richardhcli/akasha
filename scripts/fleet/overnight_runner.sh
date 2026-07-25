@@ -7,15 +7,34 @@
 # rolling usage-window limit — there is no documented pre-flight way to
 # query that, so this treats "the call failed" as the signal) it backs off:
 # a short retry for what might be a transient blip, escalating to a
-# full-window sleep if failures keep repeating.
+# full-window sleep if failures keep repeating. Between successful
+# invocations the loop only pauses BETWEEN_RUNS_SECS (default 15s) — it
+# keeps chaining cohorts as fast as it can and only waits out a full ~5h
+# window when the API actually says the usage window is exhausted.
+#
+# Top-level driving model defaults to Sonnet (cheap, fast loop driver);
+# the fleet-orchestrator scanner subagent it dispatches stays pinned to
+# Opus regardless (see .claude/agents/fleet-orchestrator.md), and
+# overnight_prompt.md additionally has the Sonnet session consult the
+# `advisor` tool (an Opus-backed reviewer of its own transcript) at
+# judgment-call checkpoints — cohort sanity-check, stuck/contradiction
+# handling, and before concluding no work remains. Override the driving
+# model with OVERNIGHT_MODEL=opus if you want the old all-Opus behavior.
+#
+# Tier-2 worker mode also defaults to pure Claude: OVERNIGHT_WORKER_MODE
+# (default "claude-only") dispatches fleet-worker-claude, which never
+# shells out to Cursor. Set OVERNIGHT_WORKER_MODE=hybrid to let
+# fleet-worker decide per-task whether to delegate to Cursor instead.
 #
 # Usage:
+#   scripts/fleet/start_overnight.sh          # tmux, recommended
+#   # or manually:
 #   nohup scripts/fleet/overnight_runner.sh > docs/agents/logs/overnight-runner.log 2>&1 &
 #   disown
 #   # or: tmux new -d -s fleet-overnight scripts/fleet/overnight_runner.sh
 #
 # Stop:
-#   touch scripts/fleet/.stop
+#   scripts/fleet/stop_overnight.sh    # or: touch scripts/fleet/.stop
 #
 # Root/container note (confirmed against claude-code 2.1.214, 2026-07-18):
 # `--dangerously-skip-permissions` hard-exits (code 1, before any API call)
@@ -40,17 +59,43 @@ HALT_FILE="docs/agents/logs/OVERNIGHT_HALT.md"
 LOG_DIR="docs/agents/logs"
 PID_FILE="scripts/fleet/.overnight_runner.pid"
 
-MODEL="${OVERNIGHT_MODEL:-opus}"
+MODEL="${OVERNIGHT_MODEL:-sonnet}"
 RESET_SLEEP_SECS="${OVERNIGHT_RESET_SECS:-$((5 * 3600))}"   # ~5h rolling usage window
 SHORT_BACKOFF_SECS="${OVERNIGHT_SHORT_BACKOFF_SECS:-60}"
 BETWEEN_RUNS_SECS="${OVERNIGHT_BETWEEN_RUNS_SECS:-15}"
 CONSEC_FAIL_THRESHOLD="${OVERNIGHT_FAIL_THRESHOLD:-2}"       # fails in a row before assuming it's the usage window, not a blip
+
+# Worker mode: "claude-only" (default) dispatches fleet-worker-claude for
+# every task (pure Claude, never delegates to Cursor); any other value
+# (e.g. "hybrid") leaves the choice to fleet-worker's own Cursor-vs-direct
+# decision tree. Exported so the top-level `claude -p` session can read it
+# via Bash and fold it into the fleet-orchestrator spawn prompt as the
+# primary signal (overnight_prompt.md step 1) — see
+# docs/agents/fleet-architecture.md §"Worker Mode Selection" for why the
+# env var alone, three subagent hops down, is best-effort only.
+WORKER_MODE="${OVERNIGHT_WORKER_MODE:-claude-only}"
+export AKASHA_FLEET_WORKER_MODE="$WORKER_MODE"
 
 echo $$ > "$PID_FILE"
 mkdir -p "$LOG_DIR"
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1"
+}
+
+# Plain `sleep N` for a multi-hour backoff would make `stop_overnight.sh` /
+# `touch .stop` sit ignored for up to ~5h (only checked at the top of the
+# `while true` loop). Chunk it so the stop file is re-checked every 30s.
+interruptible_sleep() {
+  local remaining="$1"
+  while (( remaining > 0 )); do
+    if [[ -f "$STOP_FILE" ]]; then
+      return 0
+    fi
+    local chunk=$(( remaining < 30 ? remaining : 30 ))
+    sleep "$chunk"
+    remaining=$(( remaining - chunk ))
+  done
 }
 
 # Best-effort: a real rate-limit hit (confirmed live 2026-07-18) returns a
@@ -102,7 +147,7 @@ while true; do
   ts="$(date -u +%Y%m%dT%H%M%SZ)"
   out_file="$LOG_DIR/overnight-invocation-$ts.json"
 
-  log "invoking claude -p (model=$MODEL) — output -> $out_file"
+  log "invoking claude -p (model=$MODEL, worker_mode=$WORKER_MODE) — output -> $out_file"
   if claude -p "$(cat "$PROMPT_FILE")" \
       --model "$MODEL" \
       --output-format json \
@@ -120,7 +165,7 @@ while true; do
 
     if reset_wait="$(parse_reset_sleep_secs "$out_file")" && [[ "$reset_wait" -gt 0 ]]; then
       log "parsed an exact usage-window reset time from the output — sleeping ${reset_wait}s (skips the consecutive-failure guess entirely)"
-      sleep "$reset_wait"
+      interruptible_sleep "$reset_wait"
       consec_fails=0
       continue
     fi
@@ -130,11 +175,11 @@ while true; do
 
     if [[ $consec_fails -ge $CONSEC_FAIL_THRESHOLD ]]; then
       log "treating repeated failure as the usage-window limit — sleeping ${RESET_SLEEP_SECS}s"
-      sleep "$RESET_SLEEP_SECS"
+      interruptible_sleep "$RESET_SLEEP_SECS"
       consec_fails=0
     else
       log "single failure — short backoff ${SHORT_BACKOFF_SECS}s in case it's transient"
-      sleep "$SHORT_BACKOFF_SECS"
+      interruptible_sleep "$SHORT_BACKOFF_SECS"
     fi
     continue
   fi
@@ -144,7 +189,7 @@ while true; do
     break
   fi
 
-  sleep "$BETWEEN_RUNS_SECS"
+  interruptible_sleep "$BETWEEN_RUNS_SECS"
 done
 
 rm -f "$PID_FILE"

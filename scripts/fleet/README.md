@@ -44,11 +44,29 @@ rather than retyping/paraphrasing it, is the part that actually matters.
 ## Overnight unattended runs
 
 `overnight_runner.sh` repeatedly invokes headless Claude Code (`claude -p`,
-Opus by default) with `overnight_prompt.md` as the prompt, which instructs
-it to run one fleet-dispatch cohort per **Path B** (direct `Agent`-tool
-dispatch) in `docs/agents/runbook.md`, commit + push after each cohort, and
-write `docs/agents/logs/OVERNIGHT_HALT.md` instead of guessing once no
-eligible work remains.
+Sonnet by default — the fleet-orchestrator scanner subagent it dispatches
+stays pinned to Opus regardless, per its own frontmatter) with
+`overnight_prompt.md` as the prompt, which instructs it to run one
+fleet-dispatch cohort per **Path B** (direct `Agent`-tool dispatch) in
+`docs/agents/runbook.md`, commit + push after each cohort, and write
+`docs/agents/logs/OVERNIGHT_HALT.md` instead of guessing once no eligible
+work remains. To keep the driving loop cheap while still getting
+frontier-model judgment at the moments that matter, `overnight_prompt.md`
+has the Sonnet session call the `advisor` tool (a stronger, Opus-backed
+reviewer of its own transcript) at three checkpoints: before dispatching a
+cohort, when a worker/verifier result is stuck or contradictory, and before
+concluding no work remains. Override the driving model with
+`OVERNIGHT_MODEL=opus` if you want the old all-Opus behavior.
+
+**Tier-2 worker mode is also configurable.** `OVERNIGHT_WORKER_MODE`
+(default `claude-only`) is exported as `AKASHA_FLEET_WORKER_MODE` and also
+folded into the `fleet-orchestrator` spawn prompt as an explicit
+instruction (the env var alone is best-effort across the subagent hop —
+see `docs/agents/fleet-architecture.md` §"Worker Mode Selection"). Default
+dispatches `fleet-worker-claude` for every task in the cohort — direct
+edits only, never `scripts/fleet/cursor_bridge.py`. Set
+`OVERNIGHT_WORKER_MODE=hybrid` to let `fleet-worker`'s own decision tree
+choose Cursor delegation per task instead.
 
 **Not Path A.** Confirmed live 2026-07-18: a headless `claude -p` session
 has no `Workflow` tool available (see the `WORKFLOW-TOOL-HEADLESS-GAP`
@@ -72,7 +90,11 @@ and can't reach any of that.
 
 **Start it** (survives the terminal closing; pick one):
 ```bash
-# tmux
+# tmux launcher (recommended) — idempotent, logs to docs/agents/logs/overnight-runner.log
+scripts/fleet/start_overnight.sh
+# tmux attach -t akasha-overnight   # to watch it live; Ctrl-b d to detach
+
+# or manual tmux
 tmux new -d -s fleet-overnight scripts/fleet/overnight_runner.sh
 
 # or nohup
@@ -80,9 +102,14 @@ nohup scripts/fleet/overnight_runner.sh > docs/agents/logs/overnight-runner.log 
 disown
 ```
 
-**Stop it:** `touch scripts/fleet/.stop` (checked once per loop iteration —
-not instant). Or `tmux kill-session -t fleet-overnight` / `kill $(cat
-scripts/fleet/.overnight_runner.pid)`.
+**Stop it:** `scripts/fleet/stop_overnight.sh` (or `touch
+scripts/fleet/.stop` directly) — checked every ~30s, including during a
+multi-hour rate-limit backoff sleep, so it takes effect promptly between
+invocations; it always finishes the current invocation (including that
+cohort's commit/push) before exiting rather than being killed mid-write.
+Only force it with `tmux kill-session -t akasha-overnight` / `kill $(cat
+scripts/fleet/.overnight_runner.pid)` if you specifically want to cut off a
+hung invocation.
 
 **How it handles the usage-window limit:** there is no documented way to
 query remaining usage before a call, so the runner treats a failed
@@ -98,8 +125,9 @@ match that exact shape falls back to the original heuristic: one failure
 gets a short retry (might be a transient blip); two failures in a row are
 treated as the usage window being exhausted, and it sleeps
 `OVERNIGHT_RESET_SECS` (default 5h) before resuming. Tune via env vars:
-`OVERNIGHT_MODEL`, `OVERNIGHT_RESET_SECS`, `OVERNIGHT_SHORT_BACKOFF_SECS`,
-`OVERNIGHT_BETWEEN_RUNS_SECS`, `OVERNIGHT_FAIL_THRESHOLD`.
+`OVERNIGHT_MODEL`, `OVERNIGHT_WORKER_MODE`, `OVERNIGHT_RESET_SECS`,
+`OVERNIGHT_SHORT_BACKOFF_SECS`, `OVERNIGHT_BETWEEN_RUNS_SECS`,
+`OVERNIGHT_FAIL_THRESHOLD`.
 
 **Safety net:** runs with `--dangerously-skip-permissions` (no human present
 to answer prompts) but pairs it with `--disallowedTools` denying

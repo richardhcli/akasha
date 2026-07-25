@@ -444,10 +444,12 @@ NOTE: T8.2+ data fetches from the browser will need the Bearer token wired into 
 
 ## M11 — Dogfood smoke test (Depends on: M10) — post-MVP addendum, added 2026-07-24 at user request (not derived from `mvp-spec.md`'s milestone list — see `docs/build-plan.md` M11 header)
 
-> **Eligibility note for the overnight/fleet scanner:** T11.1 is mechanical
+> **Eligibility note for the overnight/fleet scanner:** T11.1 was mechanical
 > (stage a scratch, never-git-tracked vault copy + register it as a sync
-> root — no content judgment) and is left `TODO`, eligible for normal
-> autonomous dispatch. T11.2 requires a human to decide which real
+> root — no content judgment), left `TODO` for normal autonomous dispatch,
+> and landed exactly that way — **DONE** as of run `20260725-030653-M11`
+> (real overnight smoke test, 2026-07-24, `AKASHA_FLEET_WORKER_MODE=claude-only`).
+> T11.2 requires a human to decide which real
 > personal-note spans become tracked claims (vision.md human-in-the-loop
 > invariant) and is marked `BLOCKED: human-only` below **on purpose** — the
 > `fleet-orchestrator` scanner only selects literal `TODO` rows (confirmed
