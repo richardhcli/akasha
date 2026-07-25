@@ -76,5 +76,20 @@ jobs:
       - run: uv sync
       - run: uv run python tests/battery/soak.py --hours 24
 
-  # Reserved for later milestones:
-  # - nightly-battery: `make battery` on a schedule trigger (wired at M5+)
+  # Spec §6.3 names "battery + soak on main nightly (Windows)" as one gate;
+  # nightly-soak above covered soak only -- this job was a dangling comment
+  # ("Reserved for later milestones") until a 2026-07-24 real-Windows run
+  # found 6 latent Windows bugs (E08/E12/E16 CRLF write-back corruption, the
+  # single-instance-lock PermissionError leak, etc.) that this exact suite
+  # would have caught on the very first nightly run, had it been wired.
+  # windows-latest, matching the release-gate platform (spec §3) -- the
+  # push/PR `check` job intentionally stays unit+property-only for fast
+  # feedback; battery's real-filesystem/locking/CRLF assertions belong here.
+  nightly-battery:
+    if: github.event_name == 'schedule'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync
+      - run: uv run pytest tests/battery
