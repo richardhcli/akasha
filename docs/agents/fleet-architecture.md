@@ -12,10 +12,19 @@
 | ---------- | -------------------- | ---------------------------------------------------------------------------------------- | ------------------------------- | ---- | -------------------------------------------------- |
 | **Tier 1** | Opus 4.8             | Scanner only: eligible cohort from task-status + build-plan (no dispatch, no status I/O) | Claude Code Agent tool          | $$$  | Yes (decide what runs, parse ambiguity)            |
 | **Tier 2** | Sonnet 5             | Task owner: decide Cursor vs direct, confirm Verify, own retries/BLOCKED                 | Claude Code Agent tool          | $$   | Medium (interpret spec, judge direct vs. delegate) |
-| **Tier 3** | Cursor Grok 4.5 High | Edit executor **plus** local Verify loop; returns structured edit+verify evidence        | Subprocess (`cursor_bridge.py`) | $    | Low (follow JSON contract; may re-edit on Verify fail) |
+| **Tier 3** | Cursor Grok 4.5 High | Edit executor **plus** local Verify loop; returns structured edit+verify evidence        | Subprocess (`cursor_bridge.py`) | $    | Low (follow JSON contract; may re-edit on Verify fail) *(`fleet-worker` only — `fleet-worker-claude` never reaches this tier)* |
 
 
 **Rationale:** Frontier-model (Opus) time is expensive; spend it on judgment and cohort selection. Tier 2 (Sonnet) owns the task and escalation. Tier 3 (Cursor) is the cheapest place to run the edit→Verify→fix loop for mechanical/spec-following work — not merely a dumb patch applicator. Authoritative durable logging and `DONE` flips stay outside any LLM (caller + Workflow return values). Model selection is modular (env var + CLI flag) to support future swaps without code changes.
+
+**Tier 2 is actually two agents, not one:** `fleet-worker` (hybrid — may
+delegate to Cursor per the decision tree in its own file) and
+`fleet-worker-claude` (pure Claude — direct-edit only, never invokes
+`cursor_bridge.py`). Both implement the identical task contract (same
+inputs, same `WORKER_SCHEMA` return shape) so the rest of this document's
+Tier-2 references apply to either unless stated otherwise. Which one runs
+for a given cohort is decided once per run by the orchestrator — see
+"Worker Mode Selection" below.
 
 ---
 
@@ -80,6 +89,41 @@ T1.3, T1.4, T1.5 all touch store.py → run sequentially, one at a time.
 
 
 
+### Worker Mode Selection (fleet-worker vs. fleet-worker-claude)
+
+`fleet-orchestrator` resolves, once per run and applied uniformly to the
+whole cohort, which Tier-2 agent every task will be dispatched to. Priority
+order:
+
+1. **Explicit instruction in the caller's spawn prompt** — e.g. "use
+   pure-Claude workers, no Cursor." This is the primary signal.
+2. **`AKASHA_FLEET_WORKER_MODE` env var** (`claude-only` → pure-Claude,
+   anything else/unset → no signal) — checked via `Bash` inside the
+   orchestrator agent. Best-effort only: subagents aren't guaranteed to
+   inherit an unrelated shell's environment, so this is a fallback signal,
+   not an authoritative one.
+3. **Default:** `fleet-worker` (hybrid) if neither signal above resolved to
+   pure-Claude — this preserves prior behavior for callers that don't opt
+   in.
+
+The resolved mode is stamped as `worker_agent_type` on every task object in
+the returned cohort (`"fleet-worker"` or `"fleet-worker-claude"`), and the
+orchestrator reports which rung resolved it via
+`worker_mode_resolved_from`. `docs/agents/fleet-workflow.js`'s dispatch
+`agent()` call reads `task.worker_agent_type || 'fleet-worker'` as its
+`agentType`; Path B (`docs/agents/runbook.md`) dispatch uses the same field
+to pick the `Task` tool's `subagent_type`. Two separate agent files exist
+instead of one parameterized agent because Claude Code agent definitions
+have no include/inheritance mechanism, and conditional "if cursor-allowed
+do X else Y" prose in a single file tends to drift silently. The two files
+are structurally parallel — same section order, same Task Setup and
+Spec-Ambiguities text verbatim — but `fleet-worker-claude.md`'s
+Verification/Retry/Return-Value sections have every Cursor-specific clause
+(bridge evidence, `verify_stdout_tail`-from-Cursor diagnosis,
+`cursor_task_json`/`cursor_response_json`) deliberately stripped rather
+than mirrored; keep the shared, non-Cursor parts in sync by hand when
+either file changes.
+
 ### Orchestrator Responsibilities
 
 The "orchestrator" role is now split across two components rather than one
@@ -88,9 +132,10 @@ prose-narrating agent — see "Verification model" below for why.
 1. `fleet-orchestrator` **agent (scanner, Opus)** — reads task-status.md +
   build-plan.md, identifies all TODO tasks with satisfied dependencies,
    partitions by file disjointness into a cohort (sequential group collapsed
-   to its first task, or a batch of fully parallel tasks), and returns that
-   cohort as structured data. It does not spawn workers and does not write
-   task-status.md.
+   to its first task, or a batch of fully parallel tasks), resolves worker
+   mode per "Worker Mode Selection" above and stamps it onto every task
+   object, and returns that cohort as structured data. It does not spawn
+   workers and does not write task-status.md.
 2. Dispatch + verification, one `fleet-worker` agent per task (in parallel
    where file-disjoint) followed by a separate, independent verifier agent
    per task that re-runs Verify and cross-checks claimed files against
@@ -119,10 +164,10 @@ prose-narrating agent — see "Verification model" below for why.
 ### Worker Responsibilities
 
 1. **Understand the task** — read its Goal/Depends/Files/Spec/Steps/Verify/DoD from build-plan.md.
-2. **Decide edit strategy** — delegate to Cursor or edit directly (see decision tree in `fleet-worker.md`).
-3. **If delegating:** build task JSON including `verify_cmd` (task_id, goal, files, constraints, verify_cmd) and pipe to `python scripts/fleet/cursor_bridge.py`. Cursor is expected to edit **and** run Verify locally (see bridge contract).
-4. **Always confirm Verify** — re-run the task's `Verify` yourself after Cursor returns (or after a direct edit). Treat Cursor's reported exit code as **advisory evidence**, not authority. Never mark the worker result `DONE` solely on Cursor's narrative.
-5. **Report back** — status (DONE / BLOCKED), Verify output, files touched, Cursor bridge evidence (if any), any spec questions.
+2. **Decide edit strategy** — delegate to Cursor or edit directly (see decision tree in `fleet-worker.md`). **`fleet-worker`-only:** `fleet-worker-claude` skips this step entirely and always edits directly — it has no Cursor decision to make.
+3. **If delegating:** build task JSON including `verify_cmd` (task_id, goal, files, constraints, verify_cmd) and pipe to `python scripts/fleet/cursor_bridge.py`. Cursor is expected to edit **and** run Verify locally (see bridge contract). **`fleet-worker`-only:** `fleet-worker-claude` never performs this step, under any circumstance.
+4. **Always confirm Verify** — re-run the task's `Verify` yourself after Cursor returns (or after a direct edit). Treat Cursor's reported exit code as **advisory evidence**, not authority. Never mark the worker result `DONE` solely on Cursor's narrative. (`fleet-worker-claude`: there's no Cursor evidence to treat as advisory — just confirm your own direct edit.)
+5. **Report back** — status (DONE / BLOCKED), Verify output, files touched, Cursor bridge evidence (if any — never present for `fleet-worker-claude`), any spec questions.
 
 ---
 
@@ -494,7 +539,7 @@ No failure path silently weakens guardrails or moves on. Failures surface, are l
 
 ## Future Enhancements
 
-1. **Bridge implementation of local Verify:** Update `scripts/fleet/cursor_bridge.py` + `compose_prompt` to pass `verify_cmd`, instruct the edit→Verify→fix loop, and parse/return `verify_exit_code` / `verify_stdout_tail` (target contract above; code may lag the doc until this lands).
+1. ~~**Bridge implementation of local Verify:** Update `scripts/fleet/cursor_bridge.py` + `compose_prompt` to pass `verify_cmd`, instruct the edit→Verify→fix loop, and parse/return `verify_exit_code` / `verify_stdout_tail` (target contract above; code may lag the doc until this lands).~~ **Addressed differently:** rather than making Cursor optional at the subprocess level, the swap now happens at the worker-agent level — see "Worker Mode Selection" above. A cohort either uses `fleet-worker` (which may still reach `cursor_bridge.py`) or `fleet-worker-claude` (which never does), decided once per run by the orchestrator.
 2. **Alternative edit executors:** Replace `cursor_bridge.py` with a non-Cursor implementation (e.g., native Claude Code agent that shells out to `git apply` patches). Same JSON contract, including Verify fields. **Partially landed (2026-07-18):** `.cursor/agents/fleet-cursor-editor.md` is a native Cursor Task-tool subagent implementing the same abstract contract (task JSON in → `status`/`files_changed`/`verify_*` JSON out) without the subprocess hop — dispatch it directly with `model: "cursor-grok-4.5-high"` from a Cursor session instead of piping to `cursor_bridge.py`. Same trust rules apply: it is advisory evidence only, never the `DONE` authority.
 3. **Multi-pass refinement:** Orchestrator could retry a failed task at a higher tier (direct Opus edit) if worker+Cursor fails.
 4. **Cost tracking:** Aggregate `usage` from bridge JSON per task/tier/milestone into `manifest.json` for cost reporting (caller-side; still not agent-authored log prose) (determinsitic cost tracking per agent per task / tier / milestone)

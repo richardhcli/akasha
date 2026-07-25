@@ -151,6 +151,11 @@ could spawn the verifier or reach the logging step, so that tail end is
 still unconfirmed under headless dispatch. Watch the first real run's logs
 under `docs/agents/logs/` and `docs/agents/logs/overnight-runner.log`.
 
+For a practical start/watch/stop walkthrough, see
+`docs/agents/overnight-guide.md`; for tonight's priority goal set, see
+`docs/agents/overnight-goals.md` (both consulted by `overnight_prompt.md`
+each invocation).
+
 ## Architecture
 
 See `docs/agents/fleet-architecture.md` for the full design document.

@@ -140,7 +140,10 @@ const results = await pipeline(
   _args.cohort,
   (task) =>
     agent(buildWorkerPrompt(task), {
-      agentType: 'fleet-worker',
+      // Orchestrator stamps worker_agent_type per docs/agents/fleet-architecture.md
+      // §"Worker Mode Selection"; default preserves old hybrid behavior for
+      // callers/cohorts that don't opt into pure-Claude workers.
+      agentType: task.worker_agent_type || 'fleet-worker',
       phase: 'Dispatch',
       label: task.task_id,
       schema: WORKER_SCHEMA,

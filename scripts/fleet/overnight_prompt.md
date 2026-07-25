@@ -42,12 +42,25 @@ directly, per Path B, exactly as you would for any other subagent.)
    allow Cursor delegation."* If it's anything else (including unset),
    don't add that line — hybrid workers (`fleet-worker`, may delegate to
    Cursor) are fine.
-2. Spawn a `fleet-orchestrator` agent (via the `Agent` tool, with the
-   worker-mode instruction from step 1 folded into its spawn prompt) to
-   scan `docs/agents/task-status.md` + `docs/build-plan.md` and return the
-   next eligible, file-disjoint cohort. It stamps its resolved
-   `worker_agent_type` onto every task object in the cohort it returns.
-3. **Advisor checkpoint — cohort sanity-check.** Before dispatching
+2. Read `docs/agents/overnight-goals.md` if it exists. It names, in
+   priority order, which currently-eligible `TODO` tasks to prefer
+   dispatching first tonight — it is priority guidance only, never a
+   second work-selection path: it cannot make a task eligible that isn't
+   already a literal `TODO` row in `docs/agents/task-status.md` (same
+   eligibility rule `fleet-orchestrator` already enforces), and it never
+   overrides `docs/build-plan.md`'s `Depends on` ordering. If it names a
+   task whose dependency isn't `DONE` yet, skip that task tonight — don't
+   dispatch out of order. If the file names no remaining eligible work (or
+   doesn't exist), fall through to the normal build-plan scan in step 3
+   with no special priority.
+3. Spawn a `fleet-orchestrator` agent (via the `Agent` tool, with the
+   worker-mode instruction from step 1 folded into its spawn prompt, and —
+   if step 2 found eligible priority tasks — an instruction to prefer that
+   cohort if it's eligible) to scan `docs/agents/task-status.md` +
+   `docs/build-plan.md` and return the next eligible, file-disjoint
+   cohort. It stamps its resolved `worker_agent_type` onto every task
+   object in the cohort it returns.
+4. **Advisor checkpoint — cohort sanity-check.** Before dispatching
    anything, call the `advisor` tool (no arguments — it forwards this
    whole session's transcript to a stronger, Opus-backed reviewer). Treat
    it as the judgment layer you're not spending on a full Opus driving
@@ -55,8 +68,8 @@ directly, per Path B, exactly as you would for any other subagent.)
    `DONE`, file-disjoint, not secretly ambiguous) before any worker runs.
    If it flags a problem, resolve it (or fall through to the "When to stop
    instead of guessing" section below) rather than dispatching anyway.
-4. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`).
-5. For each task in the cohort, dispatch via the `Agent` tool with
+5. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`).
+6. For each task in the cohort, dispatch via the `Agent` tool with
    `subagent_type: task.worker_agent_type` (i.e. `"fleet-worker"` or
    `"fleet-worker-claude"`, per the orchestrator's stamped value — default
    to `"fleet-worker"` only if that field is missing entirely). If your
@@ -78,11 +91,11 @@ directly, per Path B, exactly as you would for any other subagent.)
      clean confirm/deny, call `advisor` before deciding how to record it or
      whether to keep dispatching the rest of the cohort. Do not paper over
      a contradiction by re-interpreting it yourself.
-6. Update `docs/agents/task-status.md` using ONLY each verifier's returned
+7. Update `docs/agents/task-status.md` using ONLY each verifier's returned
    verdict — a task becomes `DONE` only on `CONFIRMED_DONE`. A
    `CONTRADICTS_CLAIM` verdict means `BLOCKED: verifier contradicted worker
    claim`, same as any other Verify failure.
-7. Write the durable run log under `docs/agents/logs/<run_id>/` immediately
+8. Write the durable run log under `docs/agents/logs/<run_id>/` immediately
    on receiving each real result, via `scripts/fleet/log_run.py` exactly per
    the runbook's "Logging" section (Path B) — never a re-narrated summary of
    what a subagent said.

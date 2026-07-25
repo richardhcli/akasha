@@ -68,7 +68,14 @@ orchestrator agent" below for why that distinction matters.
 1. Spawn a `fleet-orchestrator` agent via the Agent tool to scan
    `docs/agents/task-status.md` + `docs/build-plan.md` and return the next
    eligible, file-disjoint cohort (see `.claude/agents/fleet-orchestrator.md`
-   — it is scanner-only now, it does not dispatch or narrate results).
+   — it is scanner-only now, it does not dispatch or narrate results). If
+   you want this run's workers to be pure-Claude (no Cursor delegation),
+   say so explicitly in the orchestrator's spawn prompt (e.g. "use
+   pure-Claude workers, no Cursor") — this is the primary signal it checks;
+   `AKASHA_FLEET_WORKER_MODE=claude-only` is a best-effort fallback if unset
+   (see `docs/agents/fleet-architecture.md` §"Worker Mode Selection"). The
+   orchestrator stamps its resolved choice as `worker_agent_type` on every
+   task in the cohort it returns.
 2. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`) and invoke:
    ```
    Workflow({
@@ -143,7 +150,11 @@ discipline is one rule, applied consistently:
    `docs/agents/task-status.md` + `docs/build-plan.md` and return the next
    eligible, file-disjoint cohort. Identical scanner, identical output
    contract as Path A — this step does not change based on dispatch
-   mechanism.
+   mechanism. If you want pure-Claude workers for this run, state that
+   explicitly in the orchestrator's spawn prompt (fallback:
+   `AKASHA_FLEET_WORKER_MODE=claude-only`) — see
+   `docs/agents/fleet-architecture.md` §"Worker Mode Selection". The
+   returned cohort carries `worker_agent_type` per task.
 2. Generate a `run_id` (`<YYYYMMDD-HHMMSS>-<milestone-label>`) the same way.
 3. For each task in the cohort:
    a. Build a task-specific prompt with the same content
@@ -152,7 +163,23 @@ discipline is one rule, applied consistently:
       non-negotiable rules, the hang guard, and an explicit instruction to
       end the reply with a fenced ```json block matching `WORKER_SCHEMA`
       in `docs/agents/fleet-workflow.js`). Dispatch it via `Task` with
-      `subagent_type: "fleet-worker"`. Respect file-disjoint parallelism
+      `subagent_type: task.worker_agent_type` (i.e. `"fleet-worker"` or
+      `"fleet-worker-claude"`, per the orchestrator's stamped value —
+      default to `"fleet-worker"` only if the cohort task object is
+      missing the field entirely). If your `Task` tool rejects
+      `"fleet-worker-claude"` as an invalid enum value — plausible for the
+      same reason `fleet-verifier` was rejected on 2026-07-17 in step (c)
+      below: a newly-added persona file can postdate whatever fixed the
+      enum in your session — fall back to `subagent_type: "fleet-worker"`
+      (confirmed-resolving) and add an explicit line to the worker prompt:
+      "Do not invoke `scripts/fleet/cursor_bridge.py` or any Cursor
+      subprocess under any circumstance — edit directly only." This
+      preserves the pure-Claude guarantee even when the harness doesn't yet
+      recognize the dedicated agent type; unlike the verifier's
+      `generalPurpose` fallback in (c), don't fall back to
+      `generalPurpose` here — `fleet-worker`'s own prompt already carries
+      the retry/BLOCKED/return-schema discipline this task needs, the inlined
+      line just strips its Cursor option. Respect file-disjoint parallelism
       exactly as `docs/agents/fleet-architecture.md` §"File-Disjoint
       Parallelism" describes: file-disjoint tasks may be dispatched as
       multiple backgrounded `Task` calls together; tasks sharing a file
@@ -330,3 +357,8 @@ file-disjoint and safe to fan out.
 Check `docs/agents/task-status.md` for `BLOCKED:` rows and
 `docs/spec-questions.md` for anything logged overnight — both need a human
 decision before the next run continues past them.
+
+For the practical "how do I start/watch/stop the tmux overnight loop and
+what's it working on tonight" walkthrough, see
+`docs/agents/overnight-guide.md` (procedure) and
+`docs/agents/overnight-goals.md` (current goal set).

@@ -30,6 +30,28 @@ construction. This agent no longer has `Agent`, `Edit`, or `TodoWrite` in
 its toolset; it has no ability to spawn workers or write task-status.md,
 by design.
 
+## Worker Mode Selection
+
+Before building the cohort, resolve which Tier-2 worker agent every task in
+this run will be dispatched to — `fleet-worker` (hybrid, may delegate to
+Cursor) or `fleet-worker-claude` (pure Claude, direct-edit only, never calls
+`scripts/fleet/cursor_bridge.py`). Resolve this **once per run**, applied
+uniformly to the whole cohort — not per task. Priority order:
+
+1. **Explicit instruction in the caller's spawn prompt** — e.g. "use
+   pure-Claude workers, no Cursor" or "hybrid workers are fine this run."
+   This is the primary signal; if the caller said it, use it.
+2. **`AKASHA_FLEET_WORKER_MODE` env var** — check via `Bash` (e.g. `echo
+   "$AKASHA_FLEET_WORKER_MODE"`). Treat `claude-only` as pure-Claude and
+   anything else (including unset) as no signal. This is best-effort only:
+   subagents aren't guaranteed to inherit an unrelated shell's environment,
+   so an unset/empty read here means "no signal," not "confirmed hybrid."
+3. **Default:** `fleet-worker` (hybrid) if neither signal above resolved to
+   pure-Claude.
+
+Record which of the three resolved the mode for this run (you'll report it
+as `worker_mode_resolved_from` — see "Return format" below).
+
 ## Task
 
 1. Read `docs/agents/task-status.md` and `docs/build-plan.md`.
@@ -56,7 +78,9 @@ by design.
    - Tasks with fully disjoint `Files` lists form one **parallel** cohort.
 4. For each task in the chosen cohort, extract its full block from
    `docs/build-plan.md` (Goal / Depends on / Files / Spec / Steps / Verify /
-   DoD) into the shape the Workflow script expects:
+   DoD) into the shape the Workflow script expects, and stamp the resolved
+   `worker_agent_type` from "Worker Mode Selection" above onto every task
+   object in the cohort:
    ```json
    {
      "task_id": "T2.3",
@@ -66,7 +90,8 @@ by design.
      "spec_ref": "§4.3, §6.1",
      "steps": "...",
      "verify_cmd": "uv run pytest tests/property/test_canonical_idempotent.py",
-     "dod": "..."
+     "dod": "...",
+     "worker_agent_type": "fleet-worker"
    }
    ```
 5. Return the cohort as a JSON array under this schema, plus a `run_id`
@@ -88,8 +113,10 @@ by design.
 ## Return format
 
 A single JSON object: `{"run_label": "<milestone-or-cohort-label>",
-"cohort": [<task objects as above>], "notes": "<any blocked-dependency or
-ambiguity observations>"}`. The caller feeds `cohort` directly into
+"cohort": [<task objects as above, each carrying worker_agent_type>],
+"worker_mode_resolved_from": "<explicit-instruction | env-var | default>",
+"notes": "<any blocked-dependency or ambiguity observations>"}`. The caller
+feeds `cohort` directly into
 `Workflow({scriptPath: "docs/agents/fleet-workflow.js", args: {run_id,
 cohort}})` (Path A), or uses each task object to build a worker prompt for
 direct `Task`-tool dispatch (Path B) — see `docs/agents/runbook.md`. Either
