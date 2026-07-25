@@ -43,6 +43,27 @@ the task, and note anything a future agent needs (e.g. a new
 > changes as a result (every task was already `DONE`; this is fresh
 > evidence the code those tasks shipped is now proven correct on the
 > platform the spec names as release gate, not a re-verification of scope).
+>
+> **Follow-up, same day:** two more real gaps closed. (a) `.github/
+> workflows/ci.yml` gained a `nightly-battery` job on `windows-latest` —
+> `tests/battery` had never run on Windows anywhere in CI (spec §6.3 names
+> "battery + soak on main nightly (Windows)"; only soak was wired, battery
+> was a dangling "Reserved for later milestones" comment). (b) new
+> `tests/integration/test_daemon_lock_multiprocess.py` closes the one
+> remaining hole in T4.9's lock coverage: every prior lock test acquired
+> the lock twice from the SAME OS process; this spawns two genuinely
+> separate processes (via `subprocess` + a `_lock_subprocess_helper.py`
+> child script) racing the same lock file — the actual real-world "second
+> `akasha daemon` launch" failure mode. Both pass on the real Windows host;
+> 641 tests total, ruff/pyright clean. Neither change flips any task
+> `Status` (both are hardening beyond already-`DONE` scope, not new
+> build-plan tasks). A fleet-orchestrator scan the same day inventoried
+> the remaining genuinely-open Windows dogfood-readiness gaps that need
+> either a `git push` + observed CI run, a physical Windows service
+> install (Task Scheduler/NSSM), a live Obsidian vault, or manual human
+> timing — none of which are closable as a pure code/test change; see the
+> conversation log / `docs/acceptance.md` for the full inventory if it
+> gets written up there.
 
 ---
 
