@@ -1,9 +1,0 @@
-2026-07-18T05:10:37Z invoking claude -p (model=sonnet) — output -> docs/agents/logs/overnight-invocation-20260718T051037Z.json
-2026-07-18T05:10:39Z invocation failed (exit 1) — see docs/agents/logs/overnight-invocation-20260718T051037Z.json.stderr
-2026-07-18T05:10:39Z parsed an exact usage-window reset time from the output — sleeping 1281s (skips the consecutive-failure guess entirely)
-2026-07-25T03:03:09Z invoking claude -p (model=sonnet, worker_mode=claude-only) — output -> docs/agents/logs/overnight-invocation-20260725T030309Z.json
-2026-07-25T03:18:35Z invocation ok
-2026-07-25T03:18:50Z invoking claude -p (model=sonnet, worker_mode=claude-only) — output -> docs/agents/logs/overnight-invocation-20260725T031850Z.json
-2026-07-25T03:22:49Z invocation ok
-2026-07-25T03:22:49Z fleet wrote docs/agents/logs/OVERNIGHT_HALT.md — no eligible work, stopping loop
-2026-07-25T03:22:49Z overnight runner exited

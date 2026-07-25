@@ -1,30 +1,33 @@
 # Overnight goals
 
-**Last set:** 2026-07-25, at user request. **Read by:** `overnight_prompt.md`,
-as priority guidance only — see "What this document is not" below before
-using it for anything else.
+**Last refreshed:** 2026-07-25 (T11.3/T11.4 both landed `DONE` overnight —
+see `docs/agents/task-status.md`; this refresh follows the same
+reconciliation procedure `overnight_prompt.md` step 9 and
+`overnight_wrapup_prompt.md` now apply automatically after every cohort,
+so this file shouldn't need another manual refresh unless priorities
+change). **Read by:** `overnight_prompt.md`, as priority guidance only —
+see "What this document is not" below before using it for anything else.
 
 ## Current goal set (in priority order)
 
-1. **T11.3 — Wire filesystem discovery for newly registered sync roots.**
-   `TODO` in `docs/build-plan.md`/`docs/agents/task-status.md`. Closes the
-   T11.1-surfaced gap (`docs/spec-questions.md`) where a brand-new sync
-   root's pre-existing files are never scanned. Dispatch this first — T11.4
-   depends on it and is vacuous without it.
-2. **T11.4 — Scaled dogfood ingestion smoke test (1 → 10 → 100 real
-   notes).** `TODO`, `Depends on: T11.3`. Do not dispatch until T11.3 is
-   `DONE`. Deliberately content-blind (a fixed template anchor per file,
-   never real note meaning) — see its build-plan entry for exactly why this
-   does not cross into T11.2's territory. Access data in `data/(10) Concepts`.
-3. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).** Lower
-   priority, no task registered yet because the correct fix is almost
-   certainly documentation-only: the workaround (`docs/dogfood/README.md`
-   step 6, mirroring `tests/battery/soak.py`'s own pattern) already works
-   and is documented. If picked up, the DoD is "confirm the workaround is
-   the intended permanent answer and mark the spec-question resolved" —
+No priority goals remain: both T11.3 and T11.4 (the previous goal set)
+are `DONE`. The one item below was always explicitly optional filler, not
+a priority, so it stays as the only live entry:
+
+1. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).** No
+   task registered yet because the correct fix is almost certainly
+   documentation-only: the workaround (`docs/dogfood/README.md` step 6,
+   mirroring `tests/battery/soak.py`'s own pattern) already works and is
+   documented. If picked up, the DoD is "confirm the workaround is the
+   intended permanent answer and mark the spec-question resolved" —
    **never** invent a new `/tokens` bootstrap endpoint or CLI flag not in
-   `mvp-spec.md` §4.11/§4.12 (rule 2). This is optional filler, not a
-   priority item; skip it if T11.3/T11.4 fill the night.
+   `mvp-spec.md` §4.11/§4.12 (rule 2).
+
+If the loop finds no eligible `TODO` beyond this optional item, it halts
+normally — see "When the list is empty" below for how a human generates
+the next real goal set (T11.2 remains the sole non-`DONE` build-plan task,
+and it's `BLOCKED: human-only` by design, not something this file can ever
+make eligible).
 
 ## What this document is not
 

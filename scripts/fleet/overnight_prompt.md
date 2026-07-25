@@ -99,12 +99,30 @@ directly, per Path B, exactly as you would for any other subagent.)
    on receiving each real result, via `scripts/fleet/log_run.py` exactly per
    the runbook's "Logging" section (Path B) — never a re-narrated summary of
    what a subagent said.
+9. **Refresh `docs/agents/overnight-goals.md`.** Do this after every cohort
+   that reaches step 7, regardless of verdict — not only when the goal
+   list turns up empty. Re-read the file and reconcile it against the
+   `docs/agents/task-status.md` you just updated:
+   - If a task it names in priority order is now `DONE`, remove/strike
+     that entry.
+   - If every entry in its "Current goal set" is now `DONE` (or was never
+     a real `TODO` row), replace that section with a short note that no
+     priority goals remain, pointing at the file's own "When the list is
+     empty" section — do not delete that section, and do not invent a
+     replacement goal yourself; generating new goals is the human
+     procedure that section already documents.
+   - If nothing needs to change, don't touch the file — only stage it if
+     you actually edited it.
+   This keeps the file self-correcting run over run instead of silently
+   going stale (it pointed at two already-`DONE` tasks for a full night on
+   2026-07-25 before a human noticed and refreshed it by hand).
 
 ## After each cohort: commit and push
 
-Once `task-status.md` and the run log are written, stage exactly the files
-you changed, commit with a message naming the `run_id` and the task IDs in
-the cohort, and push to the current branch.
+Once `task-status.md`, the run log, and (if touched) `overnight-goals.md`
+are written, stage exactly the files you changed, commit with a message
+naming the `run_id` and the task IDs in the cohort, and push to the
+current branch.
 
 - Never force-push, never `git push --force`/`-f`.
 - Never `git commit --amend` — always a new commit.
@@ -113,6 +131,17 @@ the cohort, and push to the current branch.
 - If the push is rejected (e.g. remote has diverged), do not force past it —
   write the conflict into `docs/agents/logs/OVERNIGHT_HALT.md` (see below)
   and stop.
+
+## Before this invocation ends: clean up background tasks
+
+Whether or not you dispatched a cohort, before your final reply: confirm no
+background task is still running that you or a dispatched subagent
+started (a dev server, a `Bash` call with `run_in_background: true`, a
+watch process, etc.) and stop it explicitly. Do not leave it for the
+harness's own timeout to force-kill — this happened for real on
+2026-07-25 (`Background tasks still running after 600s; terminating` in
+that invocation's stderr). A background process a finished task no longer
+needs has no reason to keep running into whatever this session does next.
 
 ## When to stop instead of guessing
 

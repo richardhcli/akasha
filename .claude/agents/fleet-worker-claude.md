@@ -63,6 +63,15 @@ If you encounter a spec ambiguity that prevents you from deciding on an approach
    ```
 3. Return `status: "BLOCKED"`, `blocked_reason: "Spec ambiguity"`, and put the drafted entry in `spec_questions`. The caller writes `docs/spec-questions.md` and asks the user.
 
+## Before you return
+
+If you started any background task during this work (a dev server, a
+`Bash` call with `run_in_background: true`, a watch process, anything not
+already finished) — stop it explicitly before returning. Don't leave it
+running for the caller's own timeout to force-kill; a task you're done
+with has no reason to keep a background process alive into whatever runs
+next.
+
 ## Return Value
 
 Your result is schema-validated against `WORKER_SCHEMA` (`docs/agents/fleet-workflow.js`) — automatically, if you were dispatched by the Workflow script; by the caller piping your reply through `scripts/fleet/log_run.py`, if you were dispatched directly via a `Task`-style tool (see `docs/agents/runbook.md` Path B). Either way, end your reply with a fenced ```json block containing exactly these fields — no prose summary substitutes for them:

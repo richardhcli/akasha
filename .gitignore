@@ -15,3 +15,28 @@ node_modules/
 # Personal vault content used for dogfood smoke testing (M11) — never
 # belongs in this repo's history, even accidentally via a broad `git add`.
 /data/
+
+# Overnight fleet-runner operational artifacts (scripts/fleet/
+# overnight_runner.sh). Narrowly scoped to files that are regenerated every
+# run AND held open across the run's lifetime: overnight-runner.log is
+# reopened-by-path and appended to on every log() call, which means a run's
+# own git operations (a cohort commit, etc.) replacing this tracked file
+# with a new inode silently orphans that fd — this actually happened on
+# 2026-07-25, losing the tail of a run's log even though the run itself
+# completed fine. overnight-invocation-*.json(.stderr) are per-invocation
+# dumps never referenced by name in scripts/fleet/overnight_prompt.md's own
+# commit step, so ignoring them is safe.
+#
+# Deliberately NOT included: docs/agents/logs/OVERNIGHT_HALT.md IS
+# `git add`-ed by exact path in overnight_prompt.md's halt-commit step
+# (confirmed via `git log`/`git show` on real halt commits) — ignoring it
+# would make that `git add` fail inside an unattended session. Likewise
+# the structured per-cohort audit trail under docs/agents/logs/<run_id>/
+# (manifest.json, workers/*/result.json, verify/*/result.json — see
+# docs/agents/runbook.md) stays tracked.
+/docs/agents/logs/overnight-runner.log
+/docs/agents/logs/overnight-runner-last-exit.md
+/docs/agents/logs/overnight-invocation-*.json
+/docs/agents/logs/overnight-invocation-*.json.stderr
+/scripts/fleet/.stop
+/scripts/fleet/.overnight_runner.pid

@@ -76,6 +76,13 @@ indefinitely.
 - Do not soften a discrepancy you found because the worker's explanation
   sounded reasonable — report what you actually observed.
 
+## Before you return
+
+If running the Verify command started any background task (a dev server,
+a `Bash` call with `run_in_background: true`, anything not already
+finished) — stop it explicitly before returning. Don't leave it running
+for the caller's own timeout to force-kill.
+
 ## Return Value
 
 End your reply with a single fenced `json` block matching exactly this
