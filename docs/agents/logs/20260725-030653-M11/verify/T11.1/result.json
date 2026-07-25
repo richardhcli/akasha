@@ -1,0 +1,15 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/dogfood/README.md"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "This task has no pytest Verify command; verified live/on-disk assertions directly per the task instructions. Scratch daemon (PID 24681, port 7433) was already running (no restart needed). All 3 required checks (a/b/c) pass exactly as expected, with (b)'s 0-violations result being the correct expected PASS per the task framing. README leak-check: grepped docs/dogfood/README.md against the 5 actual filenames in the scratch vault-1 dir (Causality.md, Change.md, Information.md, Pattern (concept).md, Truth.md) -- zero matches; all .md references in the README are generic placeholders/prose only. Scratch DB path (~/.local/share/akasha-dogfood/store.db) confirmed distinct from and non-colliding with the pre-existing default ~/.config/tm-daemon/store.db (unrelated, untouched, older mtime). Only new/relevant repo change is untracked docs/dogfood/ (containing exactly README.md, T11.1's sole allowed file); all other dirty/untracked git-status entries predate this task and are unrelated fleet/orchestration files, confirmed via exclusion-grep. Both spec-questions (token-bootstrap path, Watcher-has-no-production-call-site gap) are present in docs/spec-questions.md's diff and consistent with the README's 'Known limitation' section, which states the Watcher gap honestly without overclaiming.",
+  "task_id": "T11.1",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "(a) {\"sync_roots\":[{\"id\":\"5yomqcqt\",\"name\":\"dogfood-smoke\",\"root_path\":\"/home/richardhcli/.local/share/akasha-dogfood/vault-1\",\"created_at\":\"2026-07-25T03:11:23.989671+00:00\"}]}\n(b) {\"sync_roots\":[{\"id\":\"5yomqcqt\",\"name\":\"dogfood-smoke\",\"root_path\":\"/home/richardhcli/.local/share/akasha-dogfood/vault-1\",\"files\":[],\"violations\":[],\"pauses\":[],\"conflicts\":[]}],\"unresolved\":[]}\n(c) git status --porcelain | grep -i akasha-dogfood => no output; git check-ignore -v data/ => .gitignore:17:/data/\tdata/ (exit 0)"
+}
