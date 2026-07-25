@@ -10,3 +10,9 @@
 # defect.
 tests/golden/** -text
 docs/api-snapshot/openapi.json -text
+
+# Bash scripts must stay LF on disk regardless of core.autocrlf -- a CRLF
+# shebang line or CRLF-terminated statements breaks execution under Git
+# Bash/MSYS (the same class of bug .gitattributes already guards against
+# above, applied to scripts instead of test fixtures).
+scripts/dogfood/*.sh text eol=lf

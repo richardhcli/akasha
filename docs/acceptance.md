@@ -109,6 +109,57 @@ completion during this task.
 > below for the re-run test evidence and a real, freshly observed
 > non-zero sample of all three metrics from a live `on_change` run.
 
+> **Windows dogfood-readiness pass, 2026-07-25.** Four real gaps closed on
+> this same real Windows 11 host used for the 2026-07-24 pass above:
+>
+> 1. **`test_openapi_snapshot.py`'s own regeneration path corrupted its
+>    output to CRLF on Windows** (`_write_snapshot` used
+>    `Path.write_text(..., encoding="utf-8")` with no `newline=""`) — the
+>    same bug class as 2026-07-24's `reconcile.py` fix, just in the
+>    snapshot tooling instead of the sync write-back path. Found because
+>    T11.3's `sync_rescan` docstring change had never been accompanied by
+>    a snapshot regen, so `tests/integration/test_openapi_snapshot.py`
+>    failed for real on this host; fixed, then the snapshot was
+>    regenerated for real (content-only diff, verified LF-only on disk).
+>    Full gate re-confirmed green on Windows after the fix: `ruff` clean,
+>    `pyright src` 0 errors, `tests/unit tests/property` 411 passed,
+>    `tests/battery` 47 passed, `tests/integration` 187 passed (645
+>    total). Commit `12ed9b9`, pushed to `origin/main` — the
+>    `windows-latest` hosted CI leg (row 7) has not been independently
+>    observed from this session (no `gh`/API access here); **still
+>    pending a human checking the Actions run for that push.**
+> 2. **T8.4's pause&diff inspector — code-verified only since M8, never
+>    driven with real pause data on any platform — was exercised for
+>    real** via `scripts/dogfood/init.sh` (new: see
+>    `docs/dogfood/windows-service.md`): an 8-block scratch vault file was
+>    synced clean, 4 of its blocks were bumped to S1+ maturity (a real
+>    inbound `cites` edge each, over HTTP), then those 4 lines were
+>    deleted from the vault file and rescanned. This produced a genuine
+>    `E_DELETED_S1`-driven pause (4/8 = 0.5 > the 0.25 `PAUSE_THRESHOLD`)
+>    with a real unified diff, correctly nested under its sync root's
+>    `pauses` bucket (not `unresolved`) — confirming the `sync_files`/
+>    `cause_ref` path-matching this depends on is sound. Screenshotted
+>    live in a real Windows Chromium browser (Playwright MCP, since the
+>    `claude-in-chrome` extension was not connected on this host) at
+>    `/sync`, showing "Pause & diff inspector (1)" with the diff rendered
+>    in the `<pre>`; resolved via `/review`'s `still_holds` button,
+>    confirmed back to "No open reviews." The 4 S1+ nodes were confirmed
+>    to survive (never silently deleted) throughout. `/node`, `/search`,
+>    and `/dashboard` were also browser-driven in the same session and
+>    render correctly (dashboard showed real non-zero live metrics:
+>    `violation_rate: 0.5`, `inflow(7d): 1`, `resolved(7d): 1`).
+> 3. **Real-OS residency (row 9)'s autostart/kill-9 leg partially closed**
+>    on this local Windows dev-host — see the dedicated callout under row
+>    9's discussion above for the full writeup, including the negative
+>    result that Task Scheduler's native restart-on-failure does not
+>    work and the supervisor-wrapper mechanism used instead.
+> 4. New disposable lifecycle scripts, `scripts/dogfood/*.sh` and
+>    `scripts/windows-service/*.ps1`, formalize the scratch-vault and
+>    Windows-service setup/teardown used for (2) and (3) above so a future
+>    dogfooder (human or agent) doesn't have to re-derive them by hand —
+>    see `docs/dogfood/windows-service.md` for full usage and the
+>    least-privilege elevation model.
+
 **Environment for every "local Linux" run below:** Ubuntu (`Linux
 richardhcli-Virtual-Machine 6.8.0-1062-azure`, x86_64), Python 3.14.6 (uv
 venv), commit `e1bc58f4c1a4f1dceefee50b99b6d1fc202a6595`, run 2026-07-19
@@ -434,6 +485,32 @@ and are stated honestly as pending, not silently assumed:
   push / first real-deployment observation** — same framing as row 7's
   Windows-filesystem leg.
 
+> **Real-OS autostart/kill-9 leg, local Windows dev-host, 2026-07-25.**
+> `scripts/windows-service/{init,deinit,destroy}.ps1` register the daemon
+> as a real Windows Task Scheduler task (`AtLogOn` trigger) on this real
+> Windows 11 host and were run end-to-end: registered, started (`GET
+> /health` 200), then the daemon process was `taskkill /F`'d **twice in a
+> row**. Both times a genuinely new process (confirmed via a new PID
+> listening on the port) came back within ~2 seconds. This is a real
+> local-machine attestation of autostart + crash recovery, **not** the
+> hosted-CI or real-deployment leg the bullet above still names as
+> pending — that distinction is deliberate, not an upgrade of this
+> paragraph's scope.
+>
+> **Negative result worth recording:** Task Scheduler's own
+> `RestartCount`/`RestartInterval` settings were tried first and do
+> **not** reliably restart a force-killed long-running task process — a
+> live test (register with `RestartCount=3`/`RestartInterval=1min`, kill
+> the daemon, poll for 3.5 minutes) showed `LastTaskResult` flip to a
+> failure code with no restart ever occurring. The recovery actually
+> demonstrated above comes from a small supervisor-loop wrapper script
+> these tools generate (Task Scheduler's job is reduced to autostart-at-
+> logon only) — see `docs/dogfood/windows-service.md` for the mechanism,
+> the full negative-result writeup, and the privilege model (these
+> scripts request elevation per-operation, on demand, only if the host's
+> policy actually denies the non-elevated call; they never require or
+> hold a standing admin session).
+
 ---
 
 ## Summary
@@ -446,9 +523,9 @@ and are stated honestly as pending, not silently assumed:
 | 4 | Split/merge | GREEN (5 passed, property) | none |
 | 5 | Time travel | GREEN (1 passed) | none |
 | 6 | Review economy | GREEN (cap: 1 passed; dashboard+metrics: 27 passed) | none (conversion moment is a dogfood-gate outcome, not a pre-gate test) |
-| 7 | Contract sync | GREEN (47 passed, local Linux **and** local Windows as of 2026-07-24) | hosted `windows-latest` CI runner itself — pending first CI push |
+| 7 | Contract sync | GREEN (47 passed, local Linux **and** local Windows as of 2026-07-24; full gate incl. integration re-confirmed green on Windows 2026-07-25 after the openapi-snapshot CRLF fix, commit `12ed9b9`) | hosted `windows-latest` CI runner itself — pushed 2026-07-25, run result **pending human confirmation** (no `gh`/API access from this session) |
 | 8 | Tasks/supertask/S0 | **GREEN** — S0 lifecycle (E06/E08, 2 passed) + supertask trigger via the real commit path (2 passed), re-run 2026-07-20 (T10.2c) | none |
-| 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24) | literal 24h duration — pending first scheduled nightly run; real-OS autostart/kill-9 — pending first CI push / first deployment |
+| 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24); real-OS autostart + kill-9 recovery demonstrated on local Windows dev-host 2026-07-25 (Task Scheduler + supervisor wrapper, 2/2 kills recovered in ~2s each — see callout above) | literal 24h duration — pending first scheduled nightly run; hosted-CI / real-deployment autostart-kill-9 attestation — pending first CI push / first deployment (local dev-host leg above is evidence toward this, not a substitute for it) |
 
 **Eight of nine stories are fully GREEN on local Linux with no automated
 gap** (2, 3, 4, 5, 6, 7, 8, 9 — story 8 as of the T10.2c re-run on
@@ -478,12 +555,21 @@ code-complete and the one-month dogfood gate (`docs/vision.md` §9 Phase 2)
 begins. One thing stands between here and that gate now that T10.2c has
 landed:
 
-- **The external attestations** — the Windows-CI leg awaits the first push
-  to a runner, the literal 24h soak awaits its first scheduled nightly
-  trigger, and story 1's ≤3s timing awaits a manual run. These are
-  attestations this document cannot itself produce from this environment,
-  and it does not claim to.
+- **The external attestations** — the Windows-CI leg was pushed
+  2026-07-25 (commit `12ed9b9`) but its run result has not been
+  independently observed from this session and is not claimed as green;
+  the literal 24h soak awaits its first scheduled nightly trigger; story
+  1's ≤3s timing awaits a manual run; and the real-OS autostart/kill-9
+  leg now has a local-Windows-dev-host demonstration (2026-07-25, see row
+  9) but still awaits the hosted-CI/real-deployment leg specifically.
+  These are attestations this document cannot itself produce from this
+  environment, and it does not claim to.
 
 The local-Linux legs of every row are green: rows 1–7 and 9 as of
 2026-07-19 (this document's authoring session), row 8 as of 2026-07-20
-(T10.2c's re-run, see above).
+(T10.2c's re-run, see above). Local-**Windows** dev-host evidence was
+added 2026-07-24 (full-suite pass, 5 real bugs found/fixed) and extended
+2026-07-25 (openapi-snapshot CRLF fix, pause&diff browser verification,
+autostart/kill-9 recovery demonstration) — see the dated callouts above;
+none of this substitutes for the hosted `windows-latest` CI leg itself,
+which remains the literal M10 DoD gate.

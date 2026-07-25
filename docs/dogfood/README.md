@@ -6,6 +6,16 @@ running daemon instance. It documents mechanical plumbing only — no
 judgment about note content. All paths below are placeholders; substitute
 your own.
 
+**Steps 2–9 below are now scripted**: `scripts/dogfood/init.sh <name>
+[port]` does the scratch-vault-plus-daemon plumbing this runbook describes
+by hand (bootstrap token, start daemon, mint a real token, register the
+sync root, initial rescan), with `deinit.sh`/`destroy.sh <name>` for
+teardown. The manual steps below remain accurate for understanding what
+the script does or for departing from it (e.g. real vault content instead
+of synthetic test files). For running the daemon persistently in the
+background (autostart + crash recovery) rather than as a short-lived
+foreground/backgrounded process, see `docs/dogfood/windows-service.md`.
+
 Everything this runbook creates lives **outside this repo's working
 tree**, under a scratch directory such as `$HOME/.local/share/akasha-dogfood/`.
 Nothing here is ever `git add`ed; `data/` (the personal-vault-content
