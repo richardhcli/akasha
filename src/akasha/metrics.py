@@ -238,12 +238,28 @@ def _sample_rss_bytes_windows() -> int:  # pragma: no cover - Windows-only branc
             ("PeakPagefileUsage", ctypes.c_size_t),
         )
 
+    # ctypes defaults undeclared argtypes/restype to 32-bit C int, which
+    # truncates GetCurrentProcess's 64-bit pseudo-handle (0xFFFF...FFFF) to
+    # 0xFFFFFFFF -- GetProcessMemoryInfo then rejects it with
+    # ERROR_INVALID_HANDLE and this whole function silently returns 0 on
+    # every real Windows process. Declaring the true Win32 signatures fixes
+    # the 64-bit handle marshaling (verified against a live GetLastError()
+    # probe: 0 => 6 ERROR_INVALID_HANDLE before this fix, 1 => 0 after).
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.argtypes = []
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_ProcessMemoryCounters),
+        wintypes.DWORD,
+    ]
+
     counters = _ProcessMemoryCounters()
     counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
-    handle = ctypes.windll.kernel32.GetCurrentProcess()  # type: ignore[attr-defined]
-    ok = ctypes.windll.psapi.GetProcessMemoryInfo(  # type: ignore[attr-defined]
-        handle, ctypes.byref(counters), counters.cb
-    )
+    handle = kernel32.GetCurrentProcess()
+    ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
     return int(counters.WorkingSetSize) if ok else 0
 
 

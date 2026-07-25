@@ -91,63 +91,69 @@ def test_split_merge_resolve_sequences_leave_zero_transitively_dangling(
     """
     with tempfile.TemporaryDirectory() as tmp:
         conn = _fresh_conn(Path(tmp))
-
-        # Seed graph: several live nodes with a few inbound edges so splits
-        # have something to reassign / enqueue.
-        seed_nodes = [
-            store.create_node(conn, "claim", f"seed-{i}", author="hyp").id
-            for i in range(5)
-        ]
-        for i in range(3):
-            _make_edge(conn, seed_nodes[i], seed_nodes[i + 1])
-        _assert_zero_transitively_dangling(conn)
-
-        n_ops = data.draw(st.integers(min_value=3, max_value=12), label="n_ops")
-        for _ in range(n_ops):
-            live = _live_node_ids(conn)
-            open_reassign = store.find_open_reviews(conn, cause_kind="reassignment")
-
-            choices: list[str] = []
-            if len(live) >= 1:
-                choices.append("split")
-            if len(live) >= 2:
-                choices.append("merge")
-            if open_reassign:
-                choices.append("resolve")
-            if not choices:
-                break
-
-            op = data.draw(st.sampled_from(choices), label="op")
-
-            if op == "split":
-                target = data.draw(st.sampled_from(live), label="split_target")
-                n_parts = data.draw(st.integers(min_value=2, max_value=3), label="n_parts")
-                store.split_node(
-                    conn,
-                    target,
-                    parts=[_part(f"split-{target}-{j}") for j in range(n_parts)],
-                )
-
-            elif op == "merge":
-                pair = data.draw(
-                    st.lists(
-                        st.sampled_from(live),
-                        min_size=2,
-                        max_size=2,
-                        unique=True,
-                    ),
-                    label="merge_pair",
-                )
-                store.merge_nodes(conn, pair)
-
-            elif op == "resolve":
-                item = data.draw(st.sampled_from(open_reassign), label="resolve_item")
-                envelope = json.loads(item["cause_ref"])
-                successors = envelope["successors"]
-                chosen = data.draw(st.sampled_from(successors), label="chosen_successor")
-                review.resolve_reassignment(conn, item["id"], chosen)
-
+        # sqlite3 keeps the db file handle open for the life of `conn`; on
+        # Windows (unlike POSIX) you cannot delete/rmtree a file that's still
+        # open, so TemporaryDirectory's own cleanup raises PermissionError
+        # unless the connection is explicitly closed first.
+        try:
+            # Seed graph: several live nodes with a few inbound edges so splits
+            # have something to reassign / enqueue.
+            seed_nodes = [
+                store.create_node(conn, "claim", f"seed-{i}", author="hyp").id
+                for i in range(5)
+            ]
+            for i in range(3):
+                _make_edge(conn, seed_nodes[i], seed_nodes[i + 1])
             _assert_zero_transitively_dangling(conn)
+
+            n_ops = data.draw(st.integers(min_value=3, max_value=12), label="n_ops")
+            for _ in range(n_ops):
+                live = _live_node_ids(conn)
+                open_reassign = store.find_open_reviews(conn, cause_kind="reassignment")
+
+                choices: list[str] = []
+                if len(live) >= 1:
+                    choices.append("split")
+                if len(live) >= 2:
+                    choices.append("merge")
+                if open_reassign:
+                    choices.append("resolve")
+                if not choices:
+                    break
+
+                op = data.draw(st.sampled_from(choices), label="op")
+
+                if op == "split":
+                    target = data.draw(st.sampled_from(live), label="split_target")
+                    n_parts = data.draw(st.integers(min_value=2, max_value=3), label="n_parts")
+                    store.split_node(
+                        conn,
+                        target,
+                        parts=[_part(f"split-{target}-{j}") for j in range(n_parts)],
+                    )
+
+                elif op == "merge":
+                    pair = data.draw(
+                        st.lists(
+                            st.sampled_from(live),
+                            min_size=2,
+                            max_size=2,
+                            unique=True,
+                        ),
+                        label="merge_pair",
+                    )
+                    store.merge_nodes(conn, pair)
+
+                elif op == "resolve":
+                    item = data.draw(st.sampled_from(open_reassign), label="resolve_item")
+                    envelope = json.loads(item["cause_ref"])
+                    successors = envelope["successors"]
+                    chosen = data.draw(st.sampled_from(successors), label="chosen_successor")
+                    review.resolve_reassignment(conn, item["id"], chosen)
+
+                _assert_zero_transitively_dangling(conn)
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------------------

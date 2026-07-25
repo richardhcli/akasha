@@ -1041,7 +1041,12 @@ class Reconciler:
         if current == text:
             return False
         tmp_path = target.with_name(f".{target.name}.tmp-{secrets.token_hex(8)}")
-        tmp_path.write_text(text, encoding="utf-8")
+        # newline="" disables Path.write_text's platform-default newline
+        # translation (os.linesep) -- without it, every LF in this already-
+        # canonical `text` (spec §4.3: LF only) gets silently rewritten to
+        # CRLF on disk on Windows, corrupting the on-disk canonicalization
+        # invariant despite the in-memory string being correct.
+        tmp_path.write_text(text, encoding="utf-8", newline="")
         retry_with_backoff(lambda: os.replace(tmp_path, target))
         self.origin.record_write(path, object_hash(text.encode("utf-8")))
         return True

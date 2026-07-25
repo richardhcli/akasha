@@ -144,83 +144,96 @@ def _assert_gc_safety(conn: sqlite3.Connection) -> None:
 def test_store_invariants_over_random_operation_sequences(data: st.DataObject) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         conn = _fresh_conn(Path(tmp))
-        live_node_ids: list[str] = []
-        live_edge_ids: list[str] = []
+        # sqlite3 keeps the db file handle open for the life of `conn`; on
+        # Windows (unlike POSIX) you cannot delete/rmtree a file that's still
+        # open, so TemporaryDirectory's own cleanup raises PermissionError
+        # unless the connection is explicitly closed first.
+        try:
+            live_node_ids: list[str] = []
+            live_edge_ids: list[str] = []
 
-        n_ops = data.draw(st.integers(min_value=1, max_value=15), label="n_ops")
-        for _ in range(n_ops):
-            choices = ["create_node"]
-            if live_node_ids:
-                choices += ["commit_node", "create_edge"]
-            if live_edge_ids:
-                choices += ["retract_edge"]
-            op = data.draw(st.sampled_from(choices), label="op")
+            n_ops = data.draw(st.integers(min_value=1, max_value=15), label="n_ops")
+            for _ in range(n_ops):
+                choices = ["create_node"]
+                if live_node_ids:
+                    choices += ["commit_node", "create_edge"]
+                if live_edge_ids:
+                    choices += ["retract_edge"]
+                op = data.draw(st.sampled_from(choices), label="op")
 
-            if op == "create_node":
-                node_type = data.draw(st.sampled_from(_NODE_TYPES), label="node_type")
-                body = data.draw(_body_strategy, label="body")
-                node = store.create_node(conn, node_type, body, author="hyp")
-                live_node_ids.append(node.id)
+                if op == "create_node":
+                    node_type = data.draw(st.sampled_from(_NODE_TYPES), label="node_type")
+                    body = data.draw(_body_strategy, label="body")
+                    node = store.create_node(conn, node_type, body, author="hyp")
+                    live_node_ids.append(node.id)
 
-            elif op == "commit_node":
-                node_id = data.draw(st.sampled_from(live_node_ids), label="commit_target")
-                new_body = data.draw(_body_strategy, label="new_body")
-                change_class = data.draw(st.sampled_from(_CHANGE_CLASSES), label="change_class")
-                store.commit_node(
-                    conn,
-                    node_id,
-                    new_body=new_body,
-                    change_class=change_class,
-                    facets_touched=[],
-                    author="hyp",
+                elif op == "commit_node":
+                    node_id = data.draw(st.sampled_from(live_node_ids), label="commit_target")
+                    new_body = data.draw(_body_strategy, label="new_body")
+                    change_class = data.draw(
+                        st.sampled_from(_CHANGE_CLASSES), label="change_class"
+                    )
+                    store.commit_node(
+                        conn,
+                        node_id,
+                        new_body=new_body,
+                        change_class=change_class,
+                        facets_touched=[],
+                        author="hyp",
+                    )
+
+                elif op == "create_edge":
+                    src = data.draw(st.sampled_from(live_node_ids), label="edge_src")
+                    dst = data.draw(st.sampled_from(live_node_ids), label="edge_dst")
+                    edge_type = data.draw(st.sampled_from(_EDGE_TYPES), label="edge_type")
+                    provenance = data.draw(st.sampled_from(_PROVENANCES), label="provenance")
+                    facet_binding = "*" if edge_type in JUSTIFICATION_EDGE_TYPES else None
+                    edge = store.create_edge(
+                        conn,
+                        src=src,
+                        dst=dst,
+                        edge_type=edge_type,
+                        facet_binding=facet_binding,
+                        provenance=provenance,
+                    )
+                    live_edge_ids.append(edge.id)
+
+                elif op == "retract_edge":
+                    edge_id = data.draw(st.sampled_from(live_edge_ids), label="retract_target")
+                    store.retract_edge(conn, edge_id)
+                    live_edge_ids.remove(edge_id)
+
+                # Invariants 1 & 2 must hold after every single operation, not
+                # just at the end of the sequence.
+                _assert_no_dangling_edges(conn)
+                _assert_heads_reachable(conn)
+
+            # Invariant 3: as-of correctness, checked once per sequence (if any
+            # node accrued more than one commit).
+            multi_commit_nodes = [
+                nid for nid in live_node_ids if len(store.history(conn, nid)) >= 2
+            ]
+            if multi_commit_nodes:
+                node_id = data.draw(st.sampled_from(multi_commit_nodes), label="as_of_node")
+                commits = store.history(conn, node_id)
+                idx = data.draw(
+                    st.integers(min_value=0, max_value=len(commits) - 2), label="as_of_idx"
                 )
+                older, newer = commits[idx], commits[idx + 1]
+                if older["ts"] < newer["ts"]:
+                    as_of_ts = _midpoint_ts(older["ts"], newer["ts"])
+                    result = store.get_node(conn, node_id, as_of=as_of_ts)
+                    expected_bytes = conn.execute(
+                        "SELECT bytes FROM objects WHERE hash=?", (older["object_hash"],)
+                    ).fetchone()[0]
+                    expected_content = json.loads(expected_bytes)
+                    assert result.body == expected_content["body"], (
+                        f"as-of query at {as_of_ts!r} (between commits {older['hash']!r} and "
+                        f"{newer['hash']!r}) returned body {result.body!r}, expected "
+                        f"{expected_content['body']!r} (the older commit's object)"
+                    )
 
-            elif op == "create_edge":
-                src = data.draw(st.sampled_from(live_node_ids), label="edge_src")
-                dst = data.draw(st.sampled_from(live_node_ids), label="edge_dst")
-                edge_type = data.draw(st.sampled_from(_EDGE_TYPES), label="edge_type")
-                provenance = data.draw(st.sampled_from(_PROVENANCES), label="provenance")
-                facet_binding = "*" if edge_type in JUSTIFICATION_EDGE_TYPES else None
-                edge = store.create_edge(
-                    conn,
-                    src=src,
-                    dst=dst,
-                    edge_type=edge_type,
-                    facet_binding=facet_binding,
-                    provenance=provenance,
-                )
-                live_edge_ids.append(edge.id)
-
-            elif op == "retract_edge":
-                edge_id = data.draw(st.sampled_from(live_edge_ids), label="retract_target")
-                store.retract_edge(conn, edge_id)
-                live_edge_ids.remove(edge_id)
-
-            # Invariants 1 & 2 must hold after every single operation, not
-            # just at the end of the sequence.
-            _assert_no_dangling_edges(conn)
-            _assert_heads_reachable(conn)
-
-        # Invariant 3: as-of correctness, checked once per sequence (if any
-        # node accrued more than one commit).
-        multi_commit_nodes = [nid for nid in live_node_ids if len(store.history(conn, nid)) >= 2]
-        if multi_commit_nodes:
-            node_id = data.draw(st.sampled_from(multi_commit_nodes), label="as_of_node")
-            commits = store.history(conn, node_id)
-            idx = data.draw(st.integers(min_value=0, max_value=len(commits) - 2), label="as_of_idx")
-            older, newer = commits[idx], commits[idx + 1]
-            if older["ts"] < newer["ts"]:
-                as_of_ts = _midpoint_ts(older["ts"], newer["ts"])
-                result = store.get_node(conn, node_id, as_of=as_of_ts)
-                expected_bytes = conn.execute(
-                    "SELECT bytes FROM objects WHERE hash=?", (older["object_hash"],)
-                ).fetchone()[0]
-                expected_content = json.loads(expected_bytes)
-                assert result.body == expected_content["body"], (
-                    f"as-of query at {as_of_ts!r} (between commits {older['hash']!r} and "
-                    f"{newer['hash']!r}) returned body {result.body!r}, expected "
-                    f"{expected_content['body']!r} (the older commit's object)"
-                )
-
-        # Invariant 4: S0-GC safety, checked once at the end of the sequence.
-        _assert_gc_safety(conn)
+            # Invariant 4: S0-GC safety, checked once at the end of the sequence.
+            _assert_gc_safety(conn)
+        finally:
+            conn.close()

@@ -15,6 +15,35 @@ When you finish a task: flip its status here in the same change that closes
 the task, and note anything a future agent needs (e.g. a new
 `docs/spec-questions.md` entry) in the Notes column.
 
+> **Real Windows verification pass, 2026-07-24.** Every milestone below was
+> previously built/verified on Linux only; several notes explicitly flagged
+> Windows-only code (T4.9's `msvcrt` lock, T9.1's simulated `winerror`
+> injection, T9.2's `ctypes`/psapi RSS sampler) as "code-reviewed but never
+> runtime-exercised on Windows." This session ran the full gate — `ruff
+> check`, `pyright src`, `tests/unit`, `tests/property`, `tests/integration`
+> (incl. Playwright/Chromium), `tests/battery`, and the accelerated soak
+> proxy — directly on a real Windows 11 host (a local dev-host run, not the
+> hosted `windows-latest` CI runner, which has still never executed this
+> suite — see each milestone's existing "CI-leg pending first push"
+> framing, which stands unchanged). This found and fixed 5 genuine,
+> previously-latent bugs plus 1 test-fixture issue; full detail and final
+> Windows pass counts are in `docs/acceptance.md`'s 2026-07-24 callout and
+> its row-7/row-9 updates. Summary: (1) missing `.gitattributes` let
+> Windows `core.autocrlf` corrupt 114 golden fixtures on checkout; (2)
+> `metrics.py`'s Windows RSS sampler silently returned 0 (ctypes handle
+> truncation); (3) `reconcile.py`'s write-back corrupted LF to CRLF on
+> every Windows write (`Path.write_text` without `newline=""`) — a real
+> product defect on the spec's own release-gate platform; (4) `daemon.py`'s
+> `_acquire_windows` raised a raw `PermissionError` instead of the typed
+> `AlreadyRunningError` on genuine second-acquisition; (5) `pyright`
+> flipped which platform branch it type-checks and found 10 new errors in
+> the POSIX `fcntl` lock path, fixed with the mirror-image guard T4.9
+> already used for the `msvcrt` path. All fixed; `ruff`/`pyright` clean and
+> **639 tests pass** on this Windows host. No task `Status` cell below
+> changes as a result (every task was already `DONE`; this is fresh
+> evidence the code those tasks shipped is now proven correct on the
+> platform the spec names as release gate, not a re-verification of scope).
+
 ---
 
 ## M0 — Scaffold (Depends on: nothing) — **CLOSED**

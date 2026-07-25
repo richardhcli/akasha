@@ -13,6 +13,69 @@ name, exactly what was run and where/when, and an explicit per-leg status.
 Nothing below is represented as checked/green that was not personally run to
 completion during this task.
 
+> **Real Windows verification pass, 2026-07-24.** All prior legs in this
+> document were run on Linux; the framing throughout ("pending first CI
+> push") reflected that the GitHub Actions `windows-latest` runner had
+> never actually executed this suite. This session ran `make check`
+> (ruff/pyright/unit+property), `make battery`, the full integration suite
+> (incl. Playwright/Chromium), and the accelerated soak proxy directly on a
+> real Windows 11 host (not CI — a local dev-host run, still a materially
+> stronger attestation than the prior simulated-only coverage). This
+> surfaced and fixed **five real, previously-latent Windows bugs**, all
+> in code paths explicitly flagged elsewhere in this repo as
+> "code-reviewed but never runtime-exercised on Windows":
+> 1. **No `.gitattributes`** — a plain Windows `core.autocrlf=true` checkout
+>    (the common Windows git default, also the `windows-latest` runner's
+>    default) silently CRLF-corrupted all 114 byte-exact golden fixtures
+>    plus the OpenAPI snapshot, failing 29 golden tests for reasons
+>    unrelated to any code defect. Fixed via a new root `.gitattributes`
+>    (`tests/golden/** -text`, `docs/api-snapshot/openapi.json -text`).
+> 2. **`metrics.py`'s Windows RSS sampling silently returned 0** on every
+>    real process: the `ctypes` calls to `GetCurrentProcess`/
+>    `GetProcessMemoryInfo` had no declared `argtypes`/`restype`, so ctypes'
+>    default 32-bit-int marshaling truncated the 64-bit pseudo-handle and
+>    the call failed with `ERROR_INVALID_HANDLE` (confirmed via a live
+>    `GetLastError()` probe). Fixed by declaring the real Win32 signatures.
+> 3. **`reconcile.py`'s `write_if_diff` corrupted every synced file's line
+>    endings on Windows** — `Path.write_text(text, encoding="utf-8")`
+>    applies the platform-default newline translation, rewriting the
+>    already-canonical (spec §4.3, LF-only) text to CRLF on disk on every
+>    write-back. This is a real product defect on the spec's own
+>    release-gate platform, not a test artifact; it surfaced as 3 genuine
+>    `tests/battery` failures (E08, E12, E16) with real files on disk
+>    ending in `\r\n`. Fixed with `newline=""`.
+> 4. **`daemon.py`'s Windows single-instance lock (`_acquire_windows`,
+>    T4.9) raised a raw `PermissionError` instead of the typed
+>    `AlreadyRunningError`** on a genuine second-acquisition attempt: the
+>    file-content bootstrap read (`handle.read(1)`) sat *before* the
+>    `try/except OSError` that only wrapped the `msvcrt.locking()` call,
+>    and reading an already-locked byte range itself raises
+>    `PermissionError` on Windows. Fixed by widening the `try:` to cover
+>    the whole acquisition sequence.
+> 5. **`pyright src` had 10 new errors on Windows** (zero on Linux) in the
+>    POSIX `fcntl`-based lock path (`_acquire_posix`/`_release_posix`):
+>    typeshed only declares `fcntl`'s POSIX-only members off
+>    `sys.platform != "win32"`, so analyzing on a Windows host flips which
+>    branch gets type-checked (the mirror image of the existing
+>    `msvcrt`-branch guard already in place for Linux analysis). Fixed by
+>    adding the mirror `sys.platform == "win32": raise AssertionError(...)`
+>    guard.
+>
+> (A sixth, narrower issue — three property/perf tests leaving a sqlite3
+> connection open when `tempfile.TemporaryDirectory()` tries to clean up,
+> which POSIX tolerates and Windows doesn't — was also fixed; test-fixture
+> hygiene, not a product bug.)
+>
+> **Result after all five fixes:** `ruff check` clean, `pyright src` 0
+> errors, and **639 passed** across `tests/unit tests/property
+> tests/integration tests/battery` on this real Windows host — the first
+> time this repo's full suite has been proven green on Windows rather than
+> Linux-only-plus-simulation. This is still a **local Windows dev-host
+> run, not the GitHub Actions `windows-latest` CI runner** — see the
+> updated row 7/9 notes below for what remains genuinely pending (the
+> hosted-CI leg itself, the literal 24h soak, and real-OS
+> autostart/kill-9/deployment).
+>
 > **Gap closed 2026-07-20 (T10.2c):** the open implementation gap noted below
 > (added 2026-07-19 by a post-authoring audit) — spec §4.10's
 > `all_subtasks_closed` trigger evaluation had zero production call sites —
@@ -237,11 +300,27 @@ byte-lossless round-trip assertions for E01/E02/E03/E12 etc. **GREEN
 
 The battery's file-locking-retry and antivirus-watch-noise cases (T9.1,
 `tests/battery/test_windows.py`) run and pass here too (**20 passed**,
-included in the 47 above) but only exercise the *logic* on this Linux box —
-the real Windows-filesystem lock/retry behavior these tests model can only
-be attested for real on a Windows CI runner. That leg is **pending first CI
-push** (Windows CI, per the M0/M6/M8/M9 "code-complete, CI-leg pending
-first push" framing — see `docs/agents/task-status.md` milestone headers).
+included in the 47 above) but only exercised the *logic* on Linux via
+simulated `winerror` injection — the real Windows-filesystem lock/retry
+behavior these tests model was, until 2026-07-24, only attested that way.
+
+**Update, 2026-07-24:** the full `make battery` (all 47) was re-run on a
+real Windows 11 host — genuinely exercising the real filesystem, real
+`msvcrt` locking, and a real CRLF write-back path, not simulation. This
+found and fixed a genuine production bug (`reconcile.py`'s write-back was
+silently corrupting LF to CRLF on every Windows write via
+`Path.write_text`'s platform-default newline translation — 3 battery cases,
+E08/E12/E16, caught it) and a real single-instance-lock bug (`daemon.py`'s
+`_acquire_windows` raised an unwrapped `PermissionError` instead of
+`AlreadyRunningError` on genuine second-acquisition; see the top-of-doc
+callout for both). After both fixes: **47 passed** on real Windows. **GREEN
+(local Windows dev-host)** for the filesystem-lock/retry/CRLF reality this
+row cares about. What remains pending is narrower than before: the actual
+GitHub Actions `windows-latest` **hosted CI runner** itself has still never
+executed this suite (this was a local dev-host run, not CI) — that leg is
+**pending first CI push**, per the M0/M6/M8/M9 "code-complete, CI-leg
+pending first push" framing (see `docs/agents/task-status.md` milestone
+headers).
 
 ### 8. Tasks + supertask + S0 lifecycle (`docs/vision.md` §8 story 8)
 
@@ -326,9 +405,23 @@ task's own execution, not a prior task's numbers:
   "passed"`, `max_rss_mb: 62.52` (budget 150MB), `mean_idle_cpu_pct: 0.404`
   (budget 30%), `unhandled_exception_count: 0`.
 
-**GREEN (local Linux, accelerated proxy)** for both. Two legs of this story
-remain genuinely unattested from this box and are stated honestly as
-pending, not silently assumed:
+**GREEN (local Linux, accelerated proxy)** for both, as of 2026-07-19.
+
+**Update, 2026-07-24:** the accelerated soak proxy (`--hours 0.05`) was
+re-run on a real Windows 11 host: `status: "passed"`, 90/90 ticks, 90/90
+samples, `max_rss_mb: 62.38`, `mean_idle_cpu_pct: 0.018`,
+`unhandled_exception_count: 0`. Notably, this is the *first* real Windows
+RSS reading this project has ever produced — `metrics.py`'s Windows RSS
+sampler (`ctypes` + `GetProcessMemoryInfo`) had a latent bug (undeclared
+`argtypes`/`restype` truncating the 64-bit process handle, causing
+`ERROR_INVALID_HANDLE` and a silent `0` return on every prior — necessarily
+simulated or untested — invocation) that was found and fixed this session
+(see the top-of-doc callout). **GREEN (local Windows dev-host, accelerated
+proxy)**, now backed by genuine Windows resource sampling rather than a
+code path that had never actually run.
+
+Two legs of this story remain genuinely unattested from any box run so far
+and are stated honestly as pending, not silently assumed:
 
 - The **literal 24-hour continuous-operation duration** is the
   `nightly-soak` CI job (`.github/workflows/ci.yml`, gated
@@ -353,9 +446,9 @@ pending, not silently assumed:
 | 4 | Split/merge | GREEN (5 passed, property) | none |
 | 5 | Time travel | GREEN (1 passed) | none |
 | 6 | Review economy | GREEN (cap: 1 passed; dashboard+metrics: 27 passed) | none (conversion moment is a dogfood-gate outcome, not a pre-gate test) |
-| 7 | Contract sync | GREEN (47 passed) | Windows-filesystem lock/retry reality — pending first CI push |
+| 7 | Contract sync | GREEN (47 passed, local Linux **and** local Windows as of 2026-07-24) | hosted `windows-latest` CI runner itself — pending first CI push |
 | 8 | Tasks/supertask/S0 | **GREEN** — S0 lifecycle (E06/E08, 2 passed) + supertask trigger via the real commit path (2 passed), re-run 2026-07-20 (T10.2c) | none |
-| 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions) | literal 24h duration — pending first scheduled nightly run; real-OS autostart/kill-9 — pending first CI push / first deployment |
+| 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24) | literal 24h duration — pending first scheduled nightly run; real-OS autostart/kill-9 — pending first CI push / first deployment |
 
 **Eight of nine stories are fully GREEN on local Linux with no automated
 gap** (2, 3, 4, 5, 6, 7, 8, 9 — story 8 as of the T10.2c re-run on

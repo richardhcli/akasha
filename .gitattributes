@@ -1,0 +1,12 @@
+# Byte-exact test fixtures and the frozen migration-contract snapshot must
+# never be rewritten by git's line-ending normalization, regardless of a
+# contributor's or CI runner's core.autocrlf setting. Some golden inputs
+# intentionally contain raw CR/CRLF bytes (they exist to exercise
+# kernel/canonical.py's own LF normalization, per docs/mvp-spec.md §4.3); a
+# plain `core.autocrlf=true` Windows checkout (the common Windows git default,
+# also GitHub-hosted windows-latest runners' default) otherwise CRLF-mangles
+# both those inputs and every canonical LF-only expected/snapshot file on
+# checkout, causing spurious byte-exact test failures unrelated to any code
+# defect.
+tests/golden/** -text
+docs/api-snapshot/openapi.json -text

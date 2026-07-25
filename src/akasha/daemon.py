@@ -223,6 +223,13 @@ class AlreadyRunningError(RuntimeError):
 
 
 def _acquire_posix(handle: IO[bytes], lock_path: Path) -> None:
+    # Mirrors _acquire_windows's guard below: typeshed only declares fcntl's
+    # POSIX-only members under `sys.platform != "win32"`, so this early
+    # return keeps the rest of the function unreachable (hence unchecked) to
+    # pyright when analyzing on a Windows host, matching the runtime reality
+    # that this branch only ever executes on POSIX (caller-guarded too).
+    if sys.platform == "win32":  # pragma: no cover - POSIX-only branch
+        raise AssertionError("_acquire_posix called on Windows")
     import fcntl
 
     try:
@@ -232,6 +239,8 @@ def _acquire_posix(handle: IO[bytes], lock_path: Path) -> None:
 
 
 def _release_posix(handle: IO[bytes]) -> None:
+    if sys.platform == "win32":  # pragma: no cover - POSIX-only branch
+        raise AssertionError("_release_posix called on Windows")
     import fcntl
 
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -251,13 +260,22 @@ def _acquire_windows(handle: IO[bytes], lock_path: Path) -> None:
     # position; the file must actually contain that many bytes, so ensure
     # at least one byte exists before requesting a 1-byte non-blocking
     # exclusive lock (LK_NBLCK).
-    handle.seek(0)
-    if not handle.read(1):
-        handle.seek(0)
-        handle.write(b"\0")
-        handle.flush()
-    handle.seek(0)
+    #
+    # The whole sequence -- not just the locking() call -- must be inside
+    # the try: on real Windows, reading a byte range another handle already
+    # holds via msvcrt.locking (e.g. a second acquisition attempt in the
+    # same process, exercised by test_second_acquisition_fails_with_clear_
+    # typed_error) raises PermissionError from handle.read(1) itself,
+    # before locking() is ever reached. This was unreachable/unverified on
+    # a Linux dev host (msvcrt doesn't exist there) and only surfaced when
+    # actually run on Windows.
     try:
+        handle.seek(0)
+        if not handle.read(1):
+            handle.seek(0)
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError as exc:
         raise AlreadyRunningError(lock_path) from exc
