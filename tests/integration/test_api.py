@@ -842,6 +842,76 @@ def test_sync_rescan_converges_a_real_vault_edit_and_returns_summary(api, tmp_pa
     assert store.read_base_snapshot(conn, root["id"], str(path)) == final_on_disk
 
 
+def test_sync_rescan_discovers_preexisting_files_never_seen_by_on_change(api, tmp_path):
+    """T11.3: reproduces T11.1's exact empirical gap over real HTTP.
+
+    Register a sync root against a tmp dir that already contains a real
+    ``.md`` file with a ``^tm-new`` marker -- never passed through
+    ``on_change``, so it has no ``sync_files`` row -- then hit
+    ``POST /v1/sync/rescan`` and confirm it is discovered and reconciled
+    on the very first call (not just after a live watcher event).
+    """
+    client, h, conn = api["client"], api["human"], api["conn"]
+    root = client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    ).json()
+    path = tmp_path / "preexisting.md"
+    path.write_text(_managed("A brand new idea ^tm-new\n"), encoding="utf-8")
+
+    assert store.list_sync_files(conn) == []  # never tracked before this call
+
+    resp = client.post("/v1/sync/rescan", headers=h)
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["files_reconciled"] == 1
+    assert summary["files_missing"] == 0
+    assert summary["reviews_open"] == 0  # a clean ^tm-new mint raises no review
+
+    tracked = store.list_sync_files(conn)
+    assert [f["path"] for f in tracked] == [str(path)]
+    assert tracked[0]["sync_root_id"] == root["id"]
+
+    final_text = path.read_text(encoding="utf-8")
+    assert "^tm-new" not in final_text
+    assert "A brand new idea" in final_text
+    assert store.read_base_snapshot(conn, root["id"], str(path)) == final_text
+
+
+def test_sync_rescan_discovery_is_idempotent_on_second_call(api, tmp_path):
+    """A second ``POST /v1/sync/rescan`` after discovery makes zero duplicate writes."""
+    client, h, conn = api["client"], api["human"], api["conn"]
+    client.post(
+        "/v1/sync/roots", json={"name": "vault", "root_path": str(tmp_path)}, headers=h
+    )
+    path = tmp_path / "preexisting.md"
+    path.write_text(_managed("A brand new idea ^tm-new\n"), encoding="utf-8")
+
+    resp1 = client.post("/v1/sync/rescan", headers=h)
+    assert resp1.json()["files_reconciled"] == 1
+    assert resp1.json()["reviews_open"] == 0
+
+    assert len(store.list_sync_files(conn)) == 1
+    node_ids_after_first = set(store.list_live_node_ids(conn))
+    assert len(node_ids_after_first) == 1
+    text_after_first = path.read_text(encoding="utf-8")
+    mtime_before_second = path.stat().st_mtime_ns
+
+    resp2 = client.post("/v1/sync/rescan", headers=h)
+    assert resp2.status_code == 200
+    summary2 = resp2.json()
+    assert summary2["files_reconciled"] == 1
+    assert summary2["files_missing"] == 0
+    assert summary2["reviews_open"] == 0
+
+    # No duplicate sync_files row.
+    assert len(store.list_sync_files(conn)) == 1
+    # No duplicate node mint: the same single node id survives.
+    assert store.list_live_node_ids(conn) == node_ids_after_first
+    # Zero further writes: the file on disk is untouched.
+    assert path.stat().st_mtime_ns == mtime_before_second
+    assert path.read_text(encoding="utf-8") == text_after_first
+
+
 def test_sync_status_and_rescan_require_auth_missing_token_401(api):
     client = api["client"]
     resp = client.get("/v1/sync/status")

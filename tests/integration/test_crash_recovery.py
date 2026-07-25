@@ -233,6 +233,77 @@ def test_reconcile_all_skips_missing_file_without_crashing(tmp_path):
     assert summary["files_reconciled"] == 1
 
 
+def test_reconcile_all_discovers_preexisting_files_never_seen_by_on_change(tmp_path):
+    """T11.3: a freshly registered root's pre-existing ``.md`` files are discovered.
+
+    Reproduces T11.1's exact empirical gap (see the ``docs/spec-questions.md``
+    entry this task resolves): register a sync root pointing at a tmp dir
+    that already contains a real ``.md`` file with a ``^tm-new`` marker --
+    never passed through ``on_change``, so it has no ``sync_files`` row at
+    all -- then call ``reconcile_all`` and confirm it is discovered and
+    reconciled on the very first call.
+    """
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+
+    path = tmp_path / "preexisting.md"
+    path.write_text(_managed("A brand new idea ^tm-new\n"), encoding="utf-8")
+
+    # Never touched: no sync_files row, no base snapshot.
+    assert store.list_sync_files(conn) == []
+
+    summary = reconcile.reconcile_all(conn, OriginTracker())
+    assert summary["files_reconciled"] == 1
+    assert summary["files_missing"] == 0
+    assert summary["reviews_open"] == 0  # a clean ^tm-new mint raises no review
+
+    tracked = store.list_sync_files(conn)
+    assert [f["path"] for f in tracked] == [str(path)]
+    assert tracked[0]["sync_root_id"] == root_id
+
+    final_text = path.read_text(encoding="utf-8")
+    assert "^tm-new" not in final_text
+    assert "A brand new idea" in final_text
+    assert base_store.get(conn, root_id, str(path)) == final_text
+
+
+def test_reconcile_all_discovery_is_idempotent_on_second_call(tmp_path):
+    """A second ``reconcile_all`` call after discovery makes zero duplicate writes.
+
+    No duplicate ``sync_files`` row, no duplicate node mint for the same
+    ``^tm-new`` marker -- the file was already adopted by the first call.
+    """
+    conn = _conn()
+    _register_root(conn, tmp_path)
+
+    path = tmp_path / "preexisting.md"
+    path.write_text(_managed("A brand new idea ^tm-new\n"), encoding="utf-8")
+
+    summary1 = reconcile.reconcile_all(conn, OriginTracker())
+    assert summary1["files_reconciled"] == 1
+    assert summary1["reviews_open"] == 0
+
+    tracked_after_first = store.list_sync_files(conn)
+    assert len(tracked_after_first) == 1
+    text_after_first = path.read_text(encoding="utf-8")
+    node_ids_after_first = set(store.list_live_node_ids(conn))
+    assert len(node_ids_after_first) == 1
+
+    mtime_before_second = path.stat().st_mtime_ns
+    summary2 = reconcile.reconcile_all(conn, OriginTracker())
+    assert summary2["files_reconciled"] == 1
+    assert summary2["files_missing"] == 0
+    assert summary2["reviews_open"] == 0
+
+    # No duplicate sync_files row.
+    assert len(store.list_sync_files(conn)) == 1
+    # No duplicate node mint: the same single node id survives.
+    assert store.list_live_node_ids(conn) == node_ids_after_first
+    # Zero further writes: the file on disk is untouched.
+    assert path.stat().st_mtime_ns == mtime_before_second
+    assert path.read_text(encoding="utf-8") == text_after_first
+
+
 def test_daemon_serve_runs_startup_reconcile_inside_lock(tmp_path, monkeypatch):
     """``daemon.serve`` invokes the T5.6 startup reconcile before ``uvicorn.run``.
 

@@ -36,6 +36,10 @@ Module layout (mirrors the fable implementation order)
    ``on_change`` pipeline in spec §4.8's pseudocode order, conflict
    persistence (a swappable seam for T5.5), pause&diff persistence, and
    canonical write-back with echo recording.
+6. ``discover_untracked_files`` (build-plan T11.3) — filesystem discovery
+   for files that exist on disk under a registered sync root but have no
+   ``sync_files`` row yet; wired into both ``reconcile_all`` (below) and
+   ``routes/sync.py``'s ``sync_rescan``.
 
 Note on wiring: this task does not wire ``Reconciler`` into the live
 ``Watcher``/daemon — that lands with T5.6. ``Reconciler.on_change`` has the
@@ -1339,6 +1343,48 @@ class Reconciler:
             metrics.record_sync_cycle_ms((time.monotonic() - cycle_start) * 1000.0)
 
 
+# --- filesystem discovery for newly registered sync roots (task T11.3) -------
+
+
+def discover_untracked_files(conn: sqlite3.Connection) -> list[str]:
+    """Paths that exist on disk under a registered sync root but have no ``sync_files`` row yet.
+
+    Closes the gap T11.1 empirically reproduced and logged in
+    ``docs/spec-questions.md``: ``POST /v1/sync/roots`` is a pure DB upsert
+    with no filesystem walk (spec §4.10), so a root registered against a
+    directory that already contains real ``.md`` files never gets those
+    files' paths into ``sync_files`` on its own -- nothing has ever called
+    ``Reconciler.on_change`` on them. Spec §4.8's startup line ("run
+    ``on_change`` for every managed file") does not limit "managed" to
+    rows already durably tracked; the narrowest reading that matches the
+    prose is to also walk each registered root's directory for files it
+    has never seen.
+
+    Walks ``Path(root["root_path"]).rglob("*.md")`` for every
+    ``store.list_sync_roots`` row -- the same idiom
+    ``Reconciler._make_anchor_elsewhere`` already uses internally for its
+    own cross-file anchor scan -- and returns every absolute path not
+    already present in ``{f["path"] for f in store.list_sync_files(conn)}``.
+    A root directory that doesn't (yet) exist on disk is skipped rather
+    than raising (registering a root ahead of creating its directory is
+    not itself an error this helper needs to surface). Read-only: this
+    function performs no writes and calls no ``store.py`` write helper.
+    """
+    known = {f["path"] for f in store.list_sync_files(conn)}
+    discovered: list[str] = []
+    for root in store.list_sync_roots(conn):
+        root_dir = Path(root["root_path"])
+        if not root_dir.exists():
+            continue
+        for candidate in root_dir.rglob("*.md"):
+            candidate_str = str(candidate)
+            if candidate_str in known:
+                continue
+            known.add(candidate_str)
+            discovered.append(candidate_str)
+    return discovered
+
+
 # --- startup reconcile / crash recovery (task T5.6) --------------------------
 
 
@@ -1393,9 +1439,16 @@ def reconcile_all(
     reconciler = Reconciler(conn, origin, projection=projection)
     files_reconciled = 0
     files_missing = 0
-    for f in store.list_sync_files(conn):
+    known_paths = [f["path"] for f in store.list_sync_files(conn)]
+    # build-plan T11.3: also discover files that exist on disk under a
+    # registered sync root but have no ``sync_files`` row yet (see
+    # ``discover_untracked_files``'s docstring) -- computed BEFORE the
+    # known-file loop runs so a file this same pass just adopted via
+    # ``on_change`` below is never double-processed.
+    discovered_paths = discover_untracked_files(conn)
+    for path in known_paths + discovered_paths:
         try:
-            reconciler.on_change(f["path"])
+            reconciler.on_change(path)
         except FileNotFoundError:
             files_missing += 1
             continue

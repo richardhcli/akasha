@@ -1,0 +1,35 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/sync/reconcile.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/api/routes/sync.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_crash_recovery.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_api.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/spec-questions.md"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "All worker claims independently reproduced. pyright's 8 errors are pre-existing, entirely confined to metrics.py's Windows ctypes calls, and verified byte-identical before/after this task's two src changes via git stash/pop -- the worker's 'treated as pass since unrelated' framing is accurate, not a self-graded excuse. Two distinct idempotency-paired test functions confirmed in each test file (discovery-gap repro + second-call-idempotent), not folded into one. sync/watcher.py confirmed untouched. spec-questions.md's original T11.1 entry text preserved verbatim with only the Resolution line appended/replaced, correctly citing T11.3 and run 20260725-064544-M11-discovery-wiring, and correctly leaving Watcher's daemon.serve() absence open. routes/sync.py duplicated the walk-and-append (not delegated to reconcile_all) per the instructed default, and its response shape is unchanged; no golden/OpenAPI snapshot exists for sync routes so there was nothing to regress. No third test file added. Unrelated pre-existing diffs to docs/agents/logs/overnight-runner.log and OVERNIGHT_HALT.md are from a separate overnight-runner process, not claimed by this worker, and don't affect this verdict.",
+  "task_id": "T11.3",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "tests/integration/test_crash_recovery.py .......  tests/integration/test_api.py .......... 68 passed, 1 warning in 2.77s\nruff: All checks passed!\npyright src: 8 errors, 0 warnings, 0 informations (all 8 in src/akasha/metrics.py:250-262, GetCurrentProcess/GetProcessMemoryInfo reportUnknownMemberType/reportUnknownVariableType; confirmed identical via git stash of reconcile.py+routes/sync.py, re-run, stash pop)\ntests/unit tests/property: 411 passed, 1 warning in 5.77s\ntests/battery: 47 passed in 2.10s"
+}

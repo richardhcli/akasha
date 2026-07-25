@@ -75,7 +75,7 @@ from akasha.contract.parser import parse
 from akasha.contract.render import render
 from akasha.kernel import store
 from akasha.sync.origin import OriginTracker
-from akasha.sync.reconcile import Reconciler, hub_state_for
+from akasha.sync.reconcile import Reconciler, discover_untracked_files, hub_state_for
 
 router = APIRouter(prefix="/v1/sync", tags=["sync"])
 
@@ -188,14 +188,25 @@ def sync_rescan(
     ``sync_files`` but no longer present in the vault) is skipped rather
     than failing the whole rescan -- one stale entry must not 500 an
     otherwise-successful convergence of every other file.
+
+    build-plan T11.3: also discovers files that exist on disk under a
+    registered sync root but have no ``sync_files`` row yet (see
+    ``reconcile.discover_untracked_files``'s docstring) -- a brand-new
+    root with real, pre-existing ``.md`` files on disk otherwise reports
+    ``files_reconciled: 0`` forever, since nothing has ever called
+    ``on_change`` on a path the store has never seen before. Duplicated
+    here (rather than delegating to ``reconcile.reconcile_all``) to keep
+    this endpoint's response shape exactly as it already is -- see this
+    task's build-plan Steps.
     """
     reconciler = Reconciler(conn, OriginTracker())
-    files = store.list_sync_files(conn)
+    known_paths = [f["path"] for f in store.list_sync_files(conn)]
+    discovered_paths = discover_untracked_files(conn)
     files_reconciled = 0
     files_missing = 0
-    for f in files:
+    for path in known_paths + discovered_paths:
         try:
-            reconciler.on_change(f["path"])
+            reconciler.on_change(path)
         except FileNotFoundError:
             files_missing += 1
             continue
