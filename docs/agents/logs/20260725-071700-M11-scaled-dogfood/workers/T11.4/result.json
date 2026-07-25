@@ -1,0 +1,10 @@
+{
+  "files_changed": [
+    "docs/dogfood/scaled-smoke-report.md"
+  ],
+  "spec_questions": [],
+  "status": "DONE",
+  "verify_command": "N/A (manual/live-daemon leg per task spec); actually executed: bash $HOME/.local/share/akasha-dogfood/scripts/run_scale.sh {1,10,100} against a real live daemon, plus read-only sqlite cross-checks and daemon.log/daemon.out greps",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "scale 100: rescan wall clock ms: 158; files_reconciled:100,files_missing:0,reviews_open:0; db_ground_truth: live_claim_node_count:100, claim_bodies_matching_fixed_template:100, sync_files_row_count:100, review_queue_open_total:0, review_queue_open_violation_codes:{}; daemon.out/daemon.log grep for error|traceback|exception|warn|W_|E_ across all 3 scales: 0 matches; closing-line grep: MATCH; leak-check: no matches"
+}
