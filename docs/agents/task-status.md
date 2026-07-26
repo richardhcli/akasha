@@ -41,6 +41,28 @@ the task, and note anything a future agent needs (e.g. a new
 > it, and none of the code-level Windows work done 2026-07-24/25 should be
 > read as having closed any hosted-CI leg.
 >
+> **RESOLVED 2026-07-26.** The repo owner made the repository public
+> (adding a REUSE-spec AGPL-3.0-or-later license, commit `b5fc974`) and
+> fixed the account billing problem. The next push showed jobs genuinely
+> running for the first time since 2026-07-11, which immediately surfaced
+> two more real, previously-undiscoverable-from-a-Windows-host bugs: a
+> stale `astral-sh/setup-uv@v9` tag (the action only publishes floating
+> major tags through `v7`; fixed by pinning the exact `v9.0.0` release,
+> commit `ce7d1e5`) and a genuine `pyright` cross-platform gap in
+> `metrics.py`'s Windows RSS sampler (missing the same early
+> platform-guard pattern `daemon.py`'s lock code already used; fixed
+> commit `aa07bad`, verified locally by forcing
+> `pyright --pythonplatform Linux src` on the Windows dev host). **Run
+> `30183257449` (commit `aa07bad`) is the first fully green CI run in this
+> repo's history on real hosted runners** — `check (windows-latest)`,
+> `check (ubuntu-latest)`, `ui-smoke`, `plugin-build`, and `windows-gate`
+> all succeeded. The M10 DoD's "all rows green on Windows CI" condition is
+> now genuinely met; see `docs/acceptance.md` row 7 and its matching
+> 2026-07-26 callout. The literal 24h `nightly-soak`/`nightly-battery`
+> legs are now genuinely runnable but the cron trigger has not fired since
+> the fix, so those remain pending their first scheduled run (not
+> blocked).
+>
 > **Real Windows verification pass, 2026-07-24.** Every milestone below was
 > previously built/verified on Linux only; several notes explicitly flagged
 > Windows-only code (T4.9's `msvcrt` lock, T9.1's simulated `winerror`

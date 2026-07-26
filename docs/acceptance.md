@@ -148,6 +148,33 @@ completion during this task.
 >    this document and in `docs/agents/task-status.md` predates this
 >    discovery and should be read as **blocked on GitHub Actions billing**,
 >    not merely "hasn't been tried yet" — those pushes already happened.
+>
+>    **Resolved the same session, 2026-07-25/26.** The repo owner made the
+>    repository public (adding `LICENSES/AGPL-3.0-or-later.txt` +
+>    `REUSE.toml`, commit `b5fc974`) and separately addressed the account
+>    billing problem; a subsequent push (`6106172`, action-version bumps —
+>    see below) showed jobs genuinely queuing and running for the first
+>    time since 2026-07-11. That real execution immediately found two
+>    genuine, previously-undiscoverable-from-Windows bugs: (a)
+>    `astral-sh/setup-uv@v9` doesn't resolve — the action only publishes
+>    floating major-version tags through `v7`; fixed by pinning the exact
+>    release `v9.0.0` (commit `ce7d1e5`); (b) `pyright src` failed for real
+>    on `ubuntu-latest` with 8 `reportUnknownMemberType` errors in
+>    `metrics.py`'s Windows-only ctypes RSS sampler — pyright's
+>    `pythonPlatform` defaults to the host it runs on, so no pyright run
+>    in this project's history had ever checked that function's body from
+>    a non-Windows platform before; fixed by adding the same
+>    early-platform-guard pattern `daemon.py`'s lock code already used
+>    (commit `aa07bad`), verified locally by forcing
+>    `pyright --pythonplatform Linux src` on this Windows host (0 errors,
+>    confirming the fix without needing a Linux machine).
+>
+>    **Run `30183257449` (commit `aa07bad`) is the first fully green CI
+>    run in this repository's history on real hosted runners**: `check
+>    (windows-latest)`, `check (ubuntu-latest)`, `ui-smoke`,
+>    `plugin-build`, and `windows-gate` all succeeded. Row 7's
+>    `windows-latest` leg is genuinely closed as of this run — see the
+>    updated row below.
 > 2. **T8.4's pause&diff inspector — code-verified only since M8, never
 >    driven with real pause data on any platform — was exercised for
 >    real** via `scripts/dogfood/init.sh` (new: see
@@ -543,14 +570,15 @@ and are stated honestly as pending, not silently assumed:
 | 4 | Split/merge | GREEN (5 passed, property) | none |
 | 5 | Time travel | GREEN (1 passed) | none |
 | 6 | Review economy | GREEN (cap: 1 passed; dashboard+metrics: 27 passed) | none (conversion moment is a dogfood-gate outcome, not a pre-gate test) |
-| 7 | Contract sync | GREEN (47 passed, local Linux **and** local Windows as of 2026-07-24; full gate incl. integration re-confirmed green on Windows 2026-07-25 after the openapi-snapshot CRLF fix, commit `12ed9b9`) | hosted `windows-latest` CI runner itself — **blocked on GitHub Actions billing**, confirmed via `gh run list`/`gh run view`: every job on every run since 2026-07-24T08:30 UTC failed to start ("recent account payments have failed"); not a code/workflow issue, needs the repo owner to fix billing before this leg can run at all |
+| 7 | Contract sync | **GREEN, including the hosted CI leg** (47 passed, local Linux **and** local Windows as of 2026-07-24; full gate incl. integration re-confirmed green on Windows 2026-07-25 after the openapi-snapshot CRLF fix, commit `12ed9b9`; hosted `windows-latest` **and** `ubuntu-latest` runners genuinely green 2026-07-26, run `30183257449`, commit `aa07bad` — first fully green hosted CI run in this repo's history, after fixing a billing block, a stale `setup-uv` tag, and a real cross-platform pyright gap the run itself surfaced) | none |
 | 8 | Tasks/supertask/S0 | **GREEN** — S0 lifecycle (E06/E08, 2 passed) + supertask trigger via the real commit path (2 passed), re-run 2026-07-20 (T10.2c) | none |
-| 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24); real-OS autostart + kill-9 recovery demonstrated on local Windows dev-host 2026-07-25 (Task Scheduler + supervisor wrapper, 2/2 kills recovered in ~2s each — see callout above) | literal 24h duration — pending first scheduled nightly run; hosted-CI / real-deployment autostart-kill-9 attestation — pending first CI push / first deployment (local dev-host leg above is evidence toward this, not a substitute for it) |
+| 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24); real-OS autostart + kill-9 recovery demonstrated on local Windows dev-host 2026-07-25 (Task Scheduler + supervisor wrapper, 2/2 kills recovered in ~2s each — see callout above) | literal 24h duration — CI billing block resolved 2026-07-26 and the `nightly-soak`/`nightly-battery` `schedule` jobs are wired and now actually runnable, but the cron trigger (`0 6 * * *` UTC) has not yet fired since the fix, so this is genuinely **pending first scheduled run** again (not blocked); real-deployment (non-ephemeral-runner) autostart-kill-9 attestation has no CI equivalent by nature (hosted runners are destroyed per-job) and remains a real-deployment-only leg — the local dev-host demonstration above is evidence toward it, not a substitute |
 
 **Eight of nine stories are fully GREEN on local Linux with no automated
 gap** (2, 3, 4, 5, 6, 7, 8, 9 — story 8 as of the T10.2c re-run on
-2026-07-20; 7 and 9 carrying only external Windows/24h legs). The one that
-is not:
+2026-07-20; row 7 now GREEN including its hosted-CI leg as of 2026-07-26;
+row 9 still carrying its literal-24h and real-deployment legs). The one
+that is not:
 
 - **Story 1 — functional path green, ≤3s timing clause pending manual
   execution** (no automated timing test exists).
@@ -564,33 +592,34 @@ transaction, so the trigger fires in a live daemon on the real commit path.
 See row 8 above for the full re-run evidence (test names, commands, pass
 counts).
 
-Story 9's literal-duration/real-OS clauses and story 7's Windows-filesystem
-clause are the genuinely *pending-attestation* legs — flagged here as
-**pending**, never represented as checked. That part mirrors the M0/M6/M8/M9
-"code-complete, CI-leg pending first push" framing
-(`docs/agents/task-status.md` milestone headers).
+Story 9's literal-duration clause and the real-deployment (non-CI)
+autostart/kill-9 clause are the genuinely *pending-attestation* legs —
+flagged here as **pending**, never represented as checked. **Story 7's
+Windows-filesystem clause is no longer one of them**: as of run
+`30183257449` (2026-07-26, commit `aa07bad`) the hosted `windows-latest`
+CI leg is genuinely green — see row 7 and the dated callout above.
 
 Per the M10 DoD, when all rows are green **on Windows CI**, the MVP is
 code-complete and the one-month dogfood gate (`docs/vision.md` §9 Phase 2)
-begins. One thing stands between here and that gate now that T10.2c has
-landed:
+begins. **That condition is now met** — row 7's hosted-CI leg closed
+2026-07-26. What remains before the *full* residency story (row 9) is
+attested, not blocking the dogfood-gate threshold itself:
 
-- **The external attestations** — the Windows-CI leg is **blocked on a
-  GitHub Actions billing failure on the account**, confirmed via `gh run
-  list`/`gh run view` 2026-07-25 (see the dated callout above): every job
-  on every run since 2026-07-24T08:30 UTC failed to start, including the
-  pushes for this pass. This also blocks the `nightly-soak`/
-  `nightly-battery` scheduled jobs the same way (they run on the same
-  Actions billing, and the schedule trigger has fired and failed to start
-  since the same date), so the literal 24h soak leg is not merely
-  "awaiting its first trigger" either — it has been triggering and
-  failing to start. Story 1's ≤3s timing still awaits a manual run
-  (unrelated to CI/billing); the real-OS autostart/kill-9 leg now has a
-  local-Windows-dev-host demonstration (2026-07-25, see row 9) but still
-  needs the hosted-CI/real-deployment leg specifically, which is itself
-  blocked by the same billing issue. None of these are attestations this
-  document can itself produce, and fixing the billing problem is a
-  repo-owner account action, not a code change.
+- **The external attestations** — the Windows-CI billing block that was
+  silently failing every job since 2026-07-24T08:30 UTC (see the dated
+  callout above) was resolved 2026-07-26; the same push that proved it
+  found and fixed a stale `astral-sh/setup-uv` tag and a real
+  cross-platform `pyright` gap, and the very next push produced this
+  repo's first-ever fully green hosted CI run. The `nightly-soak`/
+  `nightly-battery` `schedule` jobs are now genuinely runnable (they were
+  failing the same billing-blocked way before), but the cron trigger
+  itself has not fired since the fix, so the literal 24h soak leg is
+  **pending its first scheduled run**, not blocked. Story 1's ≤3s timing
+  still awaits a manual run (unrelated to CI/billing); the real-OS
+  autostart/kill-9 leg has a local-Windows-dev-host demonstration
+  (2026-07-25, see row 9) but a genuine non-ephemeral real-deployment
+  attestation has no CI equivalent by nature and remains open. Neither of
+  these is an attestation this document can itself produce.
 
 The local-Linux legs of every row are green: rows 1–7 and 9 as of
 2026-07-19 (this document's authoring session), row 8 as of 2026-07-20
