@@ -124,10 +124,30 @@ completion during this task.
 >    Full gate re-confirmed green on Windows after the fix: `ruff` clean,
 >    `pyright src` 0 errors, `tests/unit tests/property` 411 passed,
 >    `tests/battery` 47 passed, `tests/integration` 187 passed (645
->    total). Commit `12ed9b9`, pushed to `origin/main` — the
->    `windows-latest` hosted CI leg (row 7) has not been independently
->    observed from this session (no `gh`/API access here); **still
->    pending a human checking the Actions run for that push.**
+>    total). Commit `12ed9b9`, pushed to `origin/main`.
+>
+>    **Checked via `gh run list`/`gh run view` once `gh` became available
+>    this same session: the hosted CI leg is not merely "pending first
+>    push" — every job on every run since 2026-07-24T08:30 UTC has failed
+>    to even start**, with the literal annotation "The job was not started
+>    because recent account payments have failed or your spending limit
+>    needs to be increased." This is a GitHub Actions **billing** problem
+>    on the account, not a code, workflow, or test defect, and it predates
+>    this session by roughly a day: at least 12 pushes in that window —
+>    including several this document previously cited as having a
+>    "pending first CI push" Windows-CI leg (T11.1, T11.3, T11.4, the
+>    T9.2c/T9.3b landings, and this pass's own two commits) — never
+>    actually ran on `windows-latest` or any other runner. The last
+>    *genuine* execution was a `schedule` run on 2026-07-23T08:34 (ran 6
+>    hours, then hit a runner timeout and was cancelled — real compute,
+>    not a billing failure); the only fully **successful** run in this
+>    repo's history is `29169264747` ("m2 initially done", 2026-07-11).
+>    **This is a billing/account action only the repo owner can take**
+>    (GitHub Settings → Billing & plans) — fixing it is out of scope for
+>    any code session. Every "pending first CI push" phrase elsewhere in
+>    this document and in `docs/agents/task-status.md` predates this
+>    discovery and should be read as **blocked on GitHub Actions billing**,
+>    not merely "hasn't been tried yet" — those pushes already happened.
 > 2. **T8.4's pause&diff inspector — code-verified only since M8, never
 >    driven with real pause data on any platform — was exercised for
 >    real** via `scripts/dogfood/init.sh` (new: see
@@ -523,7 +543,7 @@ and are stated honestly as pending, not silently assumed:
 | 4 | Split/merge | GREEN (5 passed, property) | none |
 | 5 | Time travel | GREEN (1 passed) | none |
 | 6 | Review economy | GREEN (cap: 1 passed; dashboard+metrics: 27 passed) | none (conversion moment is a dogfood-gate outcome, not a pre-gate test) |
-| 7 | Contract sync | GREEN (47 passed, local Linux **and** local Windows as of 2026-07-24; full gate incl. integration re-confirmed green on Windows 2026-07-25 after the openapi-snapshot CRLF fix, commit `12ed9b9`) | hosted `windows-latest` CI runner itself — pushed 2026-07-25, run result **pending human confirmation** (no `gh`/API access from this session) |
+| 7 | Contract sync | GREEN (47 passed, local Linux **and** local Windows as of 2026-07-24; full gate incl. integration re-confirmed green on Windows 2026-07-25 after the openapi-snapshot CRLF fix, commit `12ed9b9`) | hosted `windows-latest` CI runner itself — **blocked on GitHub Actions billing**, confirmed via `gh run list`/`gh run view`: every job on every run since 2026-07-24T08:30 UTC failed to start ("recent account payments have failed"); not a code/workflow issue, needs the repo owner to fix billing before this leg can run at all |
 | 8 | Tasks/supertask/S0 | **GREEN** — S0 lifecycle (E06/E08, 2 passed) + supertask trigger via the real commit path (2 passed), re-run 2026-07-20 (T10.2c) | none |
 | 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24); real-OS autostart + kill-9 recovery demonstrated on local Windows dev-host 2026-07-25 (Task Scheduler + supervisor wrapper, 2/2 kills recovered in ~2s each — see callout above) | literal 24h duration — pending first scheduled nightly run; hosted-CI / real-deployment autostart-kill-9 attestation — pending first CI push / first deployment (local dev-host leg above is evidence toward this, not a substitute for it) |
 
@@ -555,15 +575,22 @@ code-complete and the one-month dogfood gate (`docs/vision.md` §9 Phase 2)
 begins. One thing stands between here and that gate now that T10.2c has
 landed:
 
-- **The external attestations** — the Windows-CI leg was pushed
-  2026-07-25 (commit `12ed9b9`) but its run result has not been
-  independently observed from this session and is not claimed as green;
-  the literal 24h soak awaits its first scheduled nightly trigger; story
-  1's ≤3s timing awaits a manual run; and the real-OS autostart/kill-9
-  leg now has a local-Windows-dev-host demonstration (2026-07-25, see row
-  9) but still awaits the hosted-CI/real-deployment leg specifically.
-  These are attestations this document cannot itself produce from this
-  environment, and it does not claim to.
+- **The external attestations** — the Windows-CI leg is **blocked on a
+  GitHub Actions billing failure on the account**, confirmed via `gh run
+  list`/`gh run view` 2026-07-25 (see the dated callout above): every job
+  on every run since 2026-07-24T08:30 UTC failed to start, including the
+  pushes for this pass. This also blocks the `nightly-soak`/
+  `nightly-battery` scheduled jobs the same way (they run on the same
+  Actions billing, and the schedule trigger has fired and failed to start
+  since the same date), so the literal 24h soak leg is not merely
+  "awaiting its first trigger" either — it has been triggering and
+  failing to start. Story 1's ≤3s timing still awaits a manual run
+  (unrelated to CI/billing); the real-OS autostart/kill-9 leg now has a
+  local-Windows-dev-host demonstration (2026-07-25, see row 9) but still
+  needs the hosted-CI/real-deployment leg specifically, which is itself
+  blocked by the same billing issue. None of these are attestations this
+  document can itself produce, and fixing the billing problem is a
+  repo-owner account action, not a code change.
 
 The local-Linux legs of every row are green: rows 1–7 and 9 as of
 2026-07-19 (this document's authoring session), row 8 as of 2026-07-20

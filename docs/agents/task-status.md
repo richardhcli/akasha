@@ -16,6 +16,31 @@ When you finish a task: flip its status here in the same change that closes
 the task, and note anything a future agent needs (e.g. a new
 `docs/spec-questions.md` entry) in the Notes column.
 
+> **CRITICAL, discovered 2026-07-25: hosted CI has been silently
+> non-functional since ~2026-07-24T08:30 UTC — a GitHub Actions billing
+> failure, not a code/workflow defect.** `gh run list`/`gh run view`
+> (once `gh` became available this session) show every job on every run
+> since that timestamp failing to start, with the literal annotation "The
+> job was not started because recent account payments have failed or your
+> spending limit needs to be increased." At least 12 pushes in that
+> window — including several DONE-milestone landings below whose notes
+> cite a "pending first CI push" Windows-CI leg — never actually ran on
+> `windows-latest`, `ubuntu-latest`, or any other runner; the
+> `nightly-soak`/`nightly-battery` `schedule` triggers fired and failed to
+> start the same way, so the literal-24h-soak leg has been failing to
+> even start, not merely "awaiting its first trigger." The last genuinely
+> successful run in this repo's history is `29169264747` ("m2 initially
+> done", 2026-07-11); the last genuine (non-billing-blocked) *execution*
+> was a `schedule` run on 2026-07-23T08:34 that ran 6 hours and hit a
+> runner timeout. **Every "pending first CI push" phrase anywhere in this
+> file or `docs/acceptance.md` predates this discovery and should be read
+> as "blocked on GitHub Actions billing," not "hasn't been tried yet"** —
+> see `docs/acceptance.md`'s matching 2026-07-25 callout for the full
+> writeup. Fixing this is a GitHub billing/account action (Settings →
+> Billing & plans) only the repo owner can take; no code session can close
+> it, and none of the code-level Windows work done 2026-07-24/25 should be
+> read as having closed any hosted-CI leg.
+>
 > **Real Windows verification pass, 2026-07-24.** Every milestone below was
 > previously built/verified on Linux only; several notes explicitly flagged
 > Windows-only code (T4.9's `msvcrt` lock, T9.1's simulated `winerror`
