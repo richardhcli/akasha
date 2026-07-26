@@ -423,6 +423,24 @@ def test_search_hyphenated_query_matches_hyphenated_body(api):
     assert "already-tracked" in results[0]["body"]
 
 
+def test_search_multi_word_query_preserves_implicit_and(api):
+    """build-plan T9.7: the fix re-quotes each term individually -- confirm
+    this still preserves the pre-fix implicit-AND-of-barewords behavior for
+    ordinary multi-word queries, not just that adversarial input is safe.
+    """
+    client, h = api["client"], api["human"]
+    _create(client, h, body="weather patterns in coastal regions")
+    _create(client, h, body="an unrelated sentence about oceans")
+
+    resp_both = client.get("/v1/search", params={"q": "weather patterns"}, headers=h)
+    assert resp_both.status_code == 200
+    assert len(resp_both.json()["results"]) == 1
+
+    resp_one_absent = client.get("/v1/search", params={"q": "weather submarine"}, headers=h)
+    assert resp_one_absent.status_code == 200
+    assert resp_one_absent.json()["results"] == []
+
+
 # --- T4.5: /tokens ---------------------------------------------------------
 
 
