@@ -1,6 +1,7 @@
 # Overnight goals
 
-**Last refreshed:** 2026-07-26 (T9.6 registered — see
+**Last refreshed:** 2026-07-26 (T9.6 landed same day; T9.7/T9.8
+registered from real findings the T9.6 session surfaced — see
 `docs/agents/task-status.md` M9 and `docs/build-plan.md`; this refresh
 follows the same reconciliation procedure `overnight_prompt.md` step 9
 and `overnight_wrapup_prompt.md` now apply automatically after every
@@ -11,29 +12,37 @@ for anything else.
 
 ## Current goal set (in priority order)
 
-1. **T9.6 — Wire the live filesystem `Watcher` into `daemon.serve()`.**
-   The top priority. A real, confirmed (not narrowest-reading-ambiguous)
-   gap: `mvp-spec.md`'s own architecture diagram says "watcher →
-   sync/reconcile → kernel", but `Watcher` (T5.3, fully built and unit
-   tested) has zero production call sites — a running daemon only ever
-   reconciles at startup or on an explicit `POST /v1/sync/rescan`, never
-   on a live filesystem edit. Found via this project's standard
-   spec-vs-shipped-code audit (the same method that found T10.2c, T9.2c,
-   T9.3b, T11.3). Full Goal/Depends on/Files/Spec/Scope-narrowing/Steps/
-   Verify/DoD are in `docs/build-plan.md`'s M9 section; all of its
-   `Depends on` tasks are already `DONE`, so it is immediately eligible
-   for normal `fleet-orchestrator` dispatch. **Read the Scope-narrowing
-   section before dispatching** — it names a specific, easy-to-miss
-   correctness pitfall (the watcher's callback must bind to ONE
-   persistent `Reconciler`, never a fresh one per event, or echo
-   suppression and cross-file-move tracking silently break while a naive
-   test would still pass).
+1. **T9.7 — `GET /v1/search` 500s on a hyphenated (or other FTS5-operator)
+   query term.** Top priority: a real, deterministically-reproducible
+   production bug on a core, everyday user-facing feature (a human hits
+   this within minutes of normal dogfood use — hyphenated terms are
+   ordinary), found via T9.6's live-daemon manual verification pass. Fix
+   should reuse T10.2b's existing FTS5-quoting precedent in
+   `find_contradiction_candidates` rather than reinventing query
+   escaping. Full Goal/Depends on/Files/Spec/Steps/Verify/DoD are in
+   `docs/build-plan.md`'s M9 section; all `Depends on` are already
+   `DONE`.
 
-2. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).**
+2. **T9.8 — Nightly-soak RSS budget breach on the first real scheduled
+   24h run.** Real finding, not a harness defect: run `30194717387`
+   (2026-07-26 08:30–12:58 UTC) breached the 150MB DoD ceiling at tick
+   8019/43200 (~4.5h in). Heartbeat data shows a flat memory floor with
+   an escalating periodic spike (~24 min cadence) — points at a
+   per-corpus-size periodic cost (leading unconfirmed hypothesis: FTS5
+   segment automerge, same subsystem as T9.7), not an obvious classic
+   leak. Lower priority than T9.7 because it blocks the M9 DoD claim, not
+   ordinary interactive dogfooding (a human restarting the daemon
+   regularly never approaches the sustained synthetic load that took 4.5
+   hours to trigger it). Full Goal/Depends on/Files/Steps/Verify/DoD
+   (instrumentation-first, then isolate `search` vs `vault_edit` action
+   weights before attempting a fix) are in `docs/build-plan.md`'s M9
+   section.
+
+3. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).**
    Unchanged from the prior goal set, still optional filler, not a
-   priority — pick up only after T9.6 lands (or in parallel, since it
-   touches no file T9.6 touches). No task registered yet because the
-   correct fix is almost certainly documentation-only: the workaround
+   priority — pick up only after T9.7/T9.8 land (or in parallel, since it
+   touches no file either of those touch). No task registered yet because
+   the correct fix is almost certainly documentation-only: the workaround
    (`docs/dogfood/README.md` step 6, mirroring `tests/battery/soak.py`'s
    own pattern) already works and is documented. If picked up, the DoD is
    "confirm the workaround is the intended permanent answer and mark the
@@ -60,6 +69,14 @@ commits). None of that is overnight-loop-actionable (it's already done),
 but it's the reason T9.6 was found *now*: closing out the Windows-CI leg
 prompted a fresh spec-vs-shipped-code audit, per this file's own "When
 the list is empty" procedure below, which is what actually surfaced T9.6.
+T9.6 itself landed 2026-07-26, same day — see `docs/archived-questions.md`.
+Wiring in a real `watchdog.Observer` and doing real live-daemon manual
+verification (not just automated tests) surfaced T9.7 directly, and the
+very next real *scheduled* `nightly-soak` CI run (the literal 24h leg,
+finally possible now that CI billing is fixed) surfaced T9.8 — both
+genuine production findings, not narrowest-reading ambiguities, which is
+why neither has a `docs/spec-questions.md` entry (see T9.6's own
+"Narrowest reading taken: N/A" for the established precedent on that).
 
 ## What this document is not
 
