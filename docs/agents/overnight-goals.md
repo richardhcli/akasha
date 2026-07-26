@@ -1,33 +1,65 @@
 # Overnight goals
 
-**Last refreshed:** 2026-07-25 (T11.3/T11.4 both landed `DONE` overnight —
-see `docs/agents/task-status.md`; this refresh follows the same
-reconciliation procedure `overnight_prompt.md` step 9 and
-`overnight_wrapup_prompt.md` now apply automatically after every cohort,
-so this file shouldn't need another manual refresh unless priorities
-change). **Read by:** `overnight_prompt.md`, as priority guidance only —
-see "What this document is not" below before using it for anything else.
+**Last refreshed:** 2026-07-26 (T9.6 registered — see
+`docs/agents/task-status.md` M9 and `docs/build-plan.md`; this refresh
+follows the same reconciliation procedure `overnight_prompt.md` step 9
+and `overnight_wrapup_prompt.md` now apply automatically after every
+cohort, so this file shouldn't need another manual refresh unless
+priorities change). **Read by:** `overnight_prompt.md`, as priority
+guidance only — see "What this document is not" below before using it
+for anything else.
 
 ## Current goal set (in priority order)
 
-No priority goals remain: both T11.3 and T11.4 (the previous goal set)
-are `DONE`. The one item below was always explicitly optional filler, not
-a priority, so it stays as the only live entry:
+1. **T9.6 — Wire the live filesystem `Watcher` into `daemon.serve()`.**
+   The top priority. A real, confirmed (not narrowest-reading-ambiguous)
+   gap: `mvp-spec.md`'s own architecture diagram says "watcher →
+   sync/reconcile → kernel", but `Watcher` (T5.3, fully built and unit
+   tested) has zero production call sites — a running daemon only ever
+   reconciles at startup or on an explicit `POST /v1/sync/rescan`, never
+   on a live filesystem edit. Found via this project's standard
+   spec-vs-shipped-code audit (the same method that found T10.2c, T9.2c,
+   T9.3b, T11.3). Full Goal/Depends on/Files/Spec/Scope-narrowing/Steps/
+   Verify/DoD are in `docs/build-plan.md`'s M9 section; all of its
+   `Depends on` tasks are already `DONE`, so it is immediately eligible
+   for normal `fleet-orchestrator` dispatch. **Read the Scope-narrowing
+   section before dispatching** — it names a specific, easy-to-miss
+   correctness pitfall (the watcher's callback must bind to ONE
+   persistent `Reconciler`, never a fresh one per event, or echo
+   suppression and cross-file-move tracking silently break while a naive
+   test would still pass).
 
-1. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).** No
-   task registered yet because the correct fix is almost certainly
-   documentation-only: the workaround (`docs/dogfood/README.md` step 6,
-   mirroring `tests/battery/soak.py`'s own pattern) already works and is
-   documented. If picked up, the DoD is "confirm the workaround is the
-   intended permanent answer and mark the spec-question resolved" —
-   **never** invent a new `/tokens` bootstrap endpoint or CLI flag not in
-   `mvp-spec.md` §4.11/§4.12 (rule 2).
+2. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).**
+   Unchanged from the prior goal set, still optional filler, not a
+   priority — pick up only after T9.6 lands (or in parallel, since it
+   touches no file T9.6 touches). No task registered yet because the
+   correct fix is almost certainly documentation-only: the workaround
+   (`docs/dogfood/README.md` step 6, mirroring `tests/battery/soak.py`'s
+   own pattern) already works and is documented. If picked up, the DoD is
+   "confirm the workaround is the intended permanent answer and mark the
+   spec-question resolved" — **never** invent a new `/tokens` bootstrap
+   endpoint or CLI flag not in `mvp-spec.md` §4.11/§4.12 (rule 2).
 
-If the loop finds no eligible `TODO` beyond this optional item, it halts
-normally — see "When the list is empty" below for how a human generates
-the next real goal set (T11.2 remains the sole non-`DONE` build-plan task,
+If the loop finds no eligible `TODO` beyond these, it halts normally —
+see "When the list is empty" below for how a human generates the next
+real goal set (T11.2 remains the sole other non-`DONE` build-plan task,
 and it's `BLOCKED: human-only` by design, not something this file can ever
 make eligible).
+
+## Context for this refresh (2026-07-26)
+
+Hosted GitHub Actions CI was fully non-functional (account billing) from
+2026-07-24 through earlier this same day — see `docs/agents/task-status.md`'s
+top-of-file callout and `docs/acceptance.md`'s matching one. It is now
+fixed and the repo has its first fully green hosted CI run in its
+history. That real execution immediately found and closed two more real
+bugs (a stale `astral-sh/setup-uv` action tag, and a genuine E20
+5,000-block perf-gate failure in `sync/reconcile.py` fixed by removing
+two redundant full-file parses and an N+1 node-fetch pattern — see recent
+commits). None of that is overnight-loop-actionable (it's already done),
+but it's the reason T9.6 was found *now*: closing out the Windows-CI leg
+prompted a fresh spec-vs-shipped-code audit, per this file's own "When
+the list is empty" procedure below, which is what actually surfaced T9.6.
 
 ## What this document is not
 
