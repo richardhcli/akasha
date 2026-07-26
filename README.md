@@ -10,3 +10,8 @@ A local-first, human-in-the-loop personal Truth Maintenance System (pTMS) — se
 | Set up a dev environment and contribute code | [`docs/dev/`](docs/dev/README.md) |
 | Work an implementation task as an agent | [`CLAUDE.md`](CLAUDE.md) |
 
+## License
+
+This project is licensed under the [AGPL-3.0-or-later](LICENSES/AGPL-3.0-or-later.txt).
+We use the [REUSE Specification](https://reuse.software/) to manage copyright and
+licensing without cluttering source code files. See `REUSE.toml` for the exact mapping.

@@ -1,0 +1,7 @@
+version = 3
+
+[[annotations]]
+path = ["**"]
+precedence = "closest"
+SPDX-License-Identifier = "AGPL-3.0-or-later"
+SPDX-FileCopyrightText = "2026 Richard Li <rhli.richardli@gmail.com>"
