@@ -9,6 +9,19 @@ on:
   # the build-plan Verify's "(nightly Windows)" parenthetical.
   schedule:
     - cron: "0 6 * * *"
+  # Lets a maintainer manually exercise nightly-soak/nightly-battery on a
+  # real hosted windows-latest runner without waiting for the cron trigger
+  # (useful the first time this workflow reaches main, or after touching
+  # either job -- both had literally never executed on a hosted runner
+  # until manually dispatched to verify this). soak_hours only affects a
+  # manual dispatch; the real nightly `schedule` run always uses the
+  # literal 24h the build-plan Verify specifies, never this input.
+  workflow_dispatch:
+    inputs:
+      soak_hours:
+        description: "Hours for nightly-soak on a manual dispatch only (schedule runs always use 24)"
+        required: false
+        default: "0.05"
 
 jobs:
   check:
@@ -63,19 +76,20 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
-  # T9.5: the literal 24-hour soak (build-plan Verify, verbatim), gated to
-  # the schedule trigger only -- a real push/PR run must never block on a
-  # 24h job. Same "code-complete, CI-leg pending first push" framing as
-  # M0/M6/M8: wired and YAML-valid now; its first real execution is whenever
-  # this workflow file first reaches `main` and the nightly schedule fires.
+  # T9.5: the literal 24-hour soak (build-plan Verify, verbatim) on the
+  # `schedule` trigger; a shorter workflow_dispatch-only override (see
+  # `on.workflow_dispatch.inputs.soak_hours` above) lets a maintainer
+  # verify this job actually runs on a real hosted windows-latest runner
+  # without waiting up to 24h -- a real push/PR run must never block on
+  # either.
   nightly-soak:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
       - run: uv sync
-      - run: uv run python tests/battery/soak.py --hours 24
+      - run: uv run python tests/battery/soak.py --hours ${{ github.event_name == 'schedule' && '24' || inputs.soak_hours }}
 
   # Spec §6.3 names "battery + soak on main nightly (Windows)" as one gate;
   # nightly-soak above covered soak only -- this job was a dangling comment
@@ -87,7 +101,7 @@ jobs:
   # push/PR `check` job intentionally stays unit+property-only for fast
   # feedback; battery's real-filesystem/locking/CRLF assertions belong here.
   nightly-battery:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
