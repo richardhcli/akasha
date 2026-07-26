@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -1064,6 +1065,68 @@ def get_node(conn: sqlite3.Connection, node_id: str, as_of: str | None = None) -
         vetted=bool(vetted),
         status=status,
     )
+
+
+# SQLite's default compiled-in host-parameter limit (SQLITE_MAX_VARIABLE_NUMBER).
+_SQLITE_MAX_VARS = 500
+
+
+def get_nodes_bulk(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, Node]:
+    """Batch-fetch multiple nodes at HEAD (read-only; rule 0.4 completion).
+
+    Same result as calling :func:`get_node` (with ``as_of=None``) once per
+    id, except in O(ceil(n/500)) round trips instead of O(n) -- added to fix
+    a real N+1 query pattern found profiling ``sync/reconcile.py``'s
+    ``hub_state_for`` against spec §6.2's E20 5,000-block perf case (each
+    ``get_node`` call is 2 round trips: ``nodes`` then ``objects`` by hash;
+    5,000 blocks meant 10,000 round trips for one reconcile cycle). Unknown
+    ids are silently OMITTED from the result (never raises
+    ``NodeNotFoundError``) -- callers that need per-id not-found semantics
+    should check membership, matching how ``hub_state_for`` already treated
+    a lookup miss before this helper existed (fell back to the skeleton
+    block, never propagated the exception past that call site).
+    """
+    if not node_ids:
+        return {}
+    unique_ids = list(dict.fromkeys(node_ids))  # de-dup, preserve first-seen order
+
+    node_rows: dict[
+        str, tuple[NodeType, str, Literal["live", "retracted", "tombstone"], int]
+    ] = {}
+    for i in range(0, len(unique_ids), _SQLITE_MAX_VARS):
+        chunk = unique_ids[i : i + _SQLITE_MAX_VARS]
+        placeholders = ",".join("?" * len(chunk))
+        query = (
+            "SELECT id, node_type, head_hash, status, vetted "
+            f"FROM nodes WHERE id IN ({placeholders})"
+        )
+        for row in conn.execute(query, chunk):
+            node_rows[row[0]] = (row[1], row[2], row[3], row[4])
+
+    head_hashes = list({v[1] for v in node_rows.values()})
+    object_bytes: dict[str, str] = {}
+    for i in range(0, len(head_hashes), _SQLITE_MAX_VARS):
+        chunk = head_hashes[i : i + _SQLITE_MAX_VARS]
+        placeholders = ",".join("?" * len(chunk))
+        for obj_hash, obj_bytes in conn.execute(
+            f"SELECT hash, bytes FROM objects WHERE hash IN ({placeholders})", chunk
+        ):
+            object_bytes[obj_hash] = obj_bytes
+
+    result: dict[str, Node] = {}
+    for node_id, (node_type, head_hash, status, vetted) in node_rows.items():
+        content = json.loads(object_bytes[head_hash])
+        facets = [Facet(**f) for f in content["facets"]]
+        result[node_id] = Node(
+            id=node_id,
+            node_type=node_type,
+            body=content["body"],
+            facets=facets,
+            task_state=content.get("task_state"),
+            vetted=bool(vetted),
+            status=status,
+        )
+    return result
 
 
 def history(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:

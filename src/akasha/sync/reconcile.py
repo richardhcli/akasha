@@ -613,7 +613,12 @@ def diff_blocks(
     """
     lint_result = linter.lint(blocks_b, blocks_v, vault_text, maturity)
     repaired_text = apply_repairs(vault_text, lint_result.repairs)
-    blocks_v_prime = parse(repaired_text)
+    # apply_repairs returns `text` verbatim (same string) when there are no
+    # repairs to apply -- re-parsing it would just reproduce `blocks_v`,
+    # already computed by the caller from the same `vault_text`. Reusing it
+    # matters at scale: E20's 5,000-block perf case has zero repairs in its
+    # clean-edit scenario, so this was a third full-file parse for nothing.
+    blocks_v_prime = blocks_v if not lint_result.repairs else parse(repaired_text)
     ops, extra_review = _compute_ops(
         blocks_b,
         blocks_v_prime,
@@ -699,11 +704,11 @@ def hub_state_for(
     caller's exact prior behavior (``Reconciler.on_change``'s two call
     sites, which must keep enqueuing the review during a real reconcile).
     """
+    nodes_by_id = store.get_nodes_bulk(conn, list(structure.blocks.keys()))
     new_blocks: dict[str, Block] = {}
     for node_id, block in structure.blocks.items():
-        try:
-            node = store.get_node(conn, node_id)
-        except store.NodeNotFoundError:
+        node = nodes_by_id.get(node_id)
+        if node is None:
             new_blocks[node_id] = block
             continue
         if node.status == "tombstone":
@@ -1164,7 +1169,13 @@ class Reconciler:
                 self.projection.update(path, set(hub_blockset.blocks.keys()))
                 return
 
-            blocks_b = parse(base_text or "")
+            # blocks_b_skeleton (above) already parsed this exact base_text --
+            # parse() is pure/deterministic (no DB/filesystem I/O), so a
+            # second parse of the same string is redundant work, not a
+            # different result. Reusing it matters at scale: E20's 5,000-block
+            # perf case profiled ~1.6s of a ~2.5s cycle inside parse() alone,
+            # much of it this literal duplicate call.
+            blocks_b = blocks_b_skeleton
             blocks_v = parse(vault_text)
 
             def maturity_lookup(node_id: str) -> Maturity | None:
