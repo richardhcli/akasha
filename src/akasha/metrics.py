@@ -221,6 +221,15 @@ def _sample_rss_bytes() -> int:
 
 
 def _sample_rss_bytes_windows() -> int:  # pragma: no cover - Windows-only branch
+    # Mirrors daemon.py's _acquire_windows/_acquire_posix guard: typeshed's
+    # ctypes.windll/WinDLL member types only resolve fully under Windows,
+    # so pyright run on a non-Windows pythonPlatform (e.g. ubuntu-latest
+    # CI) reports reportUnknownMemberType on every dynamic attribute below
+    # unless this early guard makes the rest of the function provably
+    # unreachable there.
+    if sys.platform != "win32":
+        raise AssertionError("_sample_rss_bytes_windows called on a non-Windows platform")
+
     import ctypes
     from ctypes import wintypes
 
