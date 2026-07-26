@@ -1,59 +1,55 @@
 # Overnight goals
 
-**Last refreshed:** 2026-07-26 (T9.6 landed same day; T9.7/T9.8
-registered from real findings the T9.6 session surfaced — see
-`docs/agents/task-status.md` M9 and `docs/build-plan.md`; this refresh
-follows the same reconciliation procedure `overnight_prompt.md` step 9
-and `overnight_wrapup_prompt.md` now apply automatically after every
-cohort, so this file shouldn't need another manual refresh unless
-priorities change). **Read by:** `overnight_prompt.md`, as priority
-guidance only — see "What this document is not" below before using it
-for anything else.
+**Last refreshed:** 2026-07-26 (T9.6 and T9.7 both landed same day;
+T9.8 registered from a real CI finding, then marked `BLOCKED: not
+fleet-dispatchable` the same day once its actual scope — a multi-hour
+real soak run — turned out to not fit a single worker turn. See
+`docs/agents/task-status.md` M9 and `docs/build-plan.md` for the full
+detail. **Currently zero eligible `TODO` rows exist anywhere in the
+build plan** — see below.). **Read by:** `overnight_prompt.md`, as
+priority guidance only — see "What this document is not" below before
+using it for anything else.
 
-## Current goal set (in priority order)
+## Current goal set: none dispatchable
 
-1. **T9.7 — `GET /v1/search` 500s on a hyphenated (or other FTS5-operator)
-   query term.** Top priority: a real, deterministically-reproducible
-   production bug on a core, everyday user-facing feature (a human hits
-   this within minutes of normal dogfood use — hyphenated terms are
-   ordinary), found via T9.6's live-daemon manual verification pass. Fix
-   should reuse T10.2b's existing FTS5-quoting precedent in
-   `find_contradiction_candidates` rather than reinventing query
-   escaping. Full Goal/Depends on/Files/Spec/Steps/Verify/DoD are in
-   `docs/build-plan.md`'s M9 section; all `Depends on` are already
-   `DONE`.
+There is nothing for `fleet-orchestrator` to pick up right now:
 
-2. **T9.8 — Nightly-soak RSS budget breach on the first real scheduled
-   24h run.** Real finding, not a harness defect: run `30194717387`
-   (2026-07-26 08:30–12:58 UTC) breached the 150MB DoD ceiling at tick
-   8019/43200 (~4.5h in). Heartbeat data shows a flat memory floor with
-   an escalating periodic spike (~24 min cadence) — points at a
-   per-corpus-size periodic cost (leading unconfirmed hypothesis: FTS5
-   segment automerge, same subsystem as T9.7), not an obvious classic
-   leak. Lower priority than T9.7 because it blocks the M9 DoD claim, not
-   ordinary interactive dogfooding (a human restarting the daemon
-   regularly never approaches the sustained synthetic load that took 4.5
-   hours to trigger it). Full Goal/Depends on/Files/Steps/Verify/DoD
-   (instrumentation-first, then isolate `search` vs `vault_edit` action
-   weights before attempting a fix) are in `docs/build-plan.md`'s M9
-   section.
+- **T9.8 — Nightly-soak RSS budget breach.** Real, still-open finding
+  (run `30194717387`, 2026-07-26, breached the 150MB DoD ceiling ~4.5h
+  into the first real scheduled 24h run — see the T9.5/T9.8 rows in
+  `docs/agents/task-status.md` for the full evidence, including a
+  promising WAL-checkpoint lead from the instrumentation step that did
+  land). **Deliberately marked `BLOCKED: not fleet-dispatchable`, not
+  `TODO`** — its remaining steps need multiple hours of real wall-clock
+  soak execution per run, which no single `fleet-worker` turn can
+  complete (its Bash tool is capped well below that duration, and
+  `fleet-worker.md` requires killing any background process before
+  returning rather than leaving it running across turns). If a human
+  wants to pick this up, the right mechanism is `gh workflow run`
+  against the existing `nightly-soak` `workflow_dispatch` input,
+  checked in a later session — not a synchronous local run. Do not flip
+  this row back to `TODO` for the orchestrator to find; that would just
+  burn the overnight window on a task that structurally cannot finish.
+  Does **not** block dogfooding — see the T9.5 row for why.
 
-3. **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).**
-   Unchanged from the prior goal set, still optional filler, not a
-   priority — pick up only after T9.7/T9.8 land (or in parallel, since it
-   touches no file either of those touch). No task registered yet because
-   the correct fix is almost certainly documentation-only: the workaround
-   (`docs/dogfood/README.md` step 6, mirroring `tests/battery/soak.py`'s
-   own pattern) already works and is documented. If picked up, the DoD is
-   "confirm the workaround is the intended permanent answer and mark the
-   spec-question resolved" — **never** invent a new `/tokens` bootstrap
-   endpoint or CLI flag not in `mvp-spec.md` §4.11/§4.12 (rule 2).
+- **Bootstrap-token gap (`docs/spec-questions.md`, T11.1 entry 1).**
+  Unchanged from prior goal sets, still optional filler, still not a
+  registered build-plan task — the correct fix is almost certainly
+  documentation-only (confirm the existing workaround in
+  `docs/dogfood/README.md` step 6 is the intended permanent answer and
+  mark the spec-question resolved). Since it has no `TODO` row, it is
+  not something the orchestrator can select either; it would need to be
+  picked up by a human or an explicit, non-autonomous request.
 
-If the loop finds no eligible `TODO` beyond these, it halts normally —
-see "When the list is empty" below for how a human generates the next
-real goal set (T11.2 remains the sole other non-`DONE` build-plan task,
-and it's `BLOCKED: human-only` by design, not something this file can ever
-make eligible).
+- **T11.2** stays `BLOCKED: human-only` by design (see below) — never
+  eligible regardless of any refresh of this file.
+
+An overnight loop started right now will correctly scan, find no
+eligible `TODO`, and write a halt file per "When the list is empty"
+below — that is the right behavior, not a failure to work around.
+Generating the next real goal set requires a human-driven spec-vs-
+shipped-code audit (same procedure that found T10.2c, T9.2c, T9.3b,
+T9.6) before there is anything new to dispatch.
 
 ## Context for this refresh (2026-07-26)
 
