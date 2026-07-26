@@ -1486,6 +1486,33 @@ def neighborhood(conn: sqlite3.Connection, node_id: str, hops: int = 1) -> dict[
     }
 
 
+_FTS5_TERM_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _fts5_safe_match_query(q: str) -> str | None:
+    """Tokenize ``q`` to alphanumeric terms and rebuild a syntax-safe FTS5 MATCH string.
+
+    build-plan T9.7: a raw user query string passed straight to ``MATCH``
+    lets FTS5's own query-syntax characters (a bare ``-`` prefix, embedded
+    ``"``, bareword ``AND``/``OR``/``NOT``/``NEAR``, ``:``/``(``/``)``)
+    reach FTS5's expression parser, which 500s (``sqlite3.OperationalError``)
+    on plenty of everyday input -- reproduced with the single hyphenated
+    word ``"already-tracked"``. Splitting to alphanumeric-only terms and
+    double-quoting each one (terms are alnum-only by construction, so no
+    embedded-quote escaping is ever needed) strips every syntax character
+    before it reaches the parser; space-joining (not ``OR``-joining, unlike
+    ``find_contradiction_candidates``'s heuristic) preserves this
+    function's existing implicit-AND-of-barewords behavior for ordinary
+    multi-word queries. Returns ``None`` for a query with no alphanumeric
+    terms at all (pure punctuation/whitespace) so the caller can skip
+    issuing a MATCH -- an empty MATCH string is itself a syntax error.
+    """
+    terms = _FTS5_TERM_RE.findall(q)
+    if not terms:
+        return None
+    return " ".join(f'"{term}"' for term in terms)
+
+
 def search(conn: sqlite3.Connection, q: str) -> list[Node]:
     """Full-text search over node bodies via ``nodes_fts`` (spec §4.5, §4.4).
 
@@ -1497,14 +1524,22 @@ def search(conn: sqlite3.Connection, q: str) -> list[Node]:
     best match first. A node whose current body no longer matches ``q``
     (because it was edited after the FTS row was last synced) is never
     returned, since ``nodes_fts`` is always kept current.
+
+    ``q`` is never passed to ``MATCH`` raw -- see
+    :func:`_fts5_safe_match_query` (build-plan T9.7: a raw query string
+    containing FTS5 syntax characters, e.g. a hyphenated word, previously
+    500'd). A query with no alphanumeric terms (including non-ASCII-only
+    queries -- a known, narrower-than-ideal limitation shared with
+    ``find_contradiction_candidates``'s identical tokenization, not
+    reinvented here) returns ``[]`` rather than issuing a MATCH at all.
     """
+    match_query = _fts5_safe_match_query(q)
+    if match_query is None:
+        return []
     rows = conn.execute(
-        "SELECT id FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank", (q,)
+        "SELECT id FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank", (match_query,)
     ).fetchall()
     return [get_node(conn, row[0]) for row in rows]
-
-
-_CONTRADICTION_TERM_RE = re.compile(r"[A-Za-z0-9]+")
 
 
 def find_contradiction_candidates(
@@ -1565,7 +1600,7 @@ def find_contradiction_candidates(
     UPDATE/DELETE, no transaction, no new schema.
     """
     canonical_body = canonicalize_text(body)
-    terms = _CONTRADICTION_TERM_RE.findall(canonical_body)
+    terms = _FTS5_TERM_RE.findall(canonical_body)
     if not terms:
         return []
     match_query = " OR ".join(f'"{term}"' for term in terms)

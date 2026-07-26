@@ -388,6 +388,41 @@ def test_search_requires_auth_missing_token_401(api):
     assert resp.json()["error"]["code"] == "E_AUTH"
 
 
+# build-plan T9.7: a raw query string reaching FTS5's own MATCH syntax
+# parser 500'd on plenty of everyday input -- found via a real live-daemon
+# manual check (`GET /v1/search?q=already-tracked`), reproduced
+# deterministically. Every case below must return 200, never 500.
+@pytest.mark.parametrize(
+    "q",
+    [
+        "already-tracked",  # the exact reported case: a hyphenated bareword
+        "-tracked",  # bare leading minus (FTS5 NOT-operator syntax)
+        '"unterminated',  # unbalanced quote
+        "AND",  # bareword boolean operator with no operands
+        "a)(b",  # stray parens
+        "col:value",  # FTS5 column-filter syntax
+        "NEAR(a b)",
+        "***",  # punctuation only -> zero alnum terms
+        "   ",  # whitespace only -> zero alnum terms
+    ],
+)
+def test_search_never_500s_on_fts5_syntax_characters(api, q):
+    client, h = api["client"], api["human"]
+    resp = client.get("/v1/search", params={"q": q}, headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["results"] == []
+
+
+def test_search_hyphenated_query_matches_hyphenated_body(api):
+    client, h = api["client"], api["human"]
+    _create(client, h, body="this file is already-tracked in the vault")
+    resp = client.get("/v1/search", params={"q": "already-tracked"}, headers=h)
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert len(results) == 1
+    assert "already-tracked" in results[0]["body"]
+
+
 # --- T4.5: /tokens ---------------------------------------------------------
 
 
