@@ -222,6 +222,7 @@ class _SoakState:
     """Mutable state threaded through one soak run's tick actions."""
 
     conn: Any
+    db_path: Path
     client: TestClient
     headers: dict[str, str]
     logger: logging.Logger
@@ -232,6 +233,39 @@ class _SoakState:
     sync_root_id: str
     reconciler: Reconciler
     tick: int = 0
+
+
+def _corpus_stats(state: "_SoakState") -> dict[str, int]:
+    """Cheap corpus-size snapshot for heartbeat diagnostics (build-plan T9.8).
+
+    Added after run `30194717387`'s first real 24h scheduled soak breached
+    its RSS budget ~4.5h in: the heartbeat log at the time carried only
+    RSS/CPU, with no way to tell whether the breach tracked corpus growth
+    (expected, roughly O(n)) or something unbounded. These four numbers
+    (live node count, total commit count, ``nodes_fts`` row count, on-disk
+    DB file size) cost four cheap ``COUNT(*)``/``stat()`` calls -- sampled
+    only at heartbeat cadence (default every 30 ticks / ~60s), never every
+    tick, so this adds negligible overhead and cannot itself become the
+    soak's own performance problem.
+    """
+    node_count = state.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    commit_count = state.conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
+    fts_row_count = state.conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0]
+    # WAL mode (spec §3): the main file stays near-empty until a checkpoint
+    # flushes it, so most on-disk growth (and the periodic checkpoint work
+    # itself, a candidate cause for T9.8's periodic RSS spikes) actually
+    # shows up in `-wal`, not the main file -- report both rather than a
+    # misleadingly-small main-file-only number.
+    db_file_bytes = state.db_path.stat().st_size if state.db_path.exists() else 0
+    wal_path = state.db_path.with_name(state.db_path.name + "-wal")
+    wal_file_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+    return {
+        "node_count": node_count,
+        "commit_count": commit_count,
+        "fts_row_count": fts_row_count,
+        "db_file_bytes": db_file_bytes,
+        "wal_file_bytes": wal_file_bytes,
+    }
 
 
 def _setup(tmp_dir: Path, seed: int, logger: logging.Logger) -> _SoakState:
@@ -292,6 +326,7 @@ def _setup(tmp_dir: Path, seed: int, logger: logging.Logger) -> _SoakState:
 
     return _SoakState(
         conn=conn,
+        db_path=db_path,
         client=client,
         headers=headers,
         logger=logger,
@@ -475,13 +510,19 @@ def run_soak(
                     stats.idle_cpu_samples.append(idle_cpu_pct)
                     stats.max_rss_bytes = max(stats.max_rss_bytes, rss_bytes)
                     if rss_bytes >= rss_limit_bytes:
+                        # build-plan T9.8: a corpus-size snapshot AT THE MOMENT of
+                        # breach is the one heartbeat's worth of diagnostic data
+                        # that's actually guaranteed to exist -- a breach can
+                        # land between two heartbeat_every_n_ticks samples.
+                        corpus = _corpus_stats(state)
                         logger.error(
                             f"soak tick {tick}: RSS breach {rss_bytes} bytes "
-                            f">= limit {rss_limit_bytes} bytes"
+                            f">= limit {rss_limit_bytes} bytes; corpus={corpus}"
                         )
                         raise SoakFailure(
                             f"RSS budget breached at tick {tick}: {rss_bytes} bytes "
-                            f">= {rss_limit_bytes} byte limit (spec §9 story 9 / M9 DoD)"
+                            f">= {rss_limit_bytes} byte limit (spec §9 story 9 / M9 DoD); "
+                            f"corpus={corpus}"
                         )
 
                 error_lines = _scan_log_for_errors(log_file)
@@ -496,9 +537,10 @@ def run_soak(
                 if heartbeat_every_n_ticks > 0 and (tick + 1) % heartbeat_every_n_ticks == 0:
                     last_rss = stats.rss_samples[-1] if stats.rss_samples else "n/a"
                     last_cpu = stats.idle_cpu_samples[-1] if stats.idle_cpu_samples else "n/a"
+                    corpus = _corpus_stats(state)
                     logger.info(
                         f"soak heartbeat: tick={tick + 1}/{total_ticks} "
-                        f"rss_bytes={last_rss} idle_cpu_pct={last_cpu}"
+                        f"rss_bytes={last_rss} idle_cpu_pct={last_cpu} corpus={corpus}"
                     )
 
                 elapsed = clock.monotonic() - tick_started_at
