@@ -101,8 +101,10 @@ filesystem.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Protocol
@@ -117,6 +119,18 @@ if TYPE_CHECKING:
 
 # Spec §4.8: "on_change(path) after 500 ms debounce".
 DEFAULT_DEBOUNCE_SECONDS = 0.5
+
+# Matches sync/reconcile.py's Reconciler.write_if_diff naming scheme
+# EXACTLY (`f".{target.name}.tmp-{secrets.token_hex(8)}"`) -- build-plan
+# T9.6: every real write-back the daemon makes creates-then-renames-away
+# one of these under a watched root, so a live Watcher observes it
+# constantly in normal operation, not as a rare edge case. Filtered out
+# before it ever reaches notify_event/echo-suppression/the debouncer:
+# there is nothing to reconcile about a transient temp file that is
+# usually already gone (renamed to its final name) by the time anything
+# downstream would try to read it, and it is never itself a managed
+# vault file.
+_RECONCILE_TEMP_FILE_RE = re.compile(r"^\..+\.tmp-[0-9a-f]{16}$")
 
 # Case-insensitive marker substrings checked against each path *segment*
 # (not the whole path) — see module docstring "Cloud-path detection".
@@ -375,13 +389,57 @@ class _WatchdogEventHandler:
     def __init__(self, watcher: Watcher) -> None:
         self._watcher = watcher
 
+    def dispatch(self, event: Any) -> None:
+        """The REAL entry point a ``watchdog`` observer thread calls (build-plan
+        T9.6 fix): ``watchdog.observers.api``'s dispatch loop calls
+        ``handler.dispatch(event)``, never ``on_any_event`` directly --
+        that name only gets called BY ``FileSystemEventHandler.dispatch``'s
+        own implementation. Since this class was never a
+        ``FileSystemEventHandler`` subclass (see the class docstring's
+        "no import-time dependency on watchdog" rationale), it never had a
+        ``dispatch`` method at all -- a real ``Observer`` crashed with
+        ``AttributeError: '_WatchdogEventHandler' object has no attribute
+        'dispatch'`` on the very first genuine filesystem event, silently
+        undetected because every existing test drove ``on_any_event``
+        directly via a spy observer, never a real ``watchdog`` dispatch
+        loop. Only ``on_any_event`` is implemented here (unlike the real
+        ``FileSystemEventHandler.dispatch``, which also calls a per-type
+        ``on_created``/``on_modified``/... method) since this class routes
+        every event kind through the one method uniformly.
+        """
+        self.on_any_event(event)
+
     def on_any_event(self, event: Any) -> None:
+        """Route a real ``watchdog`` event's path(s) to the debounce pipeline.
+
+        Normalizes through ``str(PurePath(...))`` (build-plan T9.6, found
+        via a real live-daemon manual check, not any automated test):
+        a raw OS-reported event path mixes separators with the registered
+        ``root_path`` in a way ``Path.rglob``-based discovery
+        (``reconcile.discover_untracked_files``, T11.3) never produces for
+        the SAME physical file -- e.g. a root registered as
+        ``"C:/Users/.../vault"`` (forward slashes, exactly as a client's
+        JSON ``POST /v1/sync/roots`` body supplied it) plus a Windows
+        ``ReadDirectoryChangesW``-reported filename joined with a
+        backslash yields ``"C:/Users/.../vault\\note.md"`` -- a different
+        string than discovery's all-native-separator
+        ``"C:\\Users\\...\\vault\\note.md"`` for the identical file.
+        ``sync_files.path`` is keyed on this literal string, so the
+        mismatch silently double-tracked (and double-reconciled) the same
+        file under two rows the first time this was live-tested. ``str(
+        PurePath(p))`` renders both forms identically (native separators,
+        matching what ``discover_untracked_files`` already produces),
+        closing the mismatch at the one place both path sources converge.
+        """
         if getattr(event, "is_directory", False):
             return
-        self._watcher.notify_event(str(event.src_path))
-        dest_path = getattr(event, "dest_path", "")
-        if dest_path:
-            self._watcher.notify_event(str(dest_path))
+        src_path = str(PurePath(str(event.src_path)))
+        if not _RECONCILE_TEMP_FILE_RE.match(PurePath(src_path).name):
+            self._watcher.notify_event(src_path)
+        raw_dest = str(getattr(event, "dest_path", "") or "")
+        dest_path = str(PurePath(raw_dest)) if raw_dest else ""
+        if dest_path and not _RECONCILE_TEMP_FILE_RE.match(PurePath(dest_path).name):
+            self._watcher.notify_event(dest_path)
 
 
 def _default_observer_factory() -> _Scheduler:
@@ -460,6 +518,17 @@ class Watcher:
     content_hash_fn: Callable[[str], str] | None = None
     observer_factory: Callable[[], _Scheduler] = field(default=_default_observer_factory)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("akasha"))
+    # build-plan T9.6: this class's own docstring (see Debouncer's, "Watcher
+    # drives a real poll loop from a background thread in production (see
+    # Watcher.start)") always claimed start() owns this, but until T9.6 the
+    # code never actually did -- poll() existed and was fully tested, but
+    # nothing production called it on a timer, so no debounced event ever
+    # fired in a real running daemon. Fixed by actually spawning the thread
+    # this docstring already promised. Default chosen so a real event fires
+    # within roughly one debounce window of going quiet (5x/window), not
+    # exposed as a Watcher(...) kwarg beyond this since no caller has needed
+    # to tune it yet -- lower this if a future test needs tighter latency.
+    poll_interval_seconds: float = 0.1
 
     def __post_init__(self) -> None:
         self._debouncer = Debouncer(
@@ -470,10 +539,34 @@ class Watcher:
         )
         self._roots: dict[str, WatchedRoot] = {}
         self._observer: _Scheduler | None = None
+        self._handler: _WatchdogEventHandler | None = None
+        self._poll_stop_event = threading.Event()
+        self._poll_thread: threading.Thread | None = None
 
     @property
     def roots(self) -> dict[str, WatchedRoot]:
         return dict(self._roots)
+
+    def _build_watched_root(self, row: Mapping[str, Any]) -> WatchedRoot:
+        root_path = row["root_path"]
+        provider = detect_cloud_path(root_path)
+        conservative = provider is not None
+        if conservative:
+            self.logger.warning(
+                "sync root %r (%s) at %r is under a %s-synced path; "
+                "enabling conservative reconcile profile",
+                row["name"],
+                row["id"],
+                root_path,
+                provider,
+            )
+        return WatchedRoot(
+            id=row["id"],
+            name=row["name"],
+            root_path=root_path,
+            conservative=conservative,
+            cloud_provider=provider,
+        )
 
     def load_roots(self) -> list[WatchedRoot]:
         """Load durable sync roots and run cloud-path detection on each.
@@ -483,32 +576,43 @@ class Watcher:
         (``kernel.store.list_sync_roots`` — rule 0.4).
         """
         rows = store.list_sync_roots(self.conn)
-        loaded: dict[str, WatchedRoot] = {}
-        for row in rows:
-            root_path = row["root_path"]
-            provider = detect_cloud_path(root_path)
-            conservative = provider is not None
-            if conservative:
-                self.logger.warning(
-                    "sync root %r (%s) at %r is under a %s-synced path; "
-                    "enabling conservative reconcile profile",
-                    row["name"],
-                    row["id"],
-                    root_path,
-                    provider,
-                )
-            loaded[row["id"]] = WatchedRoot(
-                id=row["id"],
-                name=row["name"],
-                root_path=root_path,
-                conservative=conservative,
-                cloud_provider=provider,
-            )
-        self._roots = loaded
-        return list(loaded.values())
+        self._roots = {row["id"]: self._build_watched_root(row) for row in rows}
+        return list(self._roots.values())
+
+    def _watch_new_roots(self) -> None:
+        """Pick up any sync root registered AFTER :meth:`start` already ran
+        (build-plan T9.6): :meth:`load_roots` used to run exactly once,
+        inside ``start()`` -- a root registered via ``POST /v1/sync/roots``
+        after the daemon is already serving (the realistic common case:
+        registering a vault is normally the very next thing a human does
+        once the daemon is up, not something that happens before it starts)
+        would otherwise never be watched for the rest of the process's
+        life, no matter how long it kept running. Called from the same
+        poll loop that already drives debounce -- ``list_sync_roots`` is a
+        small, cheap query (a handful of rows, no vault content), so a
+        separate timer/cadence is not worth the added complexity. A no-op
+        (zero new roots) is the overwhelmingly common case per tick.
+        """
+        if self._observer is None or self._handler is None:
+            return
+        for row in store.list_sync_roots(self.conn):
+            if row["id"] in self._roots:
+                continue
+            watched = self._build_watched_root(row)
+            self._roots[watched.id] = watched
+            self._observer.schedule(self._handler, watched.root_path, recursive=True)
 
     def start(self) -> None:
-        """Start watching every loaded (or freshly-loaded) sync root's ``root_path``."""
+        """Start watching every loaded (or freshly-loaded) sync root's ``root_path``.
+
+        Also starts the background poll thread that actually fires
+        ``on_cycle`` once a path's debounce window elapses (build-plan
+        T9.6) -- without it, raw events would accumulate in the debouncer
+        forever and nothing would ever reconcile. No-op if already started
+        (idempotent, matching ``GcScheduler.start``'s convention).
+        """
+        if self._poll_thread is not None:
+            return
         if not self._roots:
             self.load_roots()
         observer = self.observer_factory()
@@ -517,13 +621,46 @@ class Watcher:
             observer.schedule(handler, root.root_path, recursive=True)
         observer.start()
         self._observer = observer
+        self._handler = handler
 
-    def stop(self) -> None:
-        """Stop and join the observer thread, if one was started."""
+        self._poll_stop_event.clear()
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, name="akasha-watcher-poll", daemon=True
+        )
+        self._poll_thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop the poll thread first (no more new cycles fire), then the observer.
+
+        Any path still inside an unexpired debounce window at shutdown
+        simply does not fire this run -- the daemon's own startup
+        ``reconcile_all`` (T5.6) picks it up on next launch regardless,
+        same as any other missed-while-down edit.
+        """
+        self._poll_stop_event.set()
+        if self._poll_thread is not None:
+            self._poll_thread.join(timeout=timeout)
+            self._poll_thread = None
         if self._observer is not None:
             self._observer.stop()
             self._observer.join()
             self._observer = None
+        self._handler = None
+
+    def _poll_loop(self) -> None:
+        while True:
+            try:
+                self._watch_new_roots()
+                self.poll()
+            except Exception:
+                # A failed cycle must never crash the watcher's poll thread
+                # (or, transitively, the daemon) -- log and keep polling.
+                # `Debouncer.poll` itself already re-queues on a *transient*
+                # lock/AV error (T9.1); this is the backstop for anything
+                # else `on_cycle` might raise.
+                self.logger.exception("watcher poll cycle failed")
+            if self._poll_stop_event.wait(self.poll_interval_seconds):
+                return
 
     def notify_event(self, path: str, *, at: float | None = None) -> None:
         """Feed one raw filesystem-change ``path`` into the debounce pipeline.
@@ -532,10 +669,30 @@ class Watcher:
         recent daemon write) when both ``origin_tracker`` and
         ``content_hash_fn`` are configured; otherwise every event is
         forwarded straight to the debouncer.
+
+        This runs on ``watchdog``'s OWN internal dispatch thread (build-plan
+        T9.6), not this class's poll thread -- there is no backstop above
+        it the way ``_poll_loop`` backstops ``poll()``, so an uncaught
+        exception here would kill the real ``Observer``'s dispatch loop
+        outright (silently, from the daemon's perspective: the watcher
+        object still exists, it just never reacts to another filesystem
+        event again). ``content_hash_fn`` reads the file to hash it, and a
+        real filesystem races this constantly even outside the known
+        write-back-temp-file case this module already filters (an external
+        editor's own atomic-save temp file, a file deleted between the
+        event firing and this call, ...): if the read fails, we cannot
+        prove this was an echo, so the safe default is to NOT suppress it
+        -- forward to the debouncer like any other real event (worst case:
+        one extra idempotent, zero-diff reconcile cycle later; on_change's
+        own retry_with_backoff/T9.1 tolerance handles a still-transient
+        condition by the time it actually fires).
         """
         if self.origin_tracker is not None and self.content_hash_fn is not None:
-            content_hash = self.content_hash_fn(path)
-            if self.origin_tracker.is_echo(path, content_hash):
+            try:
+                content_hash = self.content_hash_fn(path)
+            except OSError:
+                content_hash = None
+            if content_hash is not None and self.origin_tracker.is_echo(path, content_hash):
                 return
         self._debouncer.notify(path, at=at)
 

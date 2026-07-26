@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 
 import pytest
 
@@ -226,6 +227,60 @@ def test_start_schedules_a_recursive_watch_per_root_and_stop_joins():
     assert spy.stopped is True and spy.joined is True
 
 
+def test_a_root_registered_after_start_is_picked_up_by_the_poll_loop():
+    """build-plan T9.6 regression: found via a real live-daemon manual
+    check, not by any automated test -- ``load_roots()`` used to run
+    exactly once, inside ``start()``. Registering a sync root AFTER the
+    daemon (and its watcher) is already running -- the realistic common
+    case, since a human normally starts the daemon first and registers a
+    vault moments later -- meant the new root was never watched for the
+    rest of the process's life. ``_watch_new_roots`` (called every poll
+    tick) is the fix; this drives it directly rather than waiting on the
+    real poll thread's timing, keeping this test deterministic.
+    """
+    conn = _conn()
+    spy = _SpyObserver()
+    w = Watcher(conn, lambda _p: None, observer_factory=lambda: spy)
+    w.start()
+    assert spy.scheduled == []  # nothing registered yet
+
+    store.register_sync_root(conn, "late", "/home/u/vault-late")
+    w._watch_new_roots()
+
+    assert spy.scheduled == [("/home/u/vault-late", True)]
+    assert {r.name for r in w.roots.values()} == {"late"}
+
+    w.stop()
+
+
+def test_start_actually_fires_on_cycle_without_a_manual_poll_call():
+    """build-plan T9.6 regression: before this fix, ``start()`` never spawned
+    the poll thread its own docstring (via ``Debouncer``'s) already claimed
+    it did -- ``notify_event`` would enqueue a path forever and nothing
+    would ever call ``poll()`` to fire ``on_cycle``, so a real running
+    daemon would never react to a real filesystem event. Real (not
+    injected) sleeps are unavoidable here since this specifically tests a
+    real background thread's timing, unlike every other test in this file.
+    """
+    conn = _conn()
+    fired: list[str] = []
+    w = Watcher(
+        conn,
+        fired.append,
+        debounce_seconds=0.05,
+        poll_interval_seconds=0.02,
+        observer_factory=lambda: _SpyObserver(),
+    )
+    w.start()
+    try:
+        w.notify_event("/vault/a.md")
+        assert fired == []  # not yet -- still inside the debounce window
+        time.sleep(0.5)  # generous margin over debounce+poll interval
+        assert fired == ["/vault/a.md"]
+    finally:
+        w.stop()
+
+
 def test_watchdog_event_handler_routes_src_and_dest_but_skips_dirs():
     conn = _conn()
     seen: list[str] = []
@@ -244,7 +299,15 @@ def test_watchdog_event_handler_routes_src_and_dest_but_skips_dirs():
     handler.on_any_event(_Evt("/vault/a.md", dest="/vault/b.md"))  # a move/rename
     handler.on_any_event(_Evt("/vault/subdir", is_directory=True))  # ignored
 
-    assert seen == ["/vault/a.md", "/vault/a.md", "/vault/b.md"]
+    # build-plan T9.6: on_any_event now normalizes through str(PurePath(...))
+    # (found via a real live-daemon check: a raw watchdog event path mixed
+    # separators with a forward-slash-registered root_path, double-tracking
+    # the same file under two different sync_files.path strings) -- assert
+    # against the same normalization rather than the raw literal so this
+    # test stays correct on whichever platform's PurePath is in effect.
+    from pathlib import PurePath as _PP
+
+    assert seen == [str(_PP("/vault/a.md")), str(_PP("/vault/a.md")), str(_PP("/vault/b.md"))]
 
 
 def test_watched_root_dataclass_defaults():

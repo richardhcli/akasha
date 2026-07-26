@@ -339,6 +339,24 @@ def _config_dir(config: Config) -> Path:
     return default_config_dir()
 
 
+def _watcher_content_hash(path: str) -> str:
+    """Hash a vault file's current on-disk content for echo suppression.
+
+    Matches ``Reconciler.on_change``'s own ``origin.record_write(path,
+    object_hash(text.encode("utf-8")))`` call exactly (same canonicalize-
+    then-``object_hash`` pipeline) -- a genuine daemon self-write reads
+    back byte-identical, so its hash always matches the recorded one and
+    ``OriginTracker.is_echo`` correctly drops it; a real external edit
+    produces different canonical bytes and is never suppressed. Lazy
+    imports match this module's existing deferred-import style for
+    sync-related dependencies (kept out of the CLI's other, lighter verbs).
+    """
+    from akasha.kernel.canonical import canonicalize_text, object_hash
+
+    text = canonicalize_text(Path(path).read_text(encoding="utf-8"))
+    return object_hash(text.encode("utf-8"))
+
+
 def serve(config: Config) -> None:
     """Acquire the single-instance lock, then serve the API until shutdown.
 
@@ -366,6 +384,20 @@ def serve(config: Config) -> None:
     it can never race a second instance's own scheduler over the same DB --
     and stops it in the same ``finally`` as the "daemon shutting down" log,
     so a clean shutdown always joins the tick thread rather than leaking it.
+
+    Also starts the task T9.6 live filesystem :class:`~akasha.sync.watcher.Watcher`
+    right after the startup reconcile, so a running daemon actually reacts
+    to a vault file being edited rather than relying solely on process
+    restart or a manual ``POST /v1/sync/rescan``. Uses its OWN fresh
+    ``OriginTracker`` + ``Reconciler`` pair (constructed ONCE here and held
+    for the watcher's entire lifetime -- never a fresh one per event, or
+    echo suppression / cross-file move tracking would silently stop
+    working) -- deliberately NOT the startup reconcile's tracker, matching
+    ``reconcile_all``'s own docstring rationale: "a startup/rescan run has
+    no live filesystem watcher to share echo-suppression state with", and
+    every ``on_change`` call is idempotent regardless, so an unshared
+    tracker costs at most one redundant no-op cycle, never incorrect
+    state. Stopped in the same ``finally`` as ``gc_scheduler``.
     """
     import uvicorn
 
@@ -373,6 +405,7 @@ def serve(config: Config) -> None:
     from akasha.config import default_db_path
     from akasha.sync import reconcile
     from akasha.sync.origin import OriginTracker
+    from akasha.sync.watcher import Watcher
 
     config_dir = _config_dir(config)
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -395,7 +428,21 @@ def serve(config: Config) -> None:
             summary = reconcile.reconcile_all(app.state.conn, OriginTracker())
             logger.info(f"startup reconcile complete: {json.dumps(summary)}")
             gc_scheduler.start()
-            uvicorn.run(app, host=config.bind, port=config.port, log_level="warning")
+
+            watch_origin = OriginTracker()
+            watch_reconciler = reconcile.Reconciler(app.state.conn, watch_origin)
+            watcher = Watcher(
+                app.state.conn,
+                watch_reconciler.on_change,
+                origin_tracker=watch_origin,
+                content_hash_fn=_watcher_content_hash,
+                logger=logger,
+            )
+            watcher.start()
+            try:
+                uvicorn.run(app, host=config.bind, port=config.port, log_level="warning")
+            finally:
+                watcher.stop()
         finally:
             gc_scheduler.stop()
             logger.info("daemon shutting down")

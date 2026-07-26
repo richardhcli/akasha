@@ -312,6 +312,14 @@ def test_daemon_serve_runs_startup_reconcile_inside_lock(tmp_path, monkeypatch):
     ``akasha.sync.reconcile.reconcile_all`` to record that it was called
     while the single-instance lock is already held, and that it ran BEFORE
     ``uvicorn.run``.
+
+    Also stubs ``reconcile.Reconciler`` and ``sync.watcher.Watcher`` (build-
+    plan T9.6): ``serve()`` now constructs a real, persistent one of each
+    for the live-watch wiring, which would otherwise try real SQLite calls
+    against this test's bare ``object()`` fake connection. This test's own
+    concern (ordering: reconcile before serve, inside the lock) is
+    unaffected by stubbing them the same way ``reconcile_all``/
+    ``uvicorn.run`` already are.
     """
     import types
 
@@ -339,8 +347,24 @@ def test_daemon_serve_runs_startup_reconcile_inside_lock(tmp_path, monkeypatch):
     def fake_uvicorn_run(app, **kwargs):
         calls.append("uvicorn.run")
 
+    def fake_reconciler_ctor(conn, origin, *, conflict_handler=None, projection=None):
+        assert conn is fake_conn
+        return types.SimpleNamespace(on_change=lambda path: None)
+
+    class _FakeWatcher:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            calls.append("watcher.start")
+
+        def stop(self):
+            calls.append("watcher.stop")
+
     monkeypatch.setattr("akasha.api.app.create_app", fake_create_app)
     monkeypatch.setattr(reconcile_module, "reconcile_all", fake_reconcile_all)
+    monkeypatch.setattr(reconcile_module, "Reconciler", fake_reconciler_ctor)
+    monkeypatch.setattr("akasha.sync.watcher.Watcher", _FakeWatcher)
 
     import uvicorn
 
@@ -349,7 +373,7 @@ def test_daemon_serve_runs_startup_reconcile_inside_lock(tmp_path, monkeypatch):
     config = Config(path=tmp_path / "config.toml", db_path=tmp_path / "store.db")
     daemon_module.serve(config)
 
-    assert calls == ["reconcile_all", "uvicorn.run"]
+    assert calls == ["reconcile_all", "watcher.start", "uvicorn.run", "watcher.stop"]
     # lock released after serve() returns
     with daemon_module.single_instance_lock(tmp_path / daemon_module.LOCK_FILE_NAME):
         pass
