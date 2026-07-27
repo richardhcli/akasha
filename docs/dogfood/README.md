@@ -200,26 +200,18 @@ curl -s http://127.0.0.1:7433/v1/sync/status -H "Authorization: Bearer $TOKEN"
 ```
 
 <!--
-SPEC-QUESTION (T11.1): registering a sync root (`POST /v1/sync/roots`)
-does no filesystem walk (`kernel/store.py`'s `register_sync_root` is a
-pure DB upsert), and there is no wired file-discovery path for a brand
-new root's on-disk files in this build: `sync/watcher.py`'s `Watcher`
-class is never instantiated in `daemon.py`'s `serve()` or in
-`api/app.py` (confirmed by grep — zero production call sites), and both
-`reconcile.reconcile_all` (daemon startup) and `POST /v1/sync/rescan`
-only iterate *already-known* `store.list_sync_files` rows, never the
-filesystem. Empirically: after registering a root with 5 real `.md`
-files on disk and calling `POST /v1/sync/rescan`, the response was
-`{"files_reconciled": 0, "files_missing": 0, "reviews_open": 0}` and
-`GET /v1/sync/status` continued to show `"files": []` for that root.
-This does not block T11.1 (`GET /v1/sync/status` showing `violations: []`
-is still the literally-specified, correct expected result either way),
-but it means T11.2's step 2 ("let the daemon's watcher pick it up (or
-`POST /v1/sync/rescan`)") will not actually pick up newly added `^tm-new`
-anchors in this build until file discovery for new sync roots is wired
-(out of scope for T11.1 — its Files list is this document only). Logged
-in `docs/spec-questions.md`; a human running T11.2 needs to know this
-before relying on either mechanism.
+Historical note (T11.1, 2026-07-24): at the time this runbook was
+written, registering a sync root did no filesystem walk and the
+Watcher had zero production call sites — see
+`docs/archived-questions.md`'s "T11.1 — New sync roots are never
+scanned" entry for the original finding. **Both gaps are now closed:**
+T11.3 (2026-07-25) wired file discovery into `reconcile_all` and
+`POST /v1/sync/rescan`, and T9.6 (2026-07-26) wired a real, persistent
+`Watcher` into `daemon.serve()` that also re-scans for newly-registered
+roots every poll tick. Step 9 below (`POST /v1/sync/roots`) now
+triggers real discovery on the next rescan/poll tick with no extra
+step required — see "Known limitation" below, which is now a "how it
+actually behaves" note instead.
 -->
 
 ```sh
@@ -229,30 +221,33 @@ git status --porcelain | grep -i "akasha-dogfood" || echo "no matches (expected)
 git check-ignore -v data/
 ```
 
-## Known limitation — read this before doing T11.2
+## File discovery for newly registered roots (was a known limitation, now resolved)
 
-**Registering a sync root does not scan its existing files, and there is
-currently no wired mechanism that does.** `POST /v1/sync/roots` only
-inserts a DB row; it does not walk the directory. In this build, the
-filesystem `Watcher` (`sync/watcher.py`) has zero production call sites —
-it is not started by the daemon (`daemon.py`'s `serve()`) or by
-`api/app.py`. Both the daemon's own startup reconcile and
-`POST /v1/sync/rescan` only re-process files *already* tracked in the
-`sync_files` table — never files that have never been seen before.
+**As of T11.3 + T9.6 (2026-07-25/26), both a running daemon's live
+`Watcher` and `POST /v1/sync/rescan` discover a sync root's *pre-existing*
+files, not just changes to files already tracked.** Earlier revisions of
+this document warned that registering a root and calling
+`POST /v1/sync/rescan` would return
+`{"files_reconciled": 0, "files_missing": 0, "reviews_open": 0}` and leave
+`GET /v1/sync/status` showing `"files": []` — that was a real, empirically
+reproduced gap at the time, and is no longer accurate. Concretely:
 
-Empirically: registering a root pointing at 5 real `.md` files on disk,
-then calling `POST /v1/sync/rescan`, returned
-`{"files_reconciled": 0, "files_missing": 0, "reviews_open": 0}`, and a
-subsequent `GET /v1/sync/status` still showed `"files": []` for that
-root.
+- `POST /v1/sync/rescan` and the daemon's own startup reconcile now walk
+  every registered root for `*.md` files with no `sync_files` row yet
+  (`reconcile.py`'s `discover_untracked_files`, T11.3) and reconcile each
+  one, in addition to their prior already-known-files behavior.
+- A **live** daemon's `Watcher` (wired into `daemon.serve()` by T9.6) also
+  re-checks for newly-registered roots on every poll tick
+  (`_watch_new_roots`), so a root registered mid-session — the normal
+  order of operations, since registering a vault is usually the next
+  thing you do once the daemon is already up — gets picked up without any
+  manual rescan call at all.
 
 **Practical consequence for T11.2:** its step 2 ("save; let the daemon's
-watcher pick it up (or `POST /v1/sync/rescan`)") will not actually detect
-a hand-added `^tm-new` anchor in a file under a sync root that has never
-been reconciled before, in this build. Until file discovery for new sync
-roots is wired (out of scope for this document — see the `# SPEC-QUESTION:`
-comment above and `docs/spec-questions.md`), a human doing T11.2 should
-expect this and treat it as a known gap, not user error.
+watcher pick it up (or `POST /v1/sync/rescan`)") now works as literally
+written. Either mechanism detects a hand-added `^tm-new` anchor in a file
+under a sync root that has never been reconciled before, including one
+registered after the daemon was already running.
 
 ## Cleanup
 

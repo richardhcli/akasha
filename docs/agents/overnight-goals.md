@@ -1,14 +1,16 @@
 # Overnight goals
 
-**Last refreshed:** 2026-07-26 (T9.6 and T9.7 both landed same day;
-T9.8 registered from a real CI finding, then marked `BLOCKED: not
+**Last refreshed:** 2026-07-26 (T9.6, T9.7, and T9.9 all landed same
+day; T9.8 registered from a real CI finding, then marked `BLOCKED: not
 fleet-dispatchable` the same day once its actual scope — a multi-hour
-real soak run — turned out to not fit a single worker turn. See
-`docs/agents/task-status.md` M9 and `docs/build-plan.md` for the full
-detail. **Currently zero eligible `TODO` rows exist anywhere in the
-build plan** — see below.). **Read by:** `overnight_prompt.md`, as
-priority guidance only — see "What this document is not" below before
-using it for anything else.
+real soak run — turned out to not fit a single worker turn. T9.9 (a
+Windows-console `UnicodeEncodeError` crash in the CLI) was found and
+fixed during a human-directed Windows-environment dogfood-readiness
+sweep, not an autonomous fleet run. See `docs/agents/task-status.md`
+M9 and `docs/build-plan.md` for the full detail. **Currently zero
+eligible `TODO` rows exist anywhere in the build plan** — see below.).
+**Read by:** `overnight_prompt.md`, as priority guidance only — see
+"What this document is not" below before using it for anything else.
 
 ## Current goal set: none dispatchable
 

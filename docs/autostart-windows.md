@@ -104,6 +104,29 @@ Notes on the XML:
   lock, because the daemon's own exit code and message make that failure
   visible in the task's history rather than silently spinning.
 
+**Caveat, empirically verified 2026-07-25 (see
+`docs/dogfood/windows-service.md`):** on a "Windows 11 Enterprise
+Evaluation" image — the same edition this repo's own dev host runs —
+Task Scheduler's `RestartOnFailure`/`RestartCount`/`RestartInterval`
+settings did **not** reliably restart a long-running task process after
+a hard kill (`taskkill /F`): `LastTaskResult` flipped to a failure code,
+but no restart happened over 3.5 minutes of polling despite
+`RestartInterval=1min`/`RestartCount=3`. This is a known real-world
+limitation of Task Scheduler for user-session (`AtLogOn`) tasks, not a
+misconfiguration of the XML above. If you're on this class of Windows
+image and want crash recovery you can actually rely on, either use
+**Option B (NSSM)** below — a real Windows service, a different restart
+mechanism entirely — or adapt the supervisor-wrapper pattern
+`docs/dogfood/windows-service.md`/`scripts/windows-service/lib.ps1`'s
+`New-DaemonWrapperScript` uses (Task Scheduler launches a tiny `.bat`
+loop once at logon; the loop itself relaunches the daemon on every exit,
+verified live via two consecutive `taskkill /F` tests, both producing a
+new listening PID within ~2 seconds) instead of pointing the task
+directly at `akasha.exe`. Those scripts are wired for a disposable
+scratch config; treat them as a reference implementation to adapt for a
+real config path, not something to run as-is against your production
+vault.
+
 ### Or: create the task with `schtasks` (no XML import)
 
 ```powershell

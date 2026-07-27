@@ -62,7 +62,9 @@ string.
 
 from __future__ import annotations
 
+import io
 import json as json_lib
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -74,6 +76,21 @@ import typer
 from akasha import daemon as daemon_module
 from akasha.config import DEFAULT_BIND, DEFAULT_PORT, load_config
 from akasha.kernel import ids
+
+# Windows consoles default `sys.stdout`/`sys.stderr` to the legacy locale
+# codepage (e.g. cp1252), not UTF-8 -- confirmed live on a real Windows 11
+# host, where this crashed several `--help` invocations with
+# UnicodeEncodeError on a plain U+2205 character in a command docstring.
+# UTF-8 can represent every Unicode string losslessly, so reconfiguring
+# here removes the crash risk entirely rather than avoiding specific
+# characters case by case. The `isinstance` check (not just `hasattr`)
+# both narrows the type for pyright and skips streams that have already
+# been replaced with something that doesn't support `.reconfigure` (e.g.
+# click's test `CliRunner`).
+if sys.platform == "win32":  # pragma: no cover - platform-specific, see T9.1/T9.2 precedent
+    for _stream in (sys.stdout, sys.stderr):
+        if isinstance(_stream, io.TextIOWrapper):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
 
 DEFAULT_BASE_URL = f"http://{DEFAULT_BIND}:{DEFAULT_PORT}"
 CLI_SCHEMA = "cli/v1"
@@ -415,7 +432,7 @@ def review_list(ctx: typer.Context, status: str = typer.Option("open", "--status
 
 @review_app.command("resolve")
 def review_resolve(ctx: typer.Context, review_id: str, resolution: str) -> None:
-    """POST /v1/review/{id}/resolve (human only ∅)."""
+    """POST /v1/review/{id}/resolve (human only)."""
     state = _state(ctx)
     result = _mutate(state, "POST", f"/v1/review/{review_id}/resolve", {"resolution": resolution})
     _echo_ok(state, result)
@@ -431,7 +448,7 @@ def token_create(
     token_class: str = typer.Option("agent", "--class", help="human|agent"),
     rate_per_min: int | None = typer.Option(None, "--rate-per-min"),
 ) -> None:
-    """POST /v1/tokens (human only ∅)."""
+    """POST /v1/tokens (human only)."""
     state = _state(ctx)
     if token_class not in ("human", "agent"):
         _usage_error(state, f"--class must be 'human' or 'agent', got {token_class!r}")
@@ -444,7 +461,7 @@ def token_create(
 
 @token_app.command("revoke")
 def token_revoke(ctx: typer.Context, token_id: str) -> None:
-    """DELETE /v1/tokens/{id} (human only ∅)."""
+    """DELETE /v1/tokens/{id} (human only)."""
     state = _state(ctx)
     result = _mutate(state, "DELETE", f"/v1/tokens/{token_id}")
     _echo_ok(state, result)
@@ -452,7 +469,7 @@ def token_revoke(ctx: typer.Context, token_id: str) -> None:
 
 @token_app.command("list")
 def token_list(ctx: typer.Context) -> None:
-    """GET /v1/tokens (human only ∅)."""
+    """GET /v1/tokens (human only)."""
     state = _state(ctx)
     result = _request(state, "GET", "/v1/tokens")
     _echo_ok(state, result)
