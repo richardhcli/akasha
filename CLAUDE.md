@@ -70,6 +70,7 @@ docs/
   vision.md            # PRD
   mvp-spec.md           # implementation spec
   build-plan.md         # per-task work queue
+  mvp-debug-plan.md     # post-construction bug/hardening findings (actively appended)
   spec-questions.md     # ambiguity log
   agents/
     task-status.md      # per-task DONE/TODO/BLOCKED tracker
