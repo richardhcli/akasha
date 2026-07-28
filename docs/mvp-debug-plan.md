@@ -201,4 +201,29 @@ authoritative for `D*` entries; there is no separate status tracker.
   duration is provably under 6h with documented margin; the next real
   scheduled run completes (rather than being killed mid-flight); `make
   check` green (no `src`/`tests` changes expected, CI-config-only).
-- **Status** — TODO.
+- **Status** — DONE 2026-07-28. Changed `nightly-soak`'s `--hours` on the
+  `schedule` branch from the literal `'24'` to `'5'` (18000s), leaving ~1h
+  margin under the 6h GitHub-hosted-runner execution cap — the
+  `workflow_dispatch` branch's `inputs.soak_hours` (default `"0.05"`) is
+  untouched, matching Steps (3). Updated the `schedule`-trigger comment,
+  the `workflow_dispatch.inputs.soak_hours` description, and the
+  `nightly-soak` job's own comment block (all in `ci.yml`) to state the
+  real 5h duration and cite D3 as the reason, rather than the old
+  literal-24h/build-plan-Verify framing. `docs/build-plan.md`'s T9.5 entry
+  was left untouched — its text doesn't assert the 24h ever ran/passed in
+  CI (that's a forward-looking Verify spec, not a historical claim), so
+  the Step (2) parenthetical condition doesn't apply, and T9.5 isn't in
+  this entry's `Files` list. `uv run --with pyyaml python -c "import
+  yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` parses clean
+  (no project `pyyaml` dependency exists, so used an ephemeral `uv run
+  --with`). `gh workflow view "CI"` independently confirms the exact
+  failure mode this fixes: real run `30343169643` (the first `schedule`
+  run after T9.8's RSS fix landed) shows `cancelled` at `6h0m14s` — killed
+  by the platform ceiling, not a soak failure on its own merits. Full gate
+  (`ruff check src tests`, `pyright src`, `pytest tests/unit
+  tests/property` — 415 passed) green, as expected for a CI-config-only
+  change touching no `src`/`tests` files. Step (4)'s real
+  `workflow_dispatch` verification run (and the subsequent real `schedule`
+  firing) were intentionally not triggered as part of this fix — a 5h
+  CI run has real cost/runner-time and shared-visibility implications, so
+  it's left for the user to trigger explicitly.

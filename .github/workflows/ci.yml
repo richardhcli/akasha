@@ -4,9 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
-  # T9.5: nightly trigger for the literal 24-hour soak below. GitHub Actions
-  # schedule events always run against the default branch (main), matching
-  # the build-plan Verify's "(nightly Windows)" parenthetical.
+  # T9.5/D3: nightly trigger for the soak below. GitHub Actions schedule
+  # events always run against the default branch (main), matching the
+  # build-plan Verify's "(nightly Windows)" parenthetical. D3: GitHub-hosted
+  # runners hard-cap at 6h of execution time regardless of timeout-minutes,
+  # so the schedule branch cannot literally run the build-plan Verify's 24h
+  # -- it uses a 5h scaled proxy instead (T9.5's own Steps text explicitly
+  # sanctions "a scaled proxy in CI ... nightly on main" as an alternative
+  # reading), leaving ~1h margin under the 6h ceiling for runner
+  # provisioning/checkout/`uv sync` overhead.
   schedule:
     - cron: "0 6 * * *"
   # Lets a maintainer manually exercise nightly-soak/nightly-battery on a
@@ -14,12 +20,12 @@ on:
   # (useful the first time this workflow reaches main, or after touching
   # either job -- both had literally never executed on a hosted runner
   # until manually dispatched to verify this). soak_hours only affects a
-  # manual dispatch; the real nightly `schedule` run always uses the
-  # literal 24h the build-plan Verify specifies, never this input.
+  # manual dispatch; the real nightly `schedule` run always uses the fixed
+  # 5h duration (D3), never this input.
   workflow_dispatch:
     inputs:
       soak_hours:
-        description: "Hours for nightly-soak on a manual dispatch only (schedule runs always use 24)"
+        description: "Hours for nightly-soak on a manual dispatch only (schedule runs always use 5, D3)"
         required: false
         default: "0.05"
 
@@ -76,12 +82,15 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
-  # T9.5: the literal 24-hour soak (build-plan Verify, verbatim) on the
-  # `schedule` trigger; a shorter workflow_dispatch-only override (see
-  # `on.workflow_dispatch.inputs.soak_hours` above) lets a maintainer
-  # verify this job actually runs on a real hosted windows-latest runner
-  # without waiting up to 24h -- a real push/PR run must never block on
-  # either.
+  # T9.5: the soak test (build-plan Verify) on the `schedule` trigger. D3:
+  # the build-plan's literal 24h cannot complete on a GitHub-hosted runner
+  # (hard 6h execution cap, independent of timeout-minutes), so the
+  # `schedule` branch runs a 5h scaled proxy instead -- see the `schedule`
+  # trigger comment above for the full rationale. A shorter
+  # workflow_dispatch-only override (see `on.workflow_dispatch.inputs.
+  # soak_hours` above) separately lets a maintainer verify this job
+  # actually runs on a real hosted windows-latest runner without waiting
+  # up to 5h -- a real push/PR run must never block on either.
   nightly-soak:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
@@ -89,7 +98,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
       - run: uv sync
-      - run: uv run python tests/battery/soak.py --hours ${{ github.event_name == 'schedule' && '24' || inputs.soak_hours }}
+      - run: uv run python tests/battery/soak.py --hours ${{ github.event_name == 'schedule' && '5' || inputs.soak_hours }}
 
   # Spec §6.3 names "battery + soak on main nightly (Windows)" as one gate;
   # nightly-soak above covered soak only -- this job was a dangling comment
