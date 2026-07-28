@@ -280,6 +280,21 @@ def _setup(tmp_dir: Path, seed: int, logger: logging.Logger) -> _SoakState:
 
     app = create_app(config=Config(), conn=conn)
     client = TestClient(app, raise_server_exceptions=True)
+    # build-plan T9.8 root cause: Starlette's TestClient only reuses one
+    # anyio blocking portal (a background thread + asyncio event loop)
+    # across calls when entered as a context manager. Un-entered (the
+    # previous state here), `_portal_factory` falls back to spinning up and
+    # tearing down a BRAND NEW portal on every single `.get()`/`.post()`
+    # call -- confirmed via a controlled A/B probe (3000 sequential
+    # `/v1/metrics` GETs): ~6.2 KB/request RSS growth and 3x higher latency
+    # without `__enter__`, both gone once entered. Over a real 24h run's
+    # ~43k ticks this fully explains the RSS budget breach on its own, with
+    # zero contribution from `src/akasha/*` production code (a tracemalloc
+    # diff of the growth was dominated entirely by anyio/asyncio internals).
+    # Entered once here, for the whole soak run; `run_soak`'s `finally`
+    # below exits it, mirroring the existing manual-lifecycle pattern this
+    # function already uses for `conn`.
+    client.__enter__()
 
     vault_dir = tmp_dir / "vault"
     vault_dir.mkdir(parents=True, exist_ok=True)
@@ -546,11 +561,15 @@ def run_soak(
                 elapsed = clock.monotonic() - tick_started_at
                 clock.sleep(max(0.0, tick_seconds - elapsed))
         finally:
-            # Close the sqlite connection BEFORE the TemporaryDirectory
-            # context exits and tries to remove the underlying files --
-            # Windows (this task's own nightly-CI target, T9.1) locks open
-            # file handles, so an unclosed connection would otherwise fail
-            # the directory's own teardown, not just leak a handle.
+            # Exit the TestClient's context (T9.8: shuts down the one
+            # long-lived anyio portal entered in `_setup`) before closing
+            # the sqlite connection, then close the connection BEFORE the
+            # TemporaryDirectory context exits and tries to remove the
+            # underlying files -- Windows (this task's own nightly-CI
+            # target, T9.1) locks open file handles, so an unclosed
+            # connection would otherwise fail the directory's own teardown,
+            # not just leak a handle.
+            state.client.__exit__(None, None, None)
             state.conn.close()
 
     # The first idle-CPU sample has no prior sample to diff against
