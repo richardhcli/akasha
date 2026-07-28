@@ -74,7 +74,17 @@ authoritative for `D*` entries; there is no separate status tracker.
 - **Verify** — `uv run pytest tests/unit/test_logging.py`
 - **DoD** — the new test passes; existing `test_logging.py` cases
   (non-exception log lines) still pass unchanged; `make check` green.
-- **Status** — TODO.
+- **Status** — DONE 2026-07-28. `JsonLineFormatter.format` now adds a
+  `"traceback"` key (via `self.formatException(record.exc_info)`) only
+  when `record.exc_info` is truthy — non-exception log lines are
+  byte-for-byte unchanged (asserted directly:
+  `test_log_record_is_json_with_required_keys` now also asserts
+  `"traceback" not in payload`). New
+  `test_log_record_includes_traceback_on_exception` covers the
+  `logger.exception(...)` path, asserting both the exception type/message
+  and `"Traceback (most recent call last)"` appear in the field. Full gate
+  (`ruff check src tests`, `pyright src`, `pytest tests/unit
+  tests/property`) green.
 
 ## D2 — `metrics._sample_rss_bytes_windows` is not safe under concurrent calls
 

@@ -54,6 +54,8 @@ class JsonLineFormatter(logging.Formatter):
             "level": record.levelname,
             "event": record.getMessage(),
         }
+        if record.exc_info:
+            payload["traceback"] = self.formatException(record.exc_info)
         return json.dumps(payload)
 
 
