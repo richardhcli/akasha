@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -327,6 +329,23 @@ def test_rss_bytes_is_positive_for_this_process(conn):
     result = metrics.compute_metrics(conn)
     assert isinstance(result["rss_bytes"], int)
     assert result["rss_bytes"] > 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only RSS sampler (D2)")
+def test_sample_rss_bytes_windows_is_safe_under_concurrent_calls():
+    """D2: concurrent callers must never race on shared, mutated ctypes state.
+
+    Before the fix, ``_sample_rss_bytes_windows`` reassigned the shared
+    ``kernel32``/``psapi`` DLL objects' ``argtypes``/``restype`` on every
+    call, so two threads calling it at once could observe each other's
+    in-flight reassignment and raise ``ctypes.ArgumentError``. Hammering it
+    from many threads at once reproduces that race when the fix is absent
+    and must pass cleanly with it in place.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _: metrics._sample_rss_bytes_windows(), range(200)))
+
+    assert all(isinstance(r, int) and r > 0 for r in results)
 
 
 def test_idle_cpu_pct_first_sample_is_zero_then_bounded(conn):

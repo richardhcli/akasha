@@ -130,7 +130,21 @@ authoritative for `D*` entries; there is no separate status tracker.
 - **Verify** — `uv run pytest tests/unit/test_metrics.py`
 - **DoD** — the new concurrency test passes on a real Windows host; no
   regression in existing RSS/CPU sampling tests; `make check` green.
-- **Status** — TODO.
+- **Status** — DONE 2026-07-28. Hoisted the `_ProcessMemoryCounters`
+  structure definition and the `kernel32`/`psapi` `argtypes`/`restype`
+  setup out of `_sample_rss_bytes_windows` into a new
+  `functools.lru_cache(maxsize=1)`-wrapped `_windows_memory_api()` helper —
+  the DLL bindings are now computed once per process and never mutated
+  again; `_sample_rss_bytes_windows` only reads the cached tuple and
+  allocates a fresh, call-local `_ProcessMemoryCounters()` instance per
+  call, exactly the split D2's Steps (1)/(2) called for. New
+  `test_sample_rss_bytes_windows_is_safe_under_concurrent_calls` (skipped
+  cleanly off-Windows, matching the module's existing platform-guard
+  convention) hammers `_sample_rss_bytes_windows()` from a 16-worker thread
+  pool (200 calls) and asserts every call returns a positive int — passed
+  on a real Windows host, no `ctypes.ArgumentError`. Full gate (`ruff check
+  src tests`, `pyright src`, `pytest tests/unit tests/property` — 415
+  passed) green.
 
 ## D3 — `nightly-soak`'s scheduled 24h run cannot complete on a GitHub-hosted runner
 

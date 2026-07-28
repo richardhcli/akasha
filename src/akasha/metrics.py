@@ -22,6 +22,8 @@ this module never issues SQL of its own.
 
 from __future__ import annotations
 
+import ctypes
+import functools
 import math
 import os
 import sqlite3
@@ -220,15 +222,38 @@ def _sample_rss_bytes() -> int:
         return 0
 
 
-def _sample_rss_bytes_windows() -> int:  # pragma: no cover - Windows-only branch
-    # Mirrors daemon.py's _acquire_windows/_acquire_posix guard: typeshed's
-    # ctypes.windll/WinDLL member types only resolve fully under Windows,
-    # so pyright run on a non-Windows pythonPlatform (e.g. ubuntu-latest
-    # CI) reports reportUnknownMemberType on every dynamic attribute below
-    # unless this early guard makes the rest of the function provably
-    # unreachable there.
+@functools.lru_cache(maxsize=1)
+def _windows_memory_api() -> tuple[Any, Any, type[ctypes.Structure]]:  # pragma: no cover
+    """One-time (cached) Win32 ``GetProcessMemoryInfo`` binding setup.
+
+    D2 fix (build-plan debug entry): this used to run -- and mutate the
+    *shared, module-level* ``kernel32``/``psapi`` DLL objects' ``argtypes``/
+    ``restype`` -- on every single ``_sample_rss_bytes_windows`` call. Two
+    threads calling it at once (e.g. concurrent ``GET /v1/metrics``
+    requests, dispatched through uvicorn's request threadpool) could race:
+    one thread's in-flight call sees the other thread's reassigned
+    ``argtypes`` mid-call, producing
+    ``ctypes.ArgumentError: argument 2: TypeError: expected
+    LP__ProcessMemoryCounters instance instead of pointer to
+    _ProcessMemoryCounters``. ``functools.lru_cache`` makes this setup run
+    (at most, modulo an untroublesome first-call race -- see below) once
+    per process: the DLL handles and their ``argtypes``/``restype`` are
+    computed a single time and never mutated again, so steady-state calls
+    only ever *read* already-configured, immutable-in-practice function
+    metadata. (Two threads racing to populate the cache on the very first
+    call could redundantly run this setup twice, but that's idempotent --
+    it only assigns the same values -- unlike the per-call reassignment
+    this replaces.)
+
+    Mirrors daemon.py's ``_acquire_windows``/``_acquire_posix`` guard:
+    typeshed's ``ctypes.windll``/``WinDLL`` member types only resolve fully
+    under Windows, so pyright run on a non-Windows pythonPlatform (e.g.
+    ubuntu-latest CI) reports ``reportUnknownMemberType`` on every dynamic
+    attribute below unless this early guard makes the rest of the function
+    provably unreachable there.
+    """
     if sys.platform != "win32":
-        raise AssertionError("_sample_rss_bytes_windows called on a non-Windows platform")
+        raise AssertionError("_windows_memory_api called on a non-Windows platform")
 
     import ctypes
     from ctypes import wintypes
@@ -264,9 +289,18 @@ def _sample_rss_bytes_windows() -> int:  # pragma: no cover - Windows-only branc
         ctypes.POINTER(_ProcessMemoryCounters),
         wintypes.DWORD,
     ]
+    return kernel32, psapi, _ProcessMemoryCounters
 
-    counters = _ProcessMemoryCounters()
-    counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+
+def _sample_rss_bytes_windows() -> int:  # pragma: no cover - Windows-only branch
+    if sys.platform != "win32":
+        raise AssertionError("_sample_rss_bytes_windows called on a non-Windows platform")
+
+    import ctypes
+
+    kernel32, psapi, counters_cls = _windows_memory_api()
+    counters = counters_cls()
+    counters.cb = ctypes.sizeof(counters_cls)
     handle = kernel32.GetCurrentProcess()
     ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
     return int(counters.WorkingSetSize) if ok else 0
