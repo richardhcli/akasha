@@ -5,14 +5,25 @@ Windows: daemon + CLI via `uv run`, Obsidian plugin via a vault junction.
 Nothing is installed system-wide; teardown is deleting a folder (and
 optionally removing the plugin junction).
 
-**Current readiness (as of M6 code-complete):** daemon, HTTP API, CLI,
-file sync, and the Obsidian thin client are usable for capture/sync
-dogfood. The TMS review loop (M7) and web UI (M8) are **not** ready —
-`akasha review` will fail gracefully until then.
+**Current readiness:** M0–M10 are done or code-complete against a live
+daemon (see [`../agents/task-status.md`](../agents/task-status.md)) — daemon,
+HTTP API, CLI, file sync, the TMS review loop, the web UI, and the Obsidian
+thin client are all usable for dogfood.
 
-For a lasting “start at logon” setup, use [`docs/autostart-windows.md`](../autostart-windows.md)
-*after* you decide to keep a real install. This guide deliberately avoids
-that.
+**Fast path, if you have Git Bash/WSL:** `scripts/dogfood/init.sh <name>
+[port]` scripts most of §1–§5 below (scratch DB, bootstrap token, daemon
+start, sync-root registration, initial rescan) in one command — see
+`docs/dogfood/README.md` for what it does and `deinit.sh`/`destroy.sh` for
+teardown. For a *persistent*, autostarting daemon instead of a foreground
+one, see `docs/dogfood/windows-service.md`
+(`scripts/windows-service/{init,deinit,destroy}.ps1`). The manual PowerShell
+walkthrough below is the pure-PowerShell path (no Git Bash needed) and is
+also useful for understanding what the scripts do under the hood.
+
+For a lasting “start at logon” setup, see [`ops/autostart.md`](ops/autostart.md)
+*after* you decide to keep a real install (or `docs/dogfood/windows-service.md`
+for a disposable, dogfood-scoped version of the same idea). This guide
+deliberately avoids that.
 
 ---
 
@@ -261,9 +272,15 @@ Keep the daemon terminal visible and work in Obsidian for a day:
 
 Watch `$Dogfood\daemon.log` (JSON lines) if something looks stuck.
 
-**Out of scope until later milestones:** daily review queue UI, invalidation /
-staleness walk, web UI, `akasha export`, metrics dashboard, permanent
-autostart.
+Try the review queue too: `POST /v1/edges` with a `facet_span` binding, then
+a `PATCH` that touches the bound facet, should enqueue a review — see
+[`../mvp-spec.md`](../mvp-spec.md) §4.9–§4.11 or drive it from the web UI's
+`/review` view ([`web-ui.md`](web-ui.md)).
+
+**Not covered by this guide:** `GET /v1/metrics`'s counters have no UI view
+(JSON only, see [`../mvp-spec.md`](../mvp-spec.md) §7); a lasting autostart
+setup is [`ops/autostart.md`](ops/autostart.md) / `docs/dogfood/windows-service.md`
+instead, deliberately out of scope here (see the top of this guide).
 
 ---
 
@@ -300,7 +317,6 @@ slate.
 | Edits never mint / never sync | Vault not registered, or note lacks `tm: 1` | Re-run §5; confirm front-matter |
 | Cloud-path warning / sluggish sync | Vault under OneDrive/Dropbox | Move demo vault to a local non-cloud path |
 | Plugin missing after rebuild | Junction broken or Safe mode on | Re-create junction (§7); reload Obsidian |
-| `akasha review …` fails | M7 not implemented yet | Expected; use `/v1/sync/status` for violation/conflict counts |
 
 ---
 

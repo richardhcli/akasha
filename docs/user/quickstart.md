@@ -11,7 +11,9 @@ uv sync
 
 ## 2. Mint your first token
 
-`POST /v1/tokens` is human-only and itself requires an existing bearer token, so there is currently no bootstrap endpoint or CLI verb for the very first token (tracked as a known gap — see `docs/agents/task-status.md` M9/M10). Until one lands, mint it directly through the store, the same way `scripts/dev/seed_and_run.py` does:
+`POST /v1/tokens` is human-only and itself requires an existing bearer token, so there is currently no bootstrap endpoint or CLI verb for the very first token (tracked as an open gap — see `docs/spec-questions.md` T11.1). Until one lands, mint it directly through the store, the same way `scripts/dev/seed_and_run.py` does:
+
+If you have Git Bash/WSL, `scripts/dogfood/init.sh <name>` does this step plus starting the daemon and registering a sync root, all in one command — see `docs/dogfood/README.md`. The manual steps below are the same underlying calls, useful on plain PowerShell or when you want a single ad hoc token instead of a whole scratch instance.
 
 ```bash
 uv run python -c "

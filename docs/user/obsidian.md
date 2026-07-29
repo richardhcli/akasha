@@ -2,7 +2,7 @@
 
 Thin TypeScript client (`plugin-obsidian/`) that syncs a vault against the daemon under contract v1 — bijective within the contract, never a silent guess outside it (`docs/vision.md` §"Sync doctrine", `docs/mvp-spec.md` §4.7).
 
-**Status: code-complete, runtime not yet verified against a live Obsidian install** (M6 in [`../agents/task-status.md`](../agents/task-status.md) — CI plugin-build hasn't run on a remote yet, and the manual test plan below hasn't been executed against a real vault).
+**Status: code-complete and CI-green (`plugin-build`), but runtime not yet verified against a live Obsidian install** (M6 in [`../agents/task-status.md`](../agents/task-status.md) — the manual test plan below hasn't been executed against a real vault yet; that's the human-only step, tracked as [M11's T11.2](../agents/task-status.md)).
 
 ## Install (manual, until packaged)
 
