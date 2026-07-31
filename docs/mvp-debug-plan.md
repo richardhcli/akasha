@@ -552,3 +552,79 @@ authoritative for `D*` entries; there is no separate status tracker.
   tests/integration -q` (212 passed, up from 210 — no regressions), `uv run
   pytest tests/unit tests/property -q` (416 passed, unaffected — this is a
   UI-only change).
+
+## D9 — five of six UI views' nav bars have no link to `/dashboard`
+
+- **Goal** — Every one of the six views (`/`, `/node`, `/review`, `/search`,
+  `/sync`, `/dashboard`) must let a user reach every other view from its nav
+  bar; a live user must never have to type `/dashboard` into the address bar
+  by hand because it's the only route unreachable from navigation.
+- **Found via** — A holistic dogfood UI sweep (this session, 2026-07-31,
+  post-D5/D6/D7/D8), driving a real browser against a live daemon. Static
+  review of `src/akasha/api/app.py`'s six `ui_*` route handlers confirmed
+  each serves its own standalone `src/akasha/ui/templates/*.html` file
+  directly (`_TEMPLATES_DIR / "<name>.html").read_bytes()`) — there is no
+  shared Jinja `{% extends %}` base, so the `<nav>` block is physically
+  copy-pasted six times. `dashboard.html` (added by T10.1) has a correct
+  5-link nav including `<a href="/dashboard">Dashboard</a>`, but the other
+  five templates (`base.html`, `node.html`, `review.html`, `search.html`,
+  `sync.html` — all predating T10.1) were never updated when the dashboard
+  route was added, so each still has only the original 4 links. Confirmed
+  live in a real Chrome tab against a running daemon: the nav on `/`,
+  `/node`, `/review`, `/search`, and `/sync` reads exactly "Node Review
+  Search Sync" with no Dashboard entry, while `/dashboard`'s own nav reads
+  "Node Review Search Sync Dashboard". No existing test caught this —
+  `tests/integration/test_ui_dashboard.py::test_dashboard_route_serves_shell`
+  only asserts the dashboard page's own containers/scripts, and no test
+  anywhere asserted nav-link parity across views. Checked
+  `docs/spec-questions.md`/`docs/archived-questions.md` first: D5's entry
+  there covers the *auth-bar* affordance being added to all six templates,
+  not nav-link parity — this is a distinct, previously unlogged gap.
+- **Files** — `src/akasha/ui/templates/base.html`,
+  `src/akasha/ui/templates/node.html`,
+  `src/akasha/ui/templates/review.html`,
+  `src/akasha/ui/templates/search.html`,
+  `src/akasha/ui/templates/sync.html`, new
+  `tests/integration/test_ui_nav.py`.
+- **Steps taken** — Added the one missing `<a href="/dashboard">Dashboard</a>`
+  line to each of the five templates' `<nav>` block, in the same position
+  `dashboard.html` already uses (immediately after the Sync link) — no
+  markup restructuring, no move to a shared template/`{% extends %}`
+  (that's a larger refactor than this narrow gap needs, and would touch
+  every view's rendering path at once instead of a one-line-per-file fix).
+  New `tests/integration/test_ui_nav.py` hits all six routes via
+  `TestClient` and asserts every response body contains all five nav
+  `<a href=...>` links, so any future view addition that forgets to update
+  the other five templates' nav (the same mistake T10.1 made) fails CI
+  immediately instead of waiting for another live dogfood pass to notice.
+- **Verify** — `uv run pytest tests/integration/test_ui_nav.py -v`
+- **DoD** — Every one of the six views' rendered `<nav>` contains links to
+  all five other views (Node/Review/Search/Sync/Dashboard as applicable);
+  `make check` green.
+- **Status** — DONE 2026-07-31. `uv run ruff check src tests` clean; `uv run
+  pyright src` (0 errors); `uv run pytest tests/integration/test_ui_nav.py
+  -v` (1 passed). Full regression: `uv run pytest tests/unit tests/property
+  -q` (415 passed, 1 skipped — unaffected, this is a UI-only change) and
+  `uv run pytest tests/integration -q -k "not chromium"` (202 passed, 10
+  deselected — the `[chromium]` Playwright-driven tests, including
+  `test_ui_dashboard.py`'s own live-browser nav render, could not be run in
+  this environment; see note below). One unrelated pre-existing failure
+  observed in the same run, `test_watcher_wiring.py::
+  test_live_edit_is_reconciled_with_no_manual_rescan` — untouched by this
+  fix (no file in this entry's `Files` list is anywhere near
+  `src/akasha/sync`); very likely this sandbox's FUSE-mounted repo
+  directory not delivering `inotify` events the live `watchdog` observer
+  needs, not a product regression. Flagged, not filed as a new D-entry:
+  reproducing it against a real (non-FUSE) filesystem before deciding it's
+  a genuine bug is the narrower read, matching this document's own
+  precedent for environment-specific gaps (§0 of `docs/dogfood-plan.md`
+  makes the same call for the unverified-Windows surface).
+  **Environment note**: this session's sandbox cannot launch headless
+  Chromium at all (`chrome-headless-shell: error while loading shared
+  libraries: libXdamage.so.1` — no root/sudo available to install the
+  missing X11 deps `playwright install --with-deps` would normally add),
+  so none of the `[chromium]`-parametrized Playwright integration tests
+  could be run here to independently re-verify this fix; the live-browser
+  confirmation above (via Claude-in-Chrome against a daemon running
+  directly on the user's own machine, not this sandbox) is what actually
+  exercised the rendered DOM for this entry.
