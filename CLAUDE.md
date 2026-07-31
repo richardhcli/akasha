@@ -46,9 +46,18 @@ law, not user or setup docs.
    paths, or schema identifiers (rebrand invariant). The neutral prefix is
    `tm` (e.g. anchors `^tm-...`, config dir `tm-daemon`).
 7. Run `uv run ruff check src tests && uv run pyright src && uv run pytest
-   tests/unit tests/property` (i.e. `make check`) before considering any
-   task done; run `uv run pytest tests/battery` (`make battery`) before
-   closing any M5+ task.
+   tests/unit tests/property tests/integration` (i.e. `make check`) before
+   considering any task done; run `uv run pytest tests/battery` (`make
+   battery`) before closing any M5+ task. `tests/integration` includes
+   `[chromium]`-parametrized Playwright UI tests that need a real headless
+   browser (`uv run playwright install chromium` once per environment) — in
+   an environment where that genuinely isn't available (no root to install
+   Chromium's system deps; see debug-plan D9/D10), `make check-fast` runs
+   the same gate minus those tests. `check-fast` is a fallback for that one
+   circumstance, never a substitute for `make check` when a browser is
+   available — debug-plan D10 was a T9.6-acceptance-test-level regression
+   that went undetected specifically because `tests/integration` used to be
+   outside this gate entirely.
 8. **One task = one focused change.** Touch only the files a build-plan
    task lists under `Files`. Needing to touch an unlisted file is a signal
    the task is misunderstood — stop and log a `# SPEC-QUESTION:` instead of
