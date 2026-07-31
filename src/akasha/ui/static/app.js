@@ -24,12 +24,115 @@ console.debug("tm ui loaded");
     container.appendChild(el("p", { text: message }));
   }
 
+  // debug-plan D8: search results and review items showed a node's id as
+  // plain text ("id: abc123 (claim)" / "node_id: abc123") with no way to
+  // actually get to that node's detail view -- the only path was manually
+  // editing the URL to /node?id=<id>. Found via dogfooding: after D5 added
+  // a real way to authenticate, the very next natural action (click a
+  // search hit or a review item to see the full node) had no affordance at
+  // all. A plain <a href="/node?id=..."> is enough -- no new data, no new
+  // endpoint, just linking a value the response already carries.
+  function nodeLink(nodeId, text) {
+    var a = document.createElement("a");
+    a.href = "/node?id=" + encodeURIComponent(nodeId);
+    a.textContent = text;
+    return a;
+  }
+
   function getToken() {
     try {
       return window.localStorage.getItem("tm_token");
     } catch (err) {
       return null;
     }
+  }
+
+  // Auth bar (debug-plan D5): every view previously had exactly one way to
+  // set the bearer token -- open DevTools and call
+  // `localStorage.setItem('tm_token', ...)` by hand. Found via dogfooding:
+  // a real (non-developer) user has no in-page affordance at all, just the
+  // "Set tm_token in localStorage to use this view." notice each view
+  // already renders. This is the smallest possible affordance to close that
+  // gap -- one shared, always-visible bar (container `#tm-auth-bar`,
+  // present in every template's shell next to <nav>) that shows a masked
+  // token + "Change"/"Clear" once set, or an inline password-type input +
+  // "Save token" before that. Storage/format are unchanged (still
+  // `localStorage.tm_token`, still read by every existing `getToken()`
+  // call) -- this only adds a UI affordance around what already existed,
+  // no new persistence mechanism. SPEC-QUESTION (see docs/spec-questions.md
+  // D5): spec §4.13 names four views (Node/Review/Search/Sync, +Dashboard
+  // from M10) with no fifth "settings"/auth affordance specified -- same
+  // "spec silent on a UI affordance" situation T8.3's inline revise-textarea
+  // hit, resolved the same way: implement the narrowest thing that closes
+  // the gap, log it, don't block on a spec amendment.
+  function maskToken(token) {
+    if (token.length <= 8) {
+      return "••••";
+    }
+    return token.slice(0, 4) + "…" + token.slice(-4);
+  }
+
+  function renderAuthForm(container) {
+    container.textContent = "";
+    var input = document.createElement("input");
+    input.type = "password";
+    input.placeholder = "Bearer token";
+    input.className = "tm-auth-input";
+    var saveBtn = el("button", { text: "Save token" });
+    saveBtn.addEventListener("click", function () {
+      var value = input.value.trim();
+      if (!value) {
+        return;
+      }
+      try {
+        window.localStorage.setItem("tm_token", value);
+      } catch (err) {
+        renderNotice(container, "Could not save token: " + err.message);
+        return;
+      }
+      // Every view's init function reads the token once at load time, so
+      // the simplest correct way to make an already-rendered view pick up
+      // a freshly saved token is a reload, not a second code path that
+      // re-runs each view's own init() from here.
+      window.location.reload();
+    });
+    container.appendChild(input);
+    container.appendChild(saveBtn);
+  }
+
+  function renderAuthBar(container) {
+    container.textContent = "";
+    var token = getToken();
+    if (!token) {
+      renderAuthForm(container);
+      return;
+    }
+    container.appendChild(
+      el("span", { text: "Token set (" + maskToken(token) + ")", className: "tm-auth-status" })
+    );
+    var changeBtn = el("button", { text: "Change token" });
+    changeBtn.addEventListener("click", function () {
+      renderAuthForm(container);
+    });
+    container.appendChild(changeBtn);
+    var clearBtn = el("button", { text: "Clear token" });
+    clearBtn.addEventListener("click", function () {
+      try {
+        window.localStorage.removeItem("tm_token");
+      } catch (err) {
+        // ignore -- worst case the stale token is still there to overwrite
+      }
+      window.location.reload();
+    });
+    container.appendChild(clearBtn);
+  }
+
+  function initAuthBar() {
+    var container = document.getElementById("tm-auth-bar");
+    if (!container) {
+      return;
+    }
+    renderAuthBar(container);
   }
 
   function fetchJson(path, token) {
@@ -160,7 +263,14 @@ console.debug("tm ui loaded");
   function renderReviewItem(review, token, onResolved) {
     var li = el("li", { className: "review-item" });
     li.appendChild(el("p", { text: "id: " + review.id }));
-    li.appendChild(el("p", { text: "node_id: " + (review.node_id || "(none)") }));
+    var nodeIdLine = el("p");
+    if (review.node_id) {
+      nodeIdLine.appendChild(document.createTextNode("node_id: "));
+      nodeIdLine.appendChild(nodeLink(review.node_id, review.node_id));
+    } else {
+      nodeIdLine.textContent = "node_id: (none)";
+    }
+    li.appendChild(nodeIdLine);
     li.appendChild(el("p", { text: "cause_kind: " + review.cause_kind }));
     li.appendChild(el("p", { text: "facet: " + (review.facet || "(none)") }));
     li.appendChild(el("p", { text: "created_at: " + review.created_at }));
@@ -353,7 +463,10 @@ console.debug("tm ui loaded");
     }
     results.forEach(function (node) {
       var li = el("li", { className: "search-result" });
-      li.appendChild(el("p", { text: "id: " + node.id + " (" + node.node_type + ")" }));
+      var idLine = el("p");
+      idLine.appendChild(nodeLink(node.id, "id: " + node.id));
+      idLine.appendChild(document.createTextNode(" (" + node.node_type + ")"));
+      li.appendChild(idLine);
       li.appendChild(el("p", { text: truncate(node.body, 200) }));
       container.appendChild(li);
     });
@@ -371,9 +484,7 @@ console.debug("tm ui loaded");
     var inputEl = document.getElementById("search-input");
     var resultsEl = document.getElementById("search-results");
 
-    formEl.addEventListener("submit", function (evt) {
-      evt.preventDefault();
-      var q = inputEl.value.trim();
+    function runSearch(q) {
       if (!q) {
         renderNotice(resultsEl, "Enter a search query.");
         return;
@@ -385,7 +496,23 @@ console.debug("tm ui loaded");
         .catch(function (err) {
           renderNotice(resultsEl, "Search failed: " + err.message);
         });
+    }
+
+    formEl.addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      runSearch(inputEl.value.trim());
     });
+
+    // debug-plan D5b: deep-linking straight to /search?q=term previously did
+    // nothing until the user retyped and resubmitted -- the querystring was
+    // never read on load, only on a real form submit. Hydrate the input and
+    // run the same search immediately if a query param is already present,
+    // so a bookmarked/shared search URL actually works.
+    var initialQuery = new URLSearchParams(window.location.search).get("q");
+    if (initialQuery) {
+      inputEl.value = initialQuery;
+      runSearch(initialQuery.trim());
+    }
   }
 
   // Sync view (T8.4, spec §4.13): per-sync-root status + pause&diff
@@ -398,17 +525,26 @@ console.debug("tm ui loaded");
   // metadata are free-text -- rendered exclusively via textContent /
   // <pre>.textContent, never innerHTML, same XSS discipline as node/review.
   function renderReviewSummary(item) {
-    var p = el("p", {
-      text:
-        "id: " +
-        item.id +
-        " path: " +
-        (item.path || "(none)") +
-        " cause_kind: " +
-        item.cause_kind +
-        " created_at: " +
-        item.created_at,
-    });
+    var p = el("p");
+    p.appendChild(document.createTextNode("id: " + item.id + " "));
+    // debug-plan D8: same node-detail-link gap as the Review/Search views --
+    // sync status items carry a node_id (when one exists) with no way to
+    // reach that node's page.
+    if (item.node_id) {
+      p.appendChild(document.createTextNode("node_id: "));
+      p.appendChild(nodeLink(item.node_id, item.node_id));
+      p.appendChild(document.createTextNode(" "));
+    }
+    p.appendChild(
+      document.createTextNode(
+        "path: " +
+          (item.path || "(none)") +
+          " cause_kind: " +
+          item.cause_kind +
+          " created_at: " +
+          item.created_at
+      )
+    );
     return p;
   }
 
@@ -612,6 +748,7 @@ console.debug("tm ui loaded");
   // app.js is loaded in <head>, so defer view init until the DOM (#app and
   // the view containers) is parsed — otherwise getElementById returns null.
   function boot() {
+    initAuthBar();
     if (window.location.pathname === "/node") {
       initNodeView();
     } else if (window.location.pathname === "/review") {

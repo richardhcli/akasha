@@ -25,6 +25,7 @@ def test_root_serves_ui_shell():
     assert "/static/htmx.min.js" in body
     assert "/static/app.js" in body
     assert 'id="app"' in body
+    assert 'id="tm-auth-bar"' in body  # debug-plan D5: token-entry affordance
 
 
 def test_static_app_js_served():

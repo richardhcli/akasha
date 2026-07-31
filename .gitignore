@@ -16,6 +16,15 @@ node_modules/
 # belongs in this repo's history, even accidentally via a broad `git add`.
 /data/
 
+# docs/dogfood/fixtures/vault-1/ is a tracked, synthetic-only UX dogfood
+# fixture (see docs/dogfood/README.md + docs/dogfood/fixtures/README.md) —
+# but Obsidian's own generated app-state under .obsidian/ (workspace
+# layout, installed-plugin bookkeeping, and critically the tm-hub plugin
+# install, which is a local junction/symlink to a build artifact that
+# lives outside this repo entirely) is machine-local and must never be
+# committed. Only vault-1/*.md content is tracked.
+/docs/dogfood/fixtures/vault-1/.obsidian/
+
 # Overnight fleet-runner operational artifacts (scripts/fleet/
 # overnight_runner.sh). Narrowly scoped to files that are regenerated every
 # run AND held open across the run's lifetime: overnight-runner.log is

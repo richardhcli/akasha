@@ -36,12 +36,34 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
+from fastapi.testclient import TestClient
 from playwright.sync_api import Page, expect
 
 from akasha.api import auth
 from akasha.api.app import create_app
 from akasha.config import Config
 from akasha.kernel import store
+
+
+def test_dashboard_route_serves_shell() -> None:
+    """Mirrors test_ui_node.py/test_ui_review.py/etc: static-shell check only."""
+    conn = store.connect(":memory:", check_same_thread=False)
+    store.run_migrations(conn)
+    client = TestClient(create_app(conn=conn))
+    resp = client.get("/dashboard")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    body = resp.text
+    for container_id in (
+        "dashboard-facet-coverage",
+        "dashboard-review-economy",
+        "dashboard-violation-rate",
+        "dashboard-crossing-rate",
+        "tm-auth-bar",  # debug-plan D5: token-entry affordance
+    ):
+        assert f'id="{container_id}"' in body
+    assert "/static/app.js" in body
+    assert "/static/htmx.min.js" in body
 
 
 def _free_port() -> int:

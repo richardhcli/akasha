@@ -32,6 +32,7 @@ def test_search_route_serves_shell():
         assert f'id="{container_id}"' in body
     assert "/static/app.js" in body
     assert "/static/htmx.min.js" in body
+    assert 'id="tm-auth-bar"' in body  # debug-plan D5: token-entry affordance
     for label in ("Node", "Review", "Search", "Sync"):
         assert f">{label}<" in body
 
@@ -46,5 +47,6 @@ def test_sync_route_serves_shell():
         assert f'id="{container_id}"' in body
     assert "/static/app.js" in body
     assert "/static/htmx.min.js" in body
+    assert 'id="tm-auth-bar"' in body  # debug-plan D5: token-entry affordance
     for label in ("Node", "Review", "Search", "Sync"):
         assert f">{label}<" in body

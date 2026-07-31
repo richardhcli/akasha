@@ -132,6 +132,31 @@ DEFAULT_DEBOUNCE_SECONDS = 0.5
 # vault file.
 _RECONCILE_TEMP_FILE_RE = re.compile(r"^\..+\.tmp-[0-9a-f]{16}$")
 
+# debug-plan Dx: the live watcher recursively observes EVERY filesystem
+# change under a sync root's root_path (watchdog is scheduled with
+# recursive=True over the whole tree, module-level in Watcher.start), not
+# just managed contract files. Every OTHER path into on_change is already
+# *.md-scoped: discover_untracked_files (T11.3) walks
+# ``Path(root_path).rglob("*.md")`` and reconcile_all only replays rows
+# already in ``sync_files`` (which themselves only ever entered via that
+# same *.md-scoped discovery or an earlier *.md-filtered watcher event).
+# This module's raw watchdog bridge was the one path with no such filter.
+# Found via dogfooding: opening the fixture vault in Obsidian caused
+# ``.obsidian/workspace.json`` (Obsidian's own app-state file, rewritten on
+# nearly every UI interaction -- pane focus, scroll position, ...) to be
+# forwarded straight to ``Reconciler.on_change``, which read + parsed it as
+# contract text (an empty BlockSet, since it is JSON, not markdown) and
+# permanently inserted a ``sync_files`` row for it -- polluting the Sync
+# view's "files: N" count with an Obsidian-internal file the daemon has no
+# business managing, and burning a real reconcile cycle (file read + parse
+# + hub_state_for + write-back diff) on every one of Obsidian's own saves.
+# The narrowest fix matching the existing *.md convention everywhere else
+# in this module: never forward a non-``.md`` path past the watchdog
+# boundary. Suffix compared case-insensitively since Windows paths (this
+# project's primary dogfood platform, per README) are case-insensitive.
+def _is_managed_candidate(path: str) -> bool:
+    return PurePath(path).suffix.lower() == ".md"
+
 # Case-insensitive marker substrings checked against each path *segment*
 # (not the whole path) — see module docstring "Cloud-path detection".
 _ONEDRIVE_MARKER = "onedrive"
@@ -434,11 +459,18 @@ class _WatchdogEventHandler:
         if getattr(event, "is_directory", False):
             return
         src_path = str(PurePath(str(event.src_path)))
-        if not _RECONCILE_TEMP_FILE_RE.match(PurePath(src_path).name):
+        if (
+            not _RECONCILE_TEMP_FILE_RE.match(PurePath(src_path).name)
+            and _is_managed_candidate(src_path)
+        ):
             self._watcher.notify_event(src_path)
         raw_dest = str(getattr(event, "dest_path", "") or "")
         dest_path = str(PurePath(raw_dest)) if raw_dest else ""
-        if dest_path and not _RECONCILE_TEMP_FILE_RE.match(PurePath(dest_path).name):
+        if (
+            dest_path
+            and not _RECONCILE_TEMP_FILE_RE.match(PurePath(dest_path).name)
+            and _is_managed_candidate(dest_path)
+        ):
             self._watcher.notify_event(dest_path)
 
 

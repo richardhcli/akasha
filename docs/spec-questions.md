@@ -28,11 +28,21 @@ T9.3, T10.2b — see that file's "Pre-dogfood spec-question triage" section
 for the full ruling on each), and 2026-07-26 (2 entries: T9.6, T11.1's
 sync-roots/watcher half — both closed by the same-day T9.6 live-watcher fix).
 
+## D5 — Spec §4.13 names four views (+Dashboard, M10) but no fifth "settings"/auth affordance. Is adding a minimal shared token-entry UI in scope?
+- **Where:** `src/akasha/ui/static/app.js` (`initAuthBar`), all six `src/akasha/ui/templates/*.html`.
+- **Narrowest reading taken:** Same precedent T8.3's inline revise-textarea already set for "spec silent on a UI affordance": implement the smallest thing that closes a real, empirically-found gap (no in-page way to ever set the bearer token — see `docs/mvp-debug-plan.md` D5) rather than block on a spec amendment. One always-visible `#tm-auth-bar` bar per view, writing to the same `localStorage.tm_token` key every view already reads — no new persistence mechanism, no new endpoint, no schema change.
+- **Resolution:** resolved 2026-07-31 — the user directed improving the UI's general UX as part of this session's dogfood pass; this is read as in-scope authorization for exactly this kind of minimal affordance. Implemented, tested (`tests/integration/test_ui_auth_bar.py` + shell-test updates), full gate green.
+
 **Open questions: 1.** Every entry open as of M10's first code-complete
 milestone (2026-07-19) has been triaged, resolved, and archived — see
 `docs/archived-questions.md`. New ambiguities encountered during the
 one-month dogfood gate or any future work should be logged here per the
 entry format above.
+
+## D4 — What origin(s) should the daemon's CORS policy allow for browser-embedded clients (the Obsidian plugin, `app://obsidian.md`)?
+- **Where:** `src/akasha/api/app.py` (`create_app`, `_CORS_ALLOWED_ORIGINS`); see `docs/mvp-debug-plan.md`'s D4 entry for the full empirical finding (first live Obsidian-vault dogfood run: every plugin→daemon fetch failed CORS preflight, status bar stuck on `TM: offline`) and fix writeup.
+- **Narrowest reading taken:** Spec §4.11/§3 document the API surface and the `127.0.0.1`-only bind but say nothing about CORS/allowed origins, so there is no documented default to fall back to. Allow exactly `app://obsidian.md` (the plugin's fixed Electron origin), not a wildcard `*` — this daemon carries bearer tokens, and wildcard-plus-credentials would be a real weakening of the localhost-only security posture spec §3 establishes, unspec'd by anything in `mvp-spec.md`. `allow_credentials=False` since auth is a bearer token header, never a cookie.
+- **Resolution:** resolved 2026-07-31 — the user, acting as the human this entry asked to adjudicate it, explicitly directed implementing this exact narrowest reading. `CORSMiddleware` registered with `allow_origins=["app://obsidian.md"]` only; guarded by a test (`tests/integration/test_cors.py::test_no_wildcard_origin_is_ever_configured`) that fails if this is ever loosened to `*`. Full gate green (see D4 in `docs/mvp-debug-plan.md`).
 
 ## T11.1 — How does the very first human token get minted on a fresh DB, given `POST /v1/tokens` is `require_human`?
 - **Where:** `src/akasha/api/routes/tokens.py` (`create_token`, `require_human`); `src/akasha/api/deps.py` (`require_human`); `docs/dogfood/README.md` step 6.

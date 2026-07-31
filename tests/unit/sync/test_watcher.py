@@ -310,6 +310,37 @@ def test_watchdog_event_handler_routes_src_and_dest_but_skips_dirs():
     assert seen == [str(_PP("/vault/a.md")), str(_PP("/vault/a.md")), str(_PP("/vault/b.md"))]
 
 
+def test_watchdog_event_handler_ignores_non_md_paths():
+    """debug-plan Dx regression: a raw watchdog event for a non-.md path
+    (e.g. Obsidian's own ``.obsidian/workspace.json``, rewritten on nearly
+    every UI interaction while the vault is open) must never reach
+    ``notify_event`` -- every other route into ``on_change`` (
+    ``discover_untracked_files``, ``reconcile_all``) is already *.md-scoped;
+    this was the one unfiltered path, and forwarding it silently added
+    non-contract files to ``sync_files`` (see ``_is_managed_candidate``'s
+    docstring comment for the full write-up).
+    """
+    conn = _conn()
+    seen: list[str] = []
+    w = Watcher(conn, lambda _p: None)
+    w.notify_event = lambda path, *, at=None: seen.append(path)  # type: ignore[method-assign]
+    handler = watcher_mod._WatchdogEventHandler(w)
+
+    class _Evt:
+        def __init__(self, src, dest="", is_directory=False):
+            self.src_path = src
+            self.dest_path = dest
+            self.is_directory = is_directory
+
+    handler.on_any_event(_Evt("/vault/.obsidian/workspace.json"))  # src-only, filtered
+    handler.on_any_event(_Evt("/vault/note.MD"))  # case-insensitive suffix match
+    handler.on_any_event(_Evt("/vault/a.md", dest="/vault/.obsidian/plugins/x/data.json"))
+
+    from pathlib import PurePath as _PP
+
+    assert seen == [str(_PP("/vault/note.MD")), str(_PP("/vault/a.md"))]
+
+
 def test_watched_root_dataclass_defaults():
     r = WatchedRoot(id="x", name="n", root_path="/p")
     assert r.conservative is False and r.cloud_provider is None

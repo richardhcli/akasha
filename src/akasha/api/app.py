@@ -26,6 +26,7 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -39,6 +40,17 @@ from akasha.kernel import store
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 _STATIC_DIR = _UI_DIR / "static"
 _TEMPLATES_DIR = _UI_DIR / "templates"
+
+# CORS allow-list (debug-plan D4, spec-questions.md D4): spec §4.11/§3 say
+# nothing about CORS -- narrowest reading is to allow exactly the Obsidian
+# desktop app's fixed Electron origin (empirically observed:
+# `app://obsidian.md`, plugin-obsidian/'s only browser-embedded client),
+# never a wildcard. This daemon carries bearer tokens; wildcard-plus-any-origin
+# would weaken the localhost-only posture spec §3 establishes for no
+# documented reason. The web UI itself (ui/templates + ui/static/app.js) never
+# needs this list -- it's always same-origin against the daemon that serves
+# it, so it was never blocked by CORS in the first place.
+_CORS_ALLOWED_ORIGINS = ["app://obsidian.md"]
 
 
 def app_version() -> str:
@@ -74,6 +86,20 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
 
     app = FastAPI(title="tm-daemon API", version=app_version())
     app.state.config = cfg
+
+    # Debug-plan D4: without this, every fetch from the Obsidian plugin's
+    # renderer origin fails the browser's CORS preflight before the request
+    # ever reaches a route -- confirmed live against a real Obsidian vault
+    # (status bar stuck on "offline" despite a correct URL/token). No
+    # credentials (cookies) are ever used -- auth is a bearer token in the
+    # `Authorization` header -- so `allow_credentials` stays False.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_CORS_ALLOWED_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
     if conn is None:
         db_path = cfg.db_path if cfg.db_path is not None else default_db_path()

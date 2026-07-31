@@ -24,6 +24,20 @@ staging area some contributors use locally) is also `.gitignore`d
 but the canonical scratch location for this runbook is outside the repo
 entirely, so it can never be added regardless of `.gitignore`.
 
+**This rule is about real vault content, not synthetic content.** The
+constraint above exists to make it structurally impossible for a
+contributor's actual personal notes (or a byte-identical copy of them,
+per step 3) to ever land in git history. It does not extend to vaults
+that are 100% synthetic (machine-generated placeholder text, no real
+notes ever copied in) — those carry none of the risk the external-scratch
+rule defends against, and keeping one tracked in-repo is useful: it gives
+anyone checking out this repo a ready-made vault for UI/UX dogfooding
+(web viewer, Obsidian plugin) with zero setup. That tracked, synthetic-only
+fixture lives at `docs/dogfood/fixtures/vault-1/` — see its own README for
+the rules that keep it synthetic-only. Anything derived from a real vault
+(even briefly, even for one manual test) still must use the external
+scratch flow below and must never be copied into `docs/dogfood/fixtures/`.
+
 ## 0. Prerequisites
 
 - A working `uv run akasha` CLI (this repo's venv).
