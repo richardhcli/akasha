@@ -608,17 +608,16 @@ authoritative for `D*` entries; there is no separate status tracker.
   `uv run pytest tests/integration -q -k "not chromium"` (202 passed, 10
   deselected — the `[chromium]` Playwright-driven tests, including
   `test_ui_dashboard.py`'s own live-browser nav render, could not be run in
-  this environment; see note below). One unrelated pre-existing failure
-  observed in the same run, `test_watcher_wiring.py::
+  this environment; see note below). One unrelated failure was observed in
+  the same run, `test_watcher_wiring.py::
   test_live_edit_is_reconciled_with_no_manual_rescan` — untouched by this
-  fix (no file in this entry's `Files` list is anywhere near
-  `src/akasha/sync`); very likely this sandbox's FUSE-mounted repo
-  directory not delivering `inotify` events the live `watchdog` observer
-  needs, not a product regression. Flagged, not filed as a new D-entry:
-  reproducing it against a real (non-FUSE) filesystem before deciding it's
-  a genuine bug is the narrower read, matching this document's own
-  precedent for environment-specific gaps (§0 of `docs/dogfood-plan.md`
-  makes the same call for the unverified-Windows surface).
+  entry's own fix (no file in this entry's `Files` list is anywhere near
+  `src/akasha/sync`). **Correction, logged the same day**: this was
+  originally guessed here to be a sandbox FUSE-mount/`inotify` artifact and
+  deliberately not filed. That guess was wrong — a direct repro (bypassing
+  pytest, with `on_any_event`/`notify_event` traced) showed the *real*
+  cause: a genuine, unbounded self-triggering event loop, unrelated to
+  FUSE. See debug-plan D10, which fixes it.
   **Environment note**: this session's sandbox cannot launch headless
   Chromium at all (`chrome-headless-shell: error while loading shared
   libraries: libXdamage.so.1` — no root/sudo available to install the
@@ -628,3 +627,84 @@ authoritative for `D*` entries; there is no separate status tracker.
   confirmation above (via Claude-in-Chrome against a daemon running
   directly on the user's own machine, not this sandbox) is what actually
   exercised the rendered DOM for this entry.
+
+## D10 — the live watcher's own echo-suppression read starts an unbounded self-triggering event loop, so a real edit is never reconciled
+
+- **Goal** — `Watcher` must fire `on_cycle` for a real on-disk edit within
+  one debounce window of it going quiet, exactly as
+  `tests/integration/test_watcher_wiring.py::
+  test_live_edit_is_reconciled_with_no_manual_rescan` (T9.6's own
+  acceptance test) asserts — not hang indefinitely.
+- **Found via** — Investigating why that exact test was failing (initially
+  misdiagnosed in D9 as a sandbox FUSE/`inotify` artifact and not filed —
+  see D9's correction note). Direct repro outside pytest, with
+  `_WatchdogEventHandler.on_any_event` and `Watcher.notify_event` traced:
+  writing one file produced a normal `notify_event` call, but then kept
+  producing an endless stream of alternating `FileOpenedEvent`/
+  `FileClosedNoWriteEvent` for the *same* path forever, each one re-entering
+  `notify_event` and re-arming the debounce window before it could ever
+  elapse — `on_cycle` (`Reconciler.on_change`) was never called, even after
+  5 seconds, confirmed by adding a trace wrapper around it that never fired.
+  Root cause: `notify_event`'s echo-suppression step calls
+  `content_hash_fn(path)` (`daemon.py::_watcher_content_hash`, a plain
+  `Path.read_text`) to hash the file's current content — on this platform's
+  `watchdog` inotify backend, that *read* itself raises its own
+  `"opened"`/`"closed_no_write"` events, which the same recursively-
+  scheduled observer picks straight back up, re-entering `on_any_event` ->
+  `notify_event` -> another read -> another event, with no bound. This is
+  the exact echo-suppression wiring `daemon.serve()` uses in production
+  (`watcher = Watcher(..., origin_tracker=watch_origin,
+  content_hash_fn=_watcher_content_hash, ...)`), not a test-only
+  configuration, so a real running daemon on any platform whose file-system
+  watch backend reports read (open/close-without-write) events would hit
+  this too — a genuine, previously-undetected regression in T9.6's own
+  "watcher actually reconciles a live edit" guarantee, and a standing CPU
+  cost (`_poll_loop`'s backstop keeps the process alive, but the debounce
+  window for that path effectively never closes while the loop runs).
+  Separately confirms a real gap in this repo's own gating: `tests/
+  integration` (where this acceptance test lives) is not part of either
+  `make check` or `make battery` (see `Makefile`) and is not otherwise
+  referenced as a required gate anywhere in `CLAUDE.md`/`docs/build-plan.md`
+  — nothing was ever failing loudly. Not filing a new D-entry for that
+  gate gap itself (out of this entry's narrow scope), but flagging it here
+  since it is why a T9.6-acceptance-test-level regression went unnoticed.
+- **Files** — `src/akasha/sync/watcher.py` (`_WatchdogEventHandler
+  .on_any_event`, new `_NON_CONTENT_EVENT_TYPES`),
+  `tests/unit/sync/test_watcher.py` (add coverage).
+- **Steps taken** — Added `_NON_CONTENT_EVENT_TYPES = frozenset({"opened",
+  "closed", "closed_no_write"})` and one early-return in `on_any_event`
+  (right after the existing `is_directory` check): if
+  `getattr(event, "event_type", None)` is one of those three, return
+  without ever calling `notify_event`. Compared as plain strings rather
+  than `watchdog.events.EVENT_TYPE_*` constants to keep this module's own
+  stated "no import-time dependency on watchdog beyond `Watcher.start`"
+  design goal — these three values are watchdog's own stable public event
+  ­type surface, not an internal detail. No change to `_is_managed_candidate`,
+  `_RECONCILE_TEMP_FILE_RE`, `notify_event`, the `Debouncer`, or
+  `content_hash_fn` itself — the fix is purely "never forward a
+  non-content event type past the watchdog boundary," symmetric with D7's
+  "never forward a non-`.md` path past the watchdog boundary." A genuine
+  edit still raises a `"modified"`/`"created"`/`"moved"` event alongside
+  the harmless open/close pair every write also raises, so no real edit is
+  ever suppressed by this filter.
+- **Verify** — `uv run pytest tests/unit/sync/test_watcher.py -v &&
+  uv run pytest tests/integration/test_watcher_wiring.py -v`
+- **DoD** — A real on-disk edit under a live `Watcher` (with echo
+  suppression wired, matching production) reconciles within one debounce
+  window with no manual rescan; `"opened"`/`"closed"`/`"closed_no_write"`
+  events never reach `notify_event`; every existing event-routing test
+  (non-`.md` filtering, src/dest routing, directory skip) is unaffected;
+  `make check` green.
+- **Status** — DONE 2026-07-31. Direct repro (outside pytest, traced) before
+  the fix: `on_cycle` never fired, "STILL never reconciled after 5s". Same
+  repro after the fix: reconciled in 0.1s (one debounce window). `uv run
+  ruff check src tests` clean; `uv run pyright src` (0 errors); `uv run
+  pytest tests/unit/sync/test_watcher.py -v` (23 passed, up from 22 — new
+  `test_watchdog_event_handler_ignores_non_content_events`); `uv run pytest
+  tests/integration/test_watcher_wiring.py -v` (1 passed, was failing
+  before this fix). Full regression: `uv run pytest tests/unit
+  tests/property -q` (416 passed, 1 skipped — up from 415, the one new
+  unit test); `uv run pytest tests/integration -q -k "not chromium"` (203
+  passed, 10 deselected `[chromium]` tests not runnable in this
+  environment — **zero failures now**, up from 202 passed / 1 failed
+  before this fix).

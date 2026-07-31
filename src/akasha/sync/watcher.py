@@ -157,6 +157,16 @@ _RECONCILE_TEMP_FILE_RE = re.compile(r"^\..+\.tmp-[0-9a-f]{16}$")
 def _is_managed_candidate(path: str) -> bool:
     return PurePath(path).suffix.lower() == ".md"
 
+# debug-plan D10: watchdog event-type strings that never represent a content
+# change -- a plain read-without-write raises exactly these on this
+# platform's inotify backend. Compared as plain strings (not
+# ``watchdog.events.EVENT_TYPE_*`` constants) to keep this module's stated
+# "no import-time dependency on watchdog beyond Watcher.start" design goal
+# (see this module's own docstring) -- these three literal values are
+# watchdog's own stable public API surface (``watchdog/events.py``), not an
+# implementation detail likely to drift.
+_NON_CONTENT_EVENT_TYPES = frozenset({"opened", "closed", "closed_no_write"})
+
 # Case-insensitive marker substrings checked against each path *segment*
 # (not the whole path) — see module docstring "Cloud-path detection".
 _ONEDRIVE_MARKER = "onedrive"
@@ -457,6 +467,30 @@ class _WatchdogEventHandler:
         closing the mismatch at the one place both path sources converge.
         """
         if getattr(event, "is_directory", False):
+            return
+        # debug-plan D10: a plain file *read* (no content change) still
+        # raises a watchdog event on this platform's inotify backend --
+        # ``event_type`` "opened"/"closed"/"closed_no_write", never
+        # "created"/"modified"/"moved"/"deleted". Forwarding those to
+        # ``notify_event`` was not just pointless extra debounce/reconcile
+        # work (the AV-noise class T9.1 already tolerates) -- it was a
+        # genuine self-sustaining feedback loop: ``notify_event``'s own
+        # echo-suppression reads the file via ``content_hash_fn`` (a plain
+        # ``Path.read_text``) to compute its hash, that read raises its own
+        # open+close-no-write event under the SAME recursively-scheduled
+        # observer, which re-enters ``on_any_event`` -> ``notify_event`` ->
+        # another read -> another event, forever. Confirmed live: a real
+        # edit under this loop never reconciled at all, because every fresh
+        # "opened" event kept re-arming the debounce window before it could
+        # elapse (`tests/integration/test_watcher_wiring.py::
+        # test_live_edit_is_reconciled_with_no_manual_rescan`, previously
+        # timing out after 5s with zero files reconciled). Only these three
+        # non-content event types are excluded here -- every event type this
+        # module already handles (created/modified/moved/deleted) is
+        # unaffected, and a genuine external editor write still raises a
+        # "modified"/"created" event on top of the harmless open/close pair
+        # it also raises, so this never suppresses a real edit.
+        if getattr(event, "event_type", None) in _NON_CONTENT_EVENT_TYPES:
             return
         src_path = str(PurePath(str(event.src_path)))
         if (

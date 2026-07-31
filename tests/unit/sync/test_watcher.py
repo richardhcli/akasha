@@ -341,6 +341,62 @@ def test_watchdog_event_handler_ignores_non_md_paths():
     assert seen == [str(_PP("/vault/note.MD")), str(_PP("/vault/a.md"))]
 
 
+def test_watchdog_event_handler_ignores_non_content_events():
+    """debug-plan D10 regression: "opened"/"closed"/"closed_no_write" events
+    (raised by a plain read, not a write) must never reach ``notify_event``.
+
+    This matters beyond wasted debounce/reconcile cycles: ``notify_event``'s
+    own echo-suppression reads the file via ``content_hash_fn`` to hash it,
+    and that read raises its own open/close-no-write event under the same
+    recursively-scheduled observer -- forwarding those event types created a
+    genuine self-sustaining feedback loop (``on_any_event`` ->
+    ``notify_event`` -> file read -> new "opened"/"closed_no_write" event ->
+    ``on_any_event`` -> ...) that kept re-arming the debounce window
+    forever, so a real edit's own "modified"/"created" event never got the
+    chance to elapse and fire ``on_cycle``. Live confirmation of the fix is
+    ``tests/integration/test_watcher_wiring.py::
+    test_live_edit_is_reconciled_with_no_manual_rescan`` (previously timed
+    out after 5s with zero files reconciled; now reconciles in ~0.1s).
+    """
+    conn = _conn()
+    seen: list[str] = []
+    w = Watcher(conn, lambda _p: None)
+    w.notify_event = lambda path, *, at=None: seen.append(path)  # type: ignore[method-assign]
+    handler = watcher_mod._WatchdogEventHandler(w)
+
+    class _Evt:
+        def __init__(self, src, event_type, dest="", is_directory=False):
+            self.src_path = src
+            self.dest_path = dest
+            self.is_directory = is_directory
+            self.event_type = event_type
+
+    handler.on_any_event(_Evt("/vault/a.md", "opened"))
+    handler.on_any_event(_Evt("/vault/a.md", "closed"))
+    handler.on_any_event(_Evt("/vault/a.md", "closed_no_write"))
+    # A real edit's own event types must still pass through unaffected.
+    handler.on_any_event(_Evt("/vault/a.md", "modified"))
+    handler.on_any_event(_Evt("/vault/a.md", "created"))
+    handler.on_any_event(_Evt("/vault/a.md", "moved", dest="/vault/b.md"))
+    # No event_type attribute at all (older/duck-typed callers, matching
+    # every other test in this module's ``_Evt`` helper) must not be
+    # mistaken for a filtered type either.
+    no_type_evt = type(
+        "_NoType", (), {"src_path": "/vault/c.md", "dest_path": "", "is_directory": False}
+    )
+    handler.on_any_event(no_type_evt())
+
+    from pathlib import PurePath as _PP
+
+    assert seen == [
+        str(_PP("/vault/a.md")),  # modified
+        str(_PP("/vault/a.md")),  # created
+        str(_PP("/vault/a.md")),  # moved (src)
+        str(_PP("/vault/b.md")),  # moved (dest)
+        str(_PP("/vault/c.md")),  # no event_type attribute
+    ]
+
+
 def test_watched_root_dataclass_defaults():
     r = WatchedRoot(id="x", name="n", root_path="/p")
     assert r.conservative is False and r.cloud_provider is None
