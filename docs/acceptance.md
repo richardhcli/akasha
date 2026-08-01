@@ -254,13 +254,24 @@ cost).
   `tests/integration/test_api.py::test_nodes_create_and_get_includes_maturity`
   and `tests/integration/test_cli.py::test_new_and_get_round_trip`. Run
   2026-07-19: **2 passed**, 0 failed, 0.62s.
-- **≤3s-of-attention timing assertion — pending manual execution.** No
-  automated timing test exists; the M10 DoD's alternative leg (a checked
-  manual script) has not been run by any human. A manual capture-timing
-  check would time an operator's `akasha add ...` / `POST /nodes` round
-  trip on the syntax path and confirm ≤3s wall time to a committed node.
-  **This leg is unchecked and is represented here as unchecked** — no
-  timing number is asserted.
+- **≤3s-of-attention timing assertion — GREEN (real Windows host, manual
+  execution, 2026-08-01).** No automated timing test exists in the tree
+  (still true — this remains a manual-script leg per the M10 DoD, not a
+  CI-gated assertion), but it has now actually been run, against a real
+  daemon on the user's own Windows machine (not a synthetic benchmark, not
+  a Linux CI container): 5 consecutive `POST /v1/nodes` round trips
+  (`node_type: "claim"`, a realistic one-sentence body, real bearer-token
+  auth over the live HTTP API — the same request `akasha add`/the deterministic-
+  syntax capture path issues), timed client-side with `performance.now()`
+  around the `fetch` call. Results: **74.2ms, 20.3ms, 15.0ms, 15.7ms,
+  14.9ms** (first call includes one-time connection/JIT warmup; steady
+  state ~15ms) — every run **201 Created**, every run **~200x under the
+  3000ms budget**, not just under it. This measures the syntax-path
+  capture mechanism's own wall-clock cost (server processes the write and
+  returns a committed node), which is what this row's pending leg asked
+  for; it does not measure a human's own typing/reading attention time
+  (that is inherently not machine-timeable and was never in scope for an
+  automated or scripted check). **This leg is now checked.**
 
 ### 2. Contradiction (`docs/vision.md` §8 story 2)
 
@@ -564,7 +575,7 @@ and are stated honestly as pending, not silently assumed:
 
 | # | Story | Local-Linux verifier status | Pending leg |
 |---|---|---|---|
-| 1 | Capture | Functional path GREEN (2 passed) | ≤3s timing — pending manual execution |
+| 1 | Capture | **GREEN** — functional path (2 passed) + ≤3s timing, real Windows host, 2026-08-01 (5 `POST /v1/nodes` round trips: 74.2/20.3/15.0/15.7/14.9ms, ~200x under budget) | none |
 | 2 | Contradiction | GREEN (9 passed) | none |
 | 3 | Invalidation | GREEN (2+10 passed) | none |
 | 4 | Split/merge | GREEN (5 passed, property) | none |
@@ -574,14 +585,17 @@ and are stated honestly as pending, not silently assumed:
 | 8 | Tasks/supertask/S0 | **GREEN** — S0 lifecycle (E06/E08, 2 passed) + supertask trigger via the real commit path (2 passed), re-run 2026-07-20 (T10.2c) | none |
 | 9 | Residency | GREEN, accelerated proxy (soak: 90/90 ticks, 0 exceptions, local Linux **and** local Windows as of 2026-07-24); real-OS autostart + kill-9 recovery demonstrated on local Windows dev-host 2026-07-25 (Task Scheduler + supervisor wrapper, 2/2 kills recovered in ~2s each — see callout above) | literal 24h duration — CI billing block resolved 2026-07-26 and the `nightly-soak`/`nightly-battery` `schedule` jobs are wired and now actually runnable, but the cron trigger (`0 6 * * *` UTC) has not yet fired since the fix, so this is genuinely **pending first scheduled run** again (not blocked); real-deployment (non-ephemeral-runner) autostart-kill-9 attestation has no CI equivalent by nature (hosted runners are destroyed per-job) and remains a real-deployment-only leg — the local dev-host demonstration above is evidence toward it, not a substitute |
 
-**Eight of nine stories are fully GREEN on local Linux with no automated
-gap** (2, 3, 4, 5, 6, 7, 8, 9 — story 8 as of the T10.2c re-run on
-2026-07-20; row 7 now GREEN including its hosted-CI leg as of 2026-07-26;
-row 9 still carrying its literal-24h and real-deployment legs). The one
-that is not:
-
-- **Story 1 — functional path green, ≤3s timing clause pending manual
-  execution** (no automated timing test exists).
+**All nine stories are now GREEN**, eight with no automated gap at all (2,
+3, 4, 5, 6, 7, 8, 9 — story 8 as of the T10.2c re-run on 2026-07-20; row 7
+now GREEN including its hosted-CI leg as of 2026-07-26; row 9 still
+carrying its literal-24h and real-deployment legs, tracked separately
+below, not blocking). **Story 1** closed its own last gap 2026-08-01: the
+functional path was already green, and the ≤3s timing clause (no
+automated test exists, by design — this was always a manual-script leg
+per the M10 DoD) was run for real against a live daemon on the user's own
+Windows machine — 5 `POST /v1/nodes` round trips, 74.2/20.3/15.0/15.7/
+14.9ms, roughly 200x under the 3000ms budget. See row 1 above for the full
+writeup.
 
 **Story 8's former gap is now closed (T10.2c, 2026-07-20):** the
 supertask-trigger production path was unwired (spec §4.10's evaluation was

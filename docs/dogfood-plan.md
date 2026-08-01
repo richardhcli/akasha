@@ -38,6 +38,37 @@ behavior, file-locking retries when Obsidian holds a handle, and vault
 behavior if your vault lives inside OneDrive/Dropbox. Those are exactly the
 untested surfaces, not random noise.
 
+**Update, 2026-07-24 through 2026-07-26 (this gap is now closed) —** the
+paragraph above is left as-written for the historical record (it was
+accurate when this document was authored, 2026-07-21), but is now stale:
+this precondition gap was closed in the days immediately after. Real
+Windows dev-host runs on 2026-07-24 and 2026-07-25 found and fixed five,
+then four more, genuine Windows-only bugs this document predicted almost
+exactly — CRLF corruption in the sync write-back path, the Windows RSS
+sampler silently returning 0, the `msvcrt` single-instance lock raising
+the wrong exception type on a real second-acquisition, and (2026-07-25) a
+real autostart/kill-9 recovery demonstration via Task Scheduler. The
+hosted `windows-latest` CI leg itself went genuinely green for the first
+time in this repo's history on 2026-07-26 (run `30183257449`, commit
+`aa07bad`, alongside `ubuntu-latest`), after separately resolving a
+GitHub Actions billing block. Per `docs/acceptance.md`'s own summary,
+**all nine acceptance stories are green** as of that run (story 1's
+remaining ≤3s manual-timing leg was the last one, closed 2026-08-01 — see
+`docs/acceptance.md` row 1) — the Phase 1 exit condition this section
+worried about is met, and per vision.md §9's own sequencing this is what
+actually starts the one-month Phase 2 dogfood clock this document is the
+operating manual for. See `docs/acceptance.md`'s dated callouts (2026-07-24,
+2026-07-25, 2026-07-26) for the full bug-by-bug writeup — do not re-derive
+this from scratch, it is already documented there. What remains open and
+worth tracking, per that same document: the *literal* 24-hour
+`nightly-soak` duration (pending its first fired scheduled run, not
+blocked — the cron job is wired and runnable), and a genuine
+non-ephemeral real-deployment autostart/kill-9 attestation (the local
+Windows dev-host demonstration is real evidence toward this, not a
+substitute — hosted CI runners are destroyed per-job and can't produce
+this leg by nature). Neither of those blocks the dogfood month that is
+now, in fact, already running.
+
 ---
 
 ## 1. What this month has to prove (the actual thesis, not a vibe)
