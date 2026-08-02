@@ -56,3 +56,9 @@ uv run akasha --token "$AKASHA_TOKEN" get <id-from-above>
 - Full verb/endpoint reference: [`cli.md`](cli.md), [`api.md`](api.md)
 - Browser UI at `http://127.0.0.1:7433/`: [`web-ui.md`](web-ui.md)
 - Sync an Obsidian vault: [`obsidian.md`](obsidian.md)
+
+**Known friction in the steps above (tracked, not forgotten):** minting the first token
+requires a raw Python one-liner, and there's no CLI verb to register a sync root. (The web UI
+used to need a devtools console command to authenticate — that's fixed: it now has an in-page
+token form, see [`web-ui.md`](web-ui.md).) A full audit and proposed fix plan for what's left is in
+[`../onboarding-ux-report.md`](../onboarding-ux-report.md).

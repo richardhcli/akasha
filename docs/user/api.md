@@ -16,6 +16,8 @@ Every endpoint except `GET /health` requires `Authorization: Bearer <token>`. Tw
 
 Getting your first token: [`quickstart.md`](quickstart.md) step 2.
 
+**CORS:** the daemon only allows cross-origin requests from `app://obsidian.md` (the Obsidian plugin's fixed Electron origin) — no wildcard, since requests carry a bearer token. A browser-based client running anywhere else (a page you're serving from a different origin than `127.0.0.1:7433` itself) will hit a CORS preflight failure, by design; the daemon-served [`web-ui.md`](web-ui.md) is unaffected since it's always same-origin.
+
 ## Example
 
 ```bash

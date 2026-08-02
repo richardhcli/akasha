@@ -277,10 +277,12 @@ a `PATCH` that touches the bound facet, should enqueue a review — see
 [`../mvp-spec.md`](../mvp-spec.md) §4.9–§4.11 or drive it from the web UI's
 `/review` view ([`web-ui.md`](web-ui.md)).
 
-**Not covered by this guide:** `GET /v1/metrics`'s counters have no UI view
-(JSON only, see [`../mvp-spec.md`](../mvp-spec.md) §7); a lasting autostart
-setup is [`ops/autostart.md`](ops/autostart.md) / `docs/dogfood/windows-service.md`
-instead, deliberately out of scope here (see the top of this guide).
+**Not covered by this guide:** `GET /v1/metrics`'s counters are also
+rendered live at the web UI's `/dashboard` view — see
+[`web-ui.md`](web-ui.md) — this guide just doesn't walk through it; a
+lasting autostart setup is [`ops/autostart.md`](ops/autostart.md) /
+`docs/dogfood/windows-service.md` instead, deliberately out of scope here
+(see the top of this guide).
 
 ---
 
