@@ -125,6 +125,26 @@ def test_auth_bar_shows_masked_token_and_change_clear_controls(
     expect(auth_bar.get_by_role("button", name="Clear token")).to_be_visible()
 
 
+def test_bootstrap_token_query_param_seeds_and_strips(
+    daemon: dict[str, Any], page: Page
+) -> None:
+    """T12.3: a freshly minted token (e.g. from a CLI bootstrap command)
+    reaches the browser via `/<view>?token=<bearer>` -- no DevTools needed,
+    and the token must not linger in the visible URL/history afterward.
+    """
+    page.goto(f"{daemon['base_url']}/dashboard?token={daemon['token']}")
+
+    # (a) real authenticated content loaded, not the "Set tm_token..." notice.
+    expect(page.locator("#dashboard-facet-coverage")).to_contain_text("Facet coverage")
+
+    # (b) the token param is stripped from the visible URL after load.
+    assert "token=" not in page.url
+
+    # (c) localStorage was actually seeded with the seeded token value.
+    stored = page.evaluate("window.localStorage.getItem('tm_token')")
+    assert stored == daemon["token"]
+
+
 def test_clear_token_button_logs_out(daemon: dict[str, Any], page: Page) -> None:
     # Deliberately NOT seeded via add_init_script: that script re-runs on
     # every navigation (including the reload Clear triggers) and would just

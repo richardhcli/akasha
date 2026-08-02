@@ -1,0 +1,30 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/cli/main.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_cli_sync_add.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/user/cli.md"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_cli_dry_run.py"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "sync_add is a genuine pure-HTTP-client implementation via the shared _mutate helper, posting {name, root_path} to POST /v1/sync/roots, with --name defaulting to Path(path).name. test_cli_dry_run.py change is exactly one new DryRunCase table entry, structurally required by the existing test_dry_run_case_table_matches_discovered_mutating_verbs meta-test.",
+  "task_id": "T12.2",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "================== 642 passed, 1 skipped, 1 warning in 31.51s =================="
+}

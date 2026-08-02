@@ -1,0 +1,14 @@
+{
+  "files_changed": [
+    "src/akasha/cli/main.py",
+    "tests/integration/test_cli_init.py",
+    "docs/user/quickstart.md",
+    "docs/user/dogfood-windows.md",
+    "docs/user/cli.md"
+  ],
+  "spec_questions": [],
+  "status": "DONE",
+  "verify_command": "uv run ruff check src tests && uv run pyright src && uv run pytest tests/unit tests/property tests/integration",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "================== 635 passed, 1 skipped, 1 warning in 32.15s ==================="
+}

@@ -1,0 +1,12 @@
+{
+  "files_changed": [
+    "src/akasha/ui/static/app.js",
+    "tests/integration/test_ui_auth_bar.py",
+    "docs/user/web-ui.md"
+  ],
+  "spec_questions": [],
+  "status": "DONE",
+  "verify_command": "uv run ruff check src tests && uv run pyright src && uv run pytest tests/unit tests/property tests/integration",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "643 passed, 1 skipped, 1 warning in 32.20s"
+}

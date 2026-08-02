@@ -11,7 +11,7 @@ by the (non-store) contract layer (``contract/render.py``,
 ``contract/linter.py``) for the same reason, so this is not a rule-0.4
 violation.
 
-Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon``.
+Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon/init/sync``.
 Unlike every other verb, ``daemon`` does not speak HTTP to an
 already-running server -- it *is* the server process: it loads config,
 acquires the single-instance lock (``akasha.daemon.single_instance_lock``,
@@ -21,6 +21,18 @@ client, no SQLite" contract holds for every other verb (including
 ``export``, task T10.2, a pure client of ``GET /v1/sync/export`` -- see
 its own docstring below); the ``daemon`` command below is a thin dispatch
 to ``akasha.daemon.serve``.
+
+``init`` (task T12.1, closing ``docs/spec-questions.md`` T11.1) is the
+second, deliberate exception to the "pure HTTP client" rule: it talks to
+``kernel/store.py`` directly (via ``store.connect``/``store.run_migrations``/
+``store.create_token``, the same helpers ``daemon``'s startup path and
+``api/routes/tokens.py::create_token`` already use) rather than a new HTTP
+endpoint, because the very first human token cannot be minted through
+``POST /v1/tokens`` -- that route is ``require_human`` and a fresh DB has
+no token to authenticate with yet. No new authless HTTP surface is added;
+``init`` mints the identical ``tokens`` row/bearer-token shape
+``POST /v1/tokens`` does, via the same ``api/auth.py::mint_secret``/
+``hash_secret``/``format_bearer_token`` helpers.
 
 Global flags: ``--json`` (versioned ``cli/v1`` output, additive-only),
 ``--dry-run`` (mutating verbs print the would-be request and exit 0
@@ -74,8 +86,9 @@ import httpx
 import typer
 
 from akasha import daemon as daemon_module
-from akasha.config import DEFAULT_BIND, DEFAULT_PORT, load_config
-from akasha.kernel import ids
+from akasha.api import auth
+from akasha.config import DEFAULT_BIND, DEFAULT_PORT, default_db_path, load_config
+from akasha.kernel import ids, store
 
 # Windows consoles default `sys.stdout`/`sys.stderr` to the legacy locale
 # codepage (e.g. cp1252), not UTF-8 -- confirmed live on a real Windows 11
@@ -98,8 +111,10 @@ CLI_SCHEMA = "cli/v1"
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 review_app = typer.Typer(add_completion=False, no_args_is_help=True)
 token_app = typer.Typer(add_completion=False, no_args_is_help=True)
+sync_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(review_app, name="review")
 app.add_typer(token_app, name="token")
+app.add_typer(sync_app, name="sync")
 
 
 class ChangeClass(str, Enum):
@@ -339,6 +354,63 @@ def daemon(
         raise typer.Exit(4) from exc
 
 
+@app.command()
+def init(
+    config: str | None = typer.Option(
+        None, "--config", help="path to config.toml (default: per-OS default location)"
+    ),
+    name: str = typer.Option("bootstrap", "--name", help="name for the minted human token"),
+) -> None:
+    """Bootstrap the first human token on a fresh DB (spec-questions T11.1).
+
+    ``POST /v1/tokens`` is ``require_human``, so a brand-new database (no
+    tokens at all) has no way to authenticate a call to it -- this verb
+    breaks that chicken-and-egg deadlock by talking to ``kernel/store.py``
+    directly instead of over HTTP (see module docstring above for why this
+    is not a rule-0.4 violation). It runs migrations against ``config.db_path``
+    (idempotent, safe on a genuinely fresh, schema-less DB file -- same as
+    ``api/app.py``'s ``create_app`` startup path), then mints exactly one
+    ``human``-class token via the identical
+    ``auth.mint_secret()``/``store.create_token()``/``auth.format_bearer_token()``
+    sequence ``api/routes/tokens.py::create_token`` already uses over HTTP --
+    no new schema, no second write path.
+
+    If any token already exists, this is a conflict (exit 4, spec §4.12's
+    "conflict/violation" class -- same mapping ``daemon``'s
+    ``AlreadyRunningError`` uses above): mints nothing, and points the
+    caller at the normal ``POST /v1/tokens`` (human-only) route to mint
+    further tokens once a daemon is running.
+
+    The printed bearer token is shown exactly once, like
+    ``POST /v1/tokens``'s own response -- it is never recoverable
+    afterward (only its hash is persisted).
+
+    Note: this verb does not go through ``--base-url``/``--token``/
+    ``--json``/``--dry-run`` -- those are for the HTTP-client verbs above;
+    like ``daemon``, ``init`` is not a pure HTTP client (see module
+    docstring).
+    """
+    cfg = load_config(config)
+    db_path = cfg.db_path if cfg.db_path is not None else default_db_path()
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = store.connect(db_path, check_same_thread=False)
+    store.run_migrations(conn)
+
+    if store.list_tokens(conn):
+        typer.echo(
+            "error: a token already exists; use the running daemon's "
+            "POST /v1/tokens (human token required) to mint another",
+            err=True,
+        )
+        raise typer.Exit(4)
+
+    raw_secret = auth.mint_secret()
+    token = store.create_token(conn, name, "human", auth.hash_secret(raw_secret))
+    bearer = auth.format_bearer_token(token["id"], raw_secret)
+    typer.echo(bearer)
+    typer.echo("This token is shown once and cannot be recovered -- store it now.")
+
+
 # --- new/get/set/rm/search ---------------------------------------------------
 
 
@@ -472,6 +544,28 @@ def token_list(ctx: typer.Context) -> None:
     """GET /v1/tokens (human only)."""
     state = _state(ctx)
     result = _request(state, "GET", "/v1/tokens")
+    _echo_ok(state, result)
+
+
+# --- sync ------------------------------------------------------------------
+
+
+@sync_app.command("add")
+def sync_add(
+    ctx: typer.Context,
+    path: str,
+    name: str | None = typer.Option(None, "--name", help="sync root name (default: path basename)"),
+) -> None:
+    """POST /v1/sync/roots (task T4.10, human only).
+
+    ``--name`` defaults to the path's basename when omitted -- a
+    client-side convenience only, the server always receives an explicit,
+    non-null ``name`` string (spec §4.11 unchanged request shape).
+    """
+    state = _state(ctx)
+    root_name = name if name is not None else Path(path).name
+    payload = {"name": root_name, "root_path": path}
+    result = _mutate(state, "POST", "/v1/sync/roots", payload)
     _echo_ok(state, result)
 
 

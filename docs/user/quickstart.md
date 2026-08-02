@@ -11,25 +11,15 @@ uv sync
 
 ## 2. Mint your first token
 
-`POST /v1/tokens` is human-only and itself requires an existing bearer token, so there is currently no bootstrap endpoint or CLI verb for the very first token (tracked as an open gap — see `docs/spec-questions.md` T11.1). Until one lands, mint it directly through the store, the same way `scripts/dev/seed_and_run.py` does:
+`POST /v1/tokens` is human-only and itself requires an existing bearer token, so a brand-new database has no way to authenticate the call that would mint its first token. `akasha init` closes that gap: it talks to the store directly (the same "not a pure HTTP client" exception `daemon` already has, see `cli.md`) rather than a new HTTP endpoint, and mints exactly one `human`-class token.
 
-If you have Git Bash/WSL, `scripts/dogfood/init.sh <name>` does this step plus starting the daemon and registering a sync root, all in one command — see `docs/dogfood/README.md`. The manual steps below are the same underlying calls, useful on plain PowerShell or when you want a single ad hoc token instead of a whole scratch instance.
+If you have Git Bash/WSL, `scripts/dogfood/init.sh <name>` does this step plus starting the daemon and registering a sync root, all in one command — see `docs/dogfood/README.md`.
 
 ```bash
-uv run python -c "
-from akasha.api import auth
-from akasha.config import default_db_path
-from akasha.kernel import store
-
-conn = store.connect(default_db_path())
-store.run_migrations(conn)
-raw = auth.mint_secret()
-token = store.create_token(conn, name='me', token_class='human', secret_hash=auth.hash_secret(raw))
-print(auth.format_bearer_token(token['id'], raw))
-"
+uv run akasha init --name me
 ```
 
-Save the printed `<token_id>.<secret>` string — it is shown once and not recoverable.
+Save the printed `<token_id>.<secret>` string — it is shown once and not recoverable. Running `akasha init` again once a token already exists is a clean, documented no-op-with-error (exit code 4) — it will not overwrite or add a second token; use `token create` (below, once the daemon is running) for additional tokens.
 
 ```bash
 export AKASHA_TOKEN='<paste the bearer value here>'
@@ -57,8 +47,8 @@ uv run akasha --token "$AKASHA_TOKEN" get <id-from-above>
 - Browser UI at `http://127.0.0.1:7433/`: [`web-ui.md`](web-ui.md)
 - Sync an Obsidian vault: [`obsidian.md`](obsidian.md)
 
-**Known friction in the steps above (tracked, not forgotten):** minting the first token
-requires a raw Python one-liner, and there's no CLI verb to register a sync root. (The web UI
-used to need a devtools console command to authenticate — that's fixed: it now has an in-page
-token form, see [`web-ui.md`](web-ui.md).) A full audit and proposed fix plan for what's left is in
-[`../onboarding-ux-report.md`](../onboarding-ux-report.md).
+**Known friction in the steps above (tracked, not forgotten):** there's no CLI verb to register
+a sync root. (Minting the first token used to require a raw Python one-liner — fixed by
+`akasha init`, task T12.1. The web UI used to need a devtools console command to authenticate —
+that's fixed too: it now has an in-page token form, see [`web-ui.md`](web-ui.md).) A full audit
+and proposed fix plan for what's left is in [`../onboarding-ux-report.md`](../onboarding-ux-report.md).

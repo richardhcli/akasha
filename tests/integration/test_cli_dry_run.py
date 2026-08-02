@@ -176,6 +176,13 @@ DRY_RUN_CASES: list[DryRunCase] = [
         path="/v1/tokens/dummytoken1",
         body_check=_assert_body_is_none,
     ),
+    DryRunCase(
+        id="sync add",
+        argv=["sync", "add", "/tmp/some-vault", "--name", "dry-run-vault"],
+        method="POST",
+        path="/v1/sync/roots",
+        body_check=_assert_body_has("name", "root_path"),
+    ),
 ]
 
 

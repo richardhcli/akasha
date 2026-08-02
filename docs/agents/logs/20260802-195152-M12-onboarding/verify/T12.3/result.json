@@ -1,0 +1,25 @@
+{
+  "files_exist": [
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "src/akasha/ui/static/app.js"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "tests/integration/test_ui_auth_bar.py"
+    },
+    {
+      "exists": true,
+      "nonempty": true,
+      "path": "docs/user/web-ui.md"
+    }
+  ],
+  "git_status_matches_claim": true,
+  "notes": "consumeBootstrapToken() reads ?token=, calls localStorage.setItem, strips param via history.replaceState, called before initAuthBar() in boot(). No console.* calls touch the token. No server-side Python file modified. New Playwright test genuinely drives a real browser and passed.",
+  "task_id": "T12.3",
+  "verdict": "CONFIRMED_DONE",
+  "verify_exit_code": 0,
+  "verify_stdout_tail": "================== 643 passed, 1 skipped, 1 warning in 32.01s =================="
+}

@@ -946,6 +946,60 @@ decision.
 
 ---
 
+## M12 — Onboarding & Windows packaging UX (Depends on: M10) — post-MVP addendum, added 2026-08-02 at user request, not derived from `mvp-spec.md`'s milestone list; see `docs/onboarding-ux-report.md` for the full audit this milestone implements and `docs/spec-questions.md`'s D6/T11.1 entries for the authorization/design-decision trail.
+
+**Milestone DoD:** Tier 0 (T12.1–T12.3) closes the three worst first-run friction points the audit found — bootstrap token, sync CLI verb, web-UI token handoff — each independently verified via `make check` in a normal Linux dev sandbox. Tier 1/2 (T12.4/T12.5) package a Windows executable/installer and have Verify steps that are literally "run on a real Windows host" — unrunnable here per rule 0.9 (same reasoning `docs/onboarding-ux-report.md` §4 gives for why that report didn't touch `src/` itself) — so they stay `TODO` with an explicit Windows-host precondition until a session with one picks them up. T12.6 depends on all five and rewrites the user-facing onboarding docs once they land.
+
+### T12.1 — `akasha init`: bootstrap the first human token on a fresh DB
+- **Goal** — Close `docs/spec-questions.md` T11.1 (no documented way to mint the first token on a fresh DB, since `POST /v1/tokens` is `require_human`). Design decision (report's own flagged (a)-vs-(b) choice) resolved 2026-08-02 by the user: **(a)** — a new `akasha init` CLI verb that talks to `kernel/store.py` directly, not a new HTTP endpoint. No new authless HTTP surface to defend; mirrors `daemon`'s existing "not a pure HTTP client" exception already documented in `cli/main.py`'s module docstring.
+- **Depends on** — M10 (milestone gate).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_init.py` (new), `docs/user/quickstart.md`, `docs/user/dogfood-windows.md`, `docs/user/cli.md` (its opening "never touches SQLite directly" line needs the same one-line `init`/`daemon` exception `main.py`'s own docstring already carries).
+- **Spec** — §4.4/§4.11 tokens schema/endpoints (unchanged — `init` produces the identical `tokens` row/bearer-token shape `POST /v1/tokens` does, via the same `kernel/store.py::create_token` + `api/auth.py::mint_secret`/`hash_secret`/`format_bearer_token` helpers `routes/tokens.py::create_token` already uses — no new schema, no second write path, rule 0.4 satisfied), §4.12 CLI verb table (`init` is new, same "not a pure HTTP client" class as `daemon`).
+- **Steps** — (1) Add `akasha init [--config PATH] [--name NAME]` (default `NAME="bootstrap"`) to `cli/main.py`, next to `daemon`, with the same "this verb does not go through `--base-url`/`--token`/`--json`/`--dry-run`" doc-comment pattern. (2) `cfg = load_config(config)`; `conn = store.connect(cfg.db_path, check_same_thread=False)`; `store.run_migrations(conn)` (idempotent — safe to call against a genuinely fresh, schema-less DB file, same as `create_app` already does). (3) If `store.list_tokens(conn)` is non-empty, print a clean human-readable error ("a token already exists; use the running daemon's `POST /v1/tokens` (human token required) to mint another") and `raise typer.Exit(4)` — conflict class, no traceback, mirroring `daemon`'s `AlreadyRunningError` → exit 4 mapping. (4) Otherwise mint one `human`-class token via `auth.mint_secret()` / `store.create_token(conn, name, "human", auth.hash_secret(raw_secret))` / `auth.format_bearer_token(token["id"], raw_secret)` — invoked directly instead of over HTTP. (5) Print the bearer token once, plainly, with a one-line note it will never be shown again (mirrors `POST /v1/tokens`'s own "returned exactly once" contract). (6) Update `docs/user/quickstart.md` §2 and `docs/user/dogfood-windows.md` §3 to replace the `uv run python -c "..."` heredoc with `akasha init`; add the one-line SQLite-touching exception to `docs/user/cli.md`'s opening paragraph.
+- **Verify** — new `tests/integration/test_cli_init.py` proving (a) `akasha init` against a fresh DB file succeeds, prints a usable bearer token, and that token authenticates a real follow-up HTTP call; (b) a second `akasha init` against the same DB exits 4 with a clean message, no traceback, and mints no second token (`store.list_tokens` count unchanged before/after). Full `make check`.
+- **DoD** — a brand-new DB (no existing tokens) can be bootstrapped into a usable human bearer token with one command and no direct Python/SQL; running it twice is a clean, documented no-op-with-error, not data corruption or a crash.
+
+### T12.2 — `akasha sync add <path>` CLI verb
+- **Goal** — Wrap the existing `POST /v1/sync/roots` the same way every other verb wraps its endpoint — pure HTTP client, no new server-side logic (T11.1's own build-plan entry explicitly declined to add this verb; the audit found that gap still open).
+- **Depends on** — M10.
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_sync_add.py` (new), `docs/user/cli.md`, `tests/integration/test_cli_dry_run.py` (one hand-maintained `DryRunCase` table entry — its own `test_dry_run_case_table_matches_discovered_mutating_verbs` meta-test structurally requires this whenever a new mutating verb is added; discovered and confirmed necessary during T12.2's landing, 2026-08-02).
+- **Spec** — §4.11 `POST /sync/roots` (existing endpoint, T4.10 — unchanged request/response shape), §4.12 CLI verb table.
+- **Steps** — (1) Add a `sync` sub-`typer.Typer()` app (same pattern as the existing `token_app`) with one command `add(path: str, name: str | None = typer.Option(None, "--name"))`. (2) Default `name` to the path's basename if omitted (client-side convenience only — the server still receives an explicit `name`). (3) `payload = {"name": name, "root_path": path}`; `result = _mutate(state, "POST", "/v1/sync/roots", payload)` — the same `_mutate`/`--dry-run`/`--json` plumbing every mutating verb already gets for free (T9.4's audit note in the module docstring). (4) `_echo_ok(state, result)`. (5) Register the new sub-app on `app` next to `token_app` (`app.add_typer(sync_app, name="sync")`). (6) Document the new verb in `docs/user/cli.md`.
+- **Verify** — new `tests/integration/test_cli_sync_add.py` round-tripping a real registration against a live test daemon (same `uvicorn.Server`-in-a-thread fixture pattern `test_ui_auth_bar.py` and the existing `test_cli_*.py` files use) and confirming `GET /v1/sync/roots` reflects it; a `--dry-run` case confirming no real HTTP mutation fires. Full `make check`.
+- **DoD** — `akasha sync add <path>` registers a real sync root through the existing endpoint with no server-side changes; `--json`/`--dry-run` behave identically to every other mutating verb.
+
+### T12.3 — Web-UI one-time bootstrap link
+- **Goal** — Extend D5's auth-bar work so a freshly minted token (from T12.1's `akasha init` output) can reach the browser without devtools — the audit's #3 friction point.
+- **Depends on** — D5 (already DONE).
+- **Files** — `src/akasha/ui/static/app.js`, `tests/integration/test_ui_auth_bar.py` (extend the existing file — do not add a second UI-auth test file), `docs/user/web-ui.md`.
+- **Spec** — §4.13 UI views (unchanged — client-side-only addition, no new endpoint, no schema change; same "spec silent on this affordance, narrowest-reading precedent" class as D5 itself, `docs/spec-questions.md` D5).
+- **Steps** — (1) In `app.js`'s IIFE, before `initAuthBar()` is called from `boot()` (~line 751), add a `consumeBootstrapToken()` function: reads `new URLSearchParams(window.location.search).get("token")`; if present, `window.localStorage.setItem("tm_token", value)` inside the same try/catch-on-quota pattern `renderAuthForm`'s save handler already uses, then strips the `token` param from the visible URL via `history.replaceState` (never leave the raw token sitting in the URL/browser history after consuming it). (2) Call it once, before `initAuthBar()`, in `boot()`. (3) Never log the token value anywhere (no `console.log`/`console.debug` of it). (4) Document the `/dashboard?token=<bearer>`-style pattern in `docs/user/web-ui.md`, and reference it from T12.1's quickstart update as the suggested next step after `akasha init` prints a token.
+- **Verify** — extend `tests/integration/test_ui_auth_bar.py` with a Playwright test navigating to `f"{base_url}/dashboard?token={token}"` and asserting: (a) the dashboard loads authenticated content (not the "Set tm_token" notice); (b) `page.url` no longer contains `token=` after load; (c) `window.localStorage.getItem('tm_token')` equals the seeded value. Full `make check` (headless Chromium confirmed available in this session, 2026-08-02).
+- **DoD** — a `?token=` link seeds `localStorage` and is stripped from the visible URL/history on load; no server-side logging or persistence of the token value anywhere.
+
+### T12.4 — One-command Windows setup script (bridge, pre-packaging) — TODO, gated on a real Windows host
+- **Goal** — A `scripts/windows/setup.ps1` chaining `uv sync` → T12.1's `akasha init` → config write → daemon start → prints the T12.3 bootstrap URL, targeting the user's real default config path (`%APPDATA%\tm-daemon`), reusing the safety conventions already proven in `scripts/dogfood/lib.sh`/`scripts/windows-service/lib.ps1` (refuse to silently overwrite existing config; explicit confirmation before touching a real, non-scratch path).
+- **Depends on** — T12.1, T12.2, T12.3.
+- **Files** — `scripts/windows/setup.ps1` (new), `docs/user/quickstart.md`.
+- **Verify** — manual/live leg on a real Windows host (rule 0.9 — this cannot be run or verified from a Linux-only session; do not start the script itself from one, per `docs/onboarding-ux-report.md` §4's reasoning). **Precondition: needs a real Windows host to write and verify.**
+- **DoD** — fresh Windows machine, script produces a running daemon + working browser session in one pass.
+
+### T12.5 — PyInstaller executable + tray icon + installer — TODO, gated on a real Windows host
+- **Goal** — Package the `akasha` entry point as `akasha.exe`; add an opt-in tray module (`pystray`) wrapping `daemon.serve()` with start/stop/open-UI/open-logs/quit; produce an Inno Setup installer that runs T12.4's flow once and registers autostart via the already-validated supervisor-loop pattern (`scripts/windows-service/lib.ps1`'s `New-DaemonWrapperScript` — do not re-derive; Task Scheduler's native `RestartOnFailure` is empirically unreliable, per `docs/dogfood/windows-service.md`).
+- **Depends on** — T12.4.
+- **Files** — `pyproject.toml` (PyInstaller as a packaging-only dev dep), `scripts/windows/build-exe.ps1` (new), `scripts/windows/akasha.iss` (new, Inno Setup script), `src/akasha/tray.py` (new), `docs/user/ops/autostart.md`.
+- **Verify** — manual/live leg on a real Windows host: build the exe, run the installer on a clean VM/user profile, confirm autostart survives logoff/logon and a `taskkill /F` (reuse the exact live kill-and-poll test `docs/dogfood/windows-service.md` already describes). **Precondition: needs a real Windows host to build/run/verify; do not start from a Linux-only session.**
+- **DoD** — as above, all confirmed on a real Windows host, not estimated.
+
+### T12.6 — Rewrite onboarding docs around the new flow
+- **Goal** — Once T12.1–T12.5 land, `docs/user/quickstart.md`, `web-ui.md`, `dogfood-windows.md`, and `ops/autostart.md` describe the installer-first path as the default, with the current from-source path demoted to a "developer setup" appendix.
+- **Depends on** — T12.1–T12.5.
+- **Files** — the four docs above.
+- **Verify** — doc-only; DoD is a fresh-eyes read-through with no step requiring reading source code.
+- **DoD** — as above.
+
+---
+
 ## Expandability guardrails (build-now-use-later — do NOT implement future phases)
 
 These are constraints on the tasks above, not tasks themselves (spec §8):

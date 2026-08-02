@@ -95,30 +95,19 @@ Temp cleanup but still stay out of Roaming.
 
 Every mutating API call requires a Bearer token. Token minting itself is
 human-only and authenticated — so a **fresh** store has a chicken-and-egg
-gap. Mint the first human token against the DB **before** (or with the
-daemon stopped), using the store API:
+gap. `akasha init` closes that gap: it talks to the store directly (the
+same "not a pure HTTP client" exception `daemon` already has — see
+`docs/user/cli.md`) rather than a new HTTP endpoint, and mints exactly one
+`human`-class token. Run it **before** (or with the daemon stopped):
 
 ```powershell
-uv run python -c @"
-from pathlib import Path
-from akasha.api import auth
-from akasha.config import load_config
-from akasha.kernel import store
-
-cfg = load_config(r'$Dogfood\config.toml')
-db = Path(cfg.db_path)
-db.parent.mkdir(parents=True, exist_ok=True)
-conn = store.connect(db)
-store.run_migrations(conn)
-secret = auth.mint_secret()
-tok = store.create_token(conn, 'dogfood', 'human', auth.hash_secret(secret))
-print(auth.format_bearer_token(tok['id'], secret))
-conn.close()
-"@
+uv run akasha init --config "$Dogfood\config.toml" --name dogfood
 ```
 
 Copy the printed `id.secret` value. Save it somewhere local (password
-manager / env var). It is shown **once**.
+manager / env var). It is shown **once**. Running `akasha init` again once
+a token already exists is a clean, documented no-op-with-error (exit code
+4) — it will not overwrite or add a second token.
 
 ```powershell
 $env:AKASHA_TOKEN = "<paste bearer here>"   # current PowerShell session only

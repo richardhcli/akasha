@@ -135,6 +135,31 @@ console.debug("tm ui loaded");
     renderAuthBar(container);
   }
 
+  // Bootstrap link (task T12.3): a freshly minted token (e.g. from a CLI
+  // bootstrap command) previously had no way to reach the browser besides
+  // opening DevTools and typing `localStorage.setItem('tm_token', ...)` by
+  // hand -- the same class of gap D5 closed for manual entry, but for the
+  // "hand someone a link" case. `/<view>?token=<bearer>` seeds
+  // localStorage.tm_token from a `token` query param on load, then strips
+  // it from the visible URL/history via history.replaceState so it never
+  // lingers in the URL bar or browser history. Never logged.
+  function consumeBootstrapToken() {
+    var params = new URLSearchParams(window.location.search);
+    var token = params.get("token");
+    if (!token) {
+      return;
+    }
+    try {
+      window.localStorage.setItem("tm_token", token);
+    } catch (err) {
+      // ignore -- worst case the token just isn't saved, don't crash the page
+    }
+    params.delete("token");
+    var query = params.toString();
+    var newUrl = window.location.pathname + (query ? "?" + query : "");
+    history.replaceState(null, "", newUrl);
+  }
+
   function fetchJson(path, token) {
     return fetch(path, { headers: { Authorization: "Bearer " + token } }).then(
       function (resp) {
@@ -748,6 +773,7 @@ console.debug("tm ui loaded");
   // app.js is loaded in <head>, so defer view init until the DOM (#app and
   // the view containers) is parsed — otherwise getElementById returns null.
   function boot() {
+    consumeBootstrapToken();
     initAuthBar();
     if (window.location.pathname === "/node") {
       initNodeView();

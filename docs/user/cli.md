@@ -1,6 +1,6 @@
 # CLI
 
-`akasha <verb>` is a pure HTTP client of the daemon's `/v1` API — it never touches SQLite directly (`docs/mvp-spec.md` §4.12, task T4.8). Run `uv run akasha daemon` first (see [`quickstart.md`](quickstart.md)).
+`akasha <verb>` is a pure HTTP client of the daemon's `/v1` API — it never touches SQLite directly (`docs/mvp-spec.md` §4.12, task T4.8). Run `uv run akasha daemon` first (see [`quickstart.md`](quickstart.md)). Two verbs are deliberate exceptions to the "pure HTTP client" rule, documented in `cli/main.py`'s own module docstring: `daemon` *is* the server process (it doesn't speak HTTP to one), and `init` (task T12.1) talks to the store directly to bootstrap the very first human token on a fresh DB, since `POST /v1/tokens` requires a token that doesn't exist yet.
 
 **Full verb list, flags, and exit codes are specified once in [`../mvp-spec.md`](../mvp-spec.md) §4.12 — this page does not repeat that table.** Authoritative in-tool reference:
 
@@ -31,6 +31,9 @@ uv run akasha --token "$AKASHA_TOKEN" review resolve <review-id> still_holds
 
 # tokens (human-only)
 uv run akasha --token "$AKASHA_TOKEN" token create <name> --class agent
+
+# sync (human-only)
+uv run akasha --token "$AKASHA_TOKEN" sync add /path/to/vault --name my-vault
 ```
 
 ## Flags worth knowing
