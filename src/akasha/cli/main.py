@@ -355,6 +355,42 @@ def daemon(
 
 
 @app.command()
+def tray(
+    config: str | None = typer.Option(
+        None, "--config", help="path to config.toml (default: per-OS default location)"
+    ),
+) -> None:
+    """Run the daemon with a system-tray icon (build-plan T12.5, optional extra).
+
+    Same process/lock semantics as ``daemon`` (it calls the identical
+    ``daemon.serve()``, just on a background thread instead of the
+    foreground) -- a second concurrent instance still exits cleanly via
+    ``AlreadyRunningError`` rather than opening a second icon. Requires the
+    ``tray`` extra (``pystray``/``Pillow``, ``pyproject.toml``); not
+    installed by default, so this prints a clear one-line install hint
+    instead of a raw ``ImportError`` traceback if it's missing.
+
+    Note: like ``daemon``/``init``, this does not go through
+    ``--base-url``/``--token``/``--json``/``--dry-run``.
+    """
+    cfg = load_config(config)
+    try:
+        from akasha import tray as tray_module
+    except ImportError as exc:
+        typer.echo(
+            "error: the tray extra is not installed -- run `uv sync --extra tray` "
+            f"(or `pip install akasha[tray]`) and try again ({exc})",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    try:
+        tray_module.run(cfg)
+    except daemon_module.AlreadyRunningError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(4) from exc
+
+
+@app.command()
 def init(
     config: str | None = typer.Option(
         None, "--config", help="path to config.toml (default: per-OS default location)"

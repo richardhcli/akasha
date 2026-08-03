@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,31 @@ from akasha.kernel.model import (
     NodeType,
 )
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "migrations"
+
+def _migrations_dir() -> Path:
+    """Resolve the ``migrations/`` directory (build-plan T0.3).
+
+    Source checkout (every test, the CLI, `uv run akasha daemon`): unchanged
+    from before -- `migrations/` lives at the repo root, 3 parents up from
+    this file (`kernel/` -> `akasha/` -> `src/` -> repo root).
+
+    # SPEC-QUESTION (T12.5): a PyInstaller-frozen build has no repo root at
+    # all -- everything lives under `sys._MEIPASS` -- so `parents[3]` would
+    # resolve to an arbitrary OS temp-dir ancestor instead of `migrations/`,
+    # breaking `akasha.exe` on first run (`run_migrations` can't find any
+    # `.sql` files). Narrowest fix: check `sys.frozen` first and look for
+    # `migrations/` bundled alongside the `akasha` package there instead
+    # (`scripts/windows/build-exe.ps1`'s `--add-data` wires that up).
+    # Behavior for every existing (non-frozen) caller is byte-for-byte
+    # unchanged -- `sys.frozen` is only ever true inside a PyInstaller
+    # bundle, never under pytest/dev/CI. See docs/spec-questions.md.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "migrations"  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parents[3] / "migrations"
+
+
+MIGRATIONS_DIR = _migrations_dir()
 
 _VALID_NODE_TYPES = frozenset(get_args(NodeType))
 _VALID_CHANGE_CLASSES = frozenset(get_args(ChangeClass))

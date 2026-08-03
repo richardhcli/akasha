@@ -8,6 +8,7 @@ __pycache__/
 *.db-shm
 *.egg-info/
 dist/
+dist-installer/
 build/
 node_modules/
 .claude/settings.local.json
@@ -49,3 +50,11 @@ node_modules/
 /docs/agents/logs/overnight-invocation-*.json.stderr
 /scripts/fleet/.stop
 /scripts/fleet/.overnight_runner.pid
+
+# Cowork transient verification scratch (not a deliverable)
+scripts/windows/_cowork/
+
+# PyInstaller auto-generates this next to wherever it's invoked from
+# (build-plan T12.5); scripts/windows/build-exe.ps1's flags regenerate it
+# deterministically, so it's not a tracked artifact.
+/akasha.spec

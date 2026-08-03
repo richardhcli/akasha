@@ -12,6 +12,16 @@ dependencies = [
     "httpx",
 ]
 
+# Optional: the system-tray presence (build-plan T12.5, vision.md Sec7.9
+# "tray presence"). Deliberately NOT a core dependency -- `tray.py` lazy-
+# imports pystray/Pillow itself and `akasha tray` is the only CLI command
+# that needs them, so a plain `uv sync`/CLI-only install stays as light as
+# it is today. Installed automatically inside the PyInstaller-packaged exe
+# (scripts/windows/build-exe.ps1), which is the intended way most users
+# reach this code path.
+[project.optional-dependencies]
+tray = ["pystray", "pillow"]
+
 [dependency-groups]
 dev = [
     "pytest",
@@ -20,6 +30,11 @@ dev = [
     "pyright",
     "playwright",
     "pytest-playwright",
+]
+# Windows packaging only (build-plan T12.5) -- never required for `make
+# check`/`make battery`, never imported by anything under src/akasha.
+packaging = [
+    "pyinstaller",
 ]
 
 [project.scripts]
