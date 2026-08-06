@@ -59,9 +59,13 @@ onboarding docs around the installer-first flow) is **carried forward here as
 T17.1**, not left behind. Reason: `fleet-orchestrator` reads exactly
 `docs/build-plan.md` and `docs/agents/task-status.md`; a `TODO` row living
 only in `docs/pre-mvp/` is structurally undispatchable — no scan will ever
-select it. Its scope is unchanged (same four docs, same DoD); its
-dependencies (T12.1–T12.5) are all `DONE`, so it is eligible immediately.
-`docs/pre-mvp/**` is read-only reference and was not edited to record this.
+select it. Its scope is unchanged (same four docs, same DoD); its original
+dependencies (T12.1–T12.5) are all `DONE`. **It is not, however, eligible
+immediately**: it lives under `## M17 — ... (Depends on: M13, M14)`, and
+that milestone gate — confirmed live against a real `fleet-orchestrator`
+scan, 2026-08-05 — is load-bearing and blocks it until both M13 and M14
+close, same as T17.2/T17.3. `docs/pre-mvp/**` is read-only reference and was
+not edited to record this.
 
 ---
 
