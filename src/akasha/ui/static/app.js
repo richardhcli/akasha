@@ -192,7 +192,116 @@ console.debug("tm ui loaded");
     container.appendChild(ul);
   }
 
-  function renderNeighborhood(container, neighborhood) {
+  // Neighborhood grouping (task T14.5, spec §4.13 / PRD §7.5): composes
+  // edges (composition ancestry) group first, then justification edge types
+  // in the order §4.2's JUSTIFICATION set is written -- supports,
+  // contradicts, depends_on, derived_from, cites. `redirects_to` is the only
+  // EdgeType covered by neither bucket; a live edge of that type in a 1-hop
+  // neighborhood isn't expected, but it's grouped last rather than silently
+  // dropped so no edge ever disappears from the view.
+  var EDGE_TYPE_ORDER = [
+    "composes",
+    "supports",
+    "contradicts",
+    "depends_on",
+    "derived_from",
+    "cites",
+  ];
+
+  function groupByEdgeType(edges) {
+    var byType = {};
+    edges.forEach(function (edge) {
+      if (!byType[edge.edge_type]) {
+        byType[edge.edge_type] = [];
+      }
+      byType[edge.edge_type].push(edge);
+    });
+    var groups = [];
+    EDGE_TYPE_ORDER.forEach(function (t) {
+      if (byType[t]) {
+        groups.push({ edge_type: t, edges: byType[t] });
+        delete byType[t];
+      }
+    });
+    Object.keys(byType).forEach(function (t) {
+      groups.push({ edge_type: t, edges: byType[t] });
+    });
+    return groups;
+  }
+
+  // One <li> per edge: the neighbor id is always a link (reusing the
+  // existing `nodeLink` helper, D8's established pattern) -- if that
+  // neighbor's own node fetch failed or is still missing from `nodeMap`,
+  // this degrades to a bare id link instead of blanking the item (step 4).
+  function renderNeighborItem(edge, neighborId, nodeMap) {
+    var li = el("li", { className: "neighbor-item" });
+    var line = el("p");
+    line.appendChild(nodeLink(neighborId, neighborId));
+    var neighborNode = nodeMap[neighborId];
+    if (neighborNode) {
+      line.appendChild(
+        document.createTextNode(" (" + neighborNode.node_type + ")")
+      );
+    }
+    li.appendChild(line);
+    if (neighborNode) {
+      li.appendChild(
+        el("p", {
+          text: truncate(neighborNode.body, 200),
+          className: "neighbor-body",
+        })
+      );
+    }
+    // A `*` facet_binding is a real, displayable value (spec §4.4: legal but
+    // counted against facet-coverage) -- only a null binding (composes /
+    // redirects_to edges) is omitted.
+    if (edge.facet_binding) {
+      li.appendChild(
+        el("p", {
+          text: "facet: " + edge.facet_binding,
+          className: "neighbor-facet",
+        })
+      );
+    }
+    return li;
+  }
+
+  function renderEdgeTypeGroup(group, neighborOf, nodeMap) {
+    var div = el("div", { className: "neighborhood-type-group" });
+    div.appendChild(el("h4", { text: group.edge_type }));
+    var ul = el("ul");
+    group.edges.forEach(function (edge) {
+      ul.appendChild(renderNeighborItem(edge, neighborOf(edge), nodeMap));
+    });
+    div.appendChild(ul);
+    return div;
+  }
+
+  function renderDirectionSection(title, className, edges, neighborOf, nodeMap) {
+    var section = el("div", { className: className });
+    section.appendChild(el("h3", { text: title + " (" + edges.length + ")" }));
+    if (edges.length === 0) {
+      section.appendChild(el("p", { text: "None." }));
+      return section;
+    }
+    groupByEdgeType(edges).forEach(function (group) {
+      section.appendChild(renderEdgeTypeGroup(group, neighborOf, nodeMap));
+    });
+    return section;
+  }
+
+  // PRD §7.5: the node view's 1-hop neighborhood, direction- and
+  // edge-type-grouped, each neighbor shown with its node_type + a body
+  // preview and always a working link -- closing the same id-as-plain-text
+  // gap debug-plan D8 fixed for search/review/sync (`nodeLink`/`truncate`
+  // reused verbatim, no second link/truncate helper). No endpoint change:
+  // GET /nodes/{id}/neighborhood already returns every distinct neighbor id
+  // via its edges, so each is fetched once via the existing
+  // GET /v1/nodes/{id} to get node_type + body (step 2). A single neighbor's
+  // fetch failing degrades only that neighbor to a plain id link (step 4);
+  // it never blanks the whole section, so the `.catch` here maps a failure
+  // to a `null` node rather than rejecting the shared `Promise.all`.
+  function renderNeighborhood(container, neighborhood, nodeId, token) {
     container.textContent = "";
     container.appendChild(el("h2", { text: "Neighborhood" }));
     var edges = neighborhood.edges || [];
@@ -200,13 +309,67 @@ console.debug("tm ui loaded");
       container.appendChild(el("p", { text: "No neighbors." }));
       return;
     }
-    var ul = el("ul");
-    edges.forEach(function (edge) {
-      ul.appendChild(
-        el("li", { text: edge.src + " -" + edge.edge_type + "-> " + edge.dst })
+
+    var outbound = edges.filter(function (edge) {
+      return edge.src === nodeId;
+    });
+    var inbound = edges.filter(function (edge) {
+      return edge.dst === nodeId;
+    });
+
+    var neighborIds = {};
+    outbound.forEach(function (edge) {
+      neighborIds[edge.dst] = true;
+    });
+    inbound.forEach(function (edge) {
+      neighborIds[edge.src] = true;
+    });
+
+    var body = el("div", { className: "neighborhood-body" });
+    container.appendChild(body);
+
+    var ids = Object.keys(neighborIds);
+    Promise.all(
+      ids.map(function (id) {
+        return fetchJson("/v1/nodes/" + encodeURIComponent(id), token)
+          .then(function (node) {
+            return [id, node];
+          })
+          .catch(function () {
+            return [id, null];
+          });
+      })
+    ).then(function (pairs) {
+      var nodeMap = {};
+      pairs.forEach(function (pair) {
+        if (pair[1]) {
+          nodeMap[pair[0]] = pair[1];
+        }
+      });
+      body.textContent = "";
+      body.appendChild(
+        renderDirectionSection(
+          "Outbound",
+          "neighborhood-outbound",
+          outbound,
+          function (edge) {
+            return edge.dst;
+          },
+          nodeMap
+        )
+      );
+      body.appendChild(
+        renderDirectionSection(
+          "Inbound",
+          "neighborhood-inbound",
+          inbound,
+          function (edge) {
+            return edge.src;
+          },
+          nodeMap
+        )
       );
     });
-    container.appendChild(ul);
   }
 
   function renderHistory(container, history) {
@@ -460,7 +623,7 @@ console.debug("tm ui loaded");
         var reviews = results[3];
         renderBody(bodyEl, node);
         renderFacets(facetsEl, node);
-        renderNeighborhood(neighborhoodEl, neighborhood);
+        renderNeighborhood(neighborhoodEl, neighborhood, nodeId, token);
         renderHistory(historyEl, history);
         renderBadge(badgeEl, node, reviews);
       })

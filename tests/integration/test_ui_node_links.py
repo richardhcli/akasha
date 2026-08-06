@@ -156,3 +156,143 @@ def test_review_item_links_to_node_view(daemon: dict[str, Any], page: Page) -> N
     link.click()
     expect(page).to_have_url(f"{base_url}/node?id={node_id}")
     expect(page.locator("#node-body")).to_contain_text("original body before proposal")
+
+
+def test_node_view_neighborhood_is_navigable(daemon: dict[str, Any], page: Page) -> None:
+    """T14.5: the 1-hop neighborhood is direction/type-grouped, shows each
+    neighbor's node_type + body, and every neighbor is a working link
+    (spec §4.13, PRD §7.5) -- finishing the D8 id-as-plain-text class of fix
+    for the one view D8 never touched.
+    """
+    base_url = daemon["base_url"]
+    token = daemon["token"]
+
+    with httpx.Client(
+        base_url=base_url, headers={"Authorization": f"Bearer {token}"}, timeout=10.0
+    ) as client:
+        center_resp = client.post(
+            "/v1/nodes",
+            json={"node_type": "claim", "body": "a distinctive zqorvix center claim"},
+        )
+        assert center_resp.status_code == 201, center_resp.text
+        center_id = center_resp.json()["id"]
+
+        # Inbound supports edge: supporter -supports-> center.
+        supporter_resp = client.post(
+            "/v1/nodes",
+            json={"node_type": "evidence", "body": "a distinctive fyplenk supporting note"},
+        )
+        assert supporter_resp.status_code == 201, supporter_resp.text
+        supporter_id = supporter_resp.json()["id"]
+        supports_resp = client.post(
+            "/v1/edges",
+            json={
+                "src": supporter_id,
+                "dst": center_id,
+                "edge_type": "supports",
+                "facet_binding": "*",
+                "provenance": "human",
+            },
+        )
+        assert supports_resp.status_code == 201, supports_resp.text
+
+        # Outbound composes edge: center -composes-> child.
+        child_resp = client.post(
+            "/v1/nodes",
+            json={"node_type": "claim", "body": "a distinctive gwarnux child claim"},
+        )
+        assert child_resp.status_code == 201, child_resp.text
+        child_id = child_resp.json()["id"]
+        composes_resp = client.post(
+            "/v1/edges",
+            json={
+                "src": center_id,
+                "dst": child_id,
+                "edge_type": "composes",
+                "provenance": "human",
+            },
+        )
+        assert composes_resp.status_code == 201, composes_resp.text
+
+    page.context.add_init_script(
+        f"window.localStorage.setItem('tm_token', {json.dumps(token)});"
+    )
+    page.goto(f"{base_url}/node?id={center_id}")
+
+    neighborhood = page.locator("#node-neighborhood")
+    inbound = neighborhood.locator(".neighborhood-inbound")
+    outbound = neighborhood.locator(".neighborhood-outbound")
+    expect(inbound).to_be_visible()
+    expect(outbound).to_be_visible()
+
+    supports_group = inbound.locator(".neighborhood-type-group", has_text="supports")
+    expect(supports_group).to_contain_text("evidence")
+    expect(supports_group).to_contain_text("fyplenk supporting note")
+    expect(supports_group).to_contain_text("facet: *")
+    supporter_link = supports_group.locator("a", has_text=supporter_id)
+    expect(supporter_link).to_have_attribute("href", f"/node?id={supporter_id}")
+
+    composes_group = outbound.locator(".neighborhood-type-group", has_text="composes")
+    expect(composes_group).to_contain_text("claim")
+    expect(composes_group).to_contain_text("gwarnux child claim")
+    child_link = composes_group.locator("a", has_text=child_id)
+    expect(child_link).to_have_attribute("href", f"/node?id={child_id}")
+
+    child_link.click()
+    expect(page).to_have_url(f"{base_url}/node?id={child_id}")
+    expect(page.locator("#node-body")).to_contain_text("gwarnux child claim")
+
+
+def test_node_view_neighborhood_degrades_on_failed_neighbor_fetch(
+    daemon: dict[str, Any], page: Page
+) -> None:
+    """Step 4: a neighbor node fetch that 404s must still render that
+    neighbor as a plain id link, never blank the whole section. Simulated by
+    retracting the neighbor's only path to itself is not available via the
+    API, so instead this asserts the degrade path directly: a neighbor id
+    that GET /v1/nodes/{id} can't resolve (intercepted to fail) still shows
+    up as a link.
+    """
+    base_url = daemon["base_url"]
+    token = daemon["token"]
+
+    with httpx.Client(
+        base_url=base_url, headers={"Authorization": f"Bearer {token}"}, timeout=10.0
+    ) as client:
+        center_resp = client.post(
+            "/v1/nodes",
+            json={"node_type": "claim", "body": "center for degrade test wxyzqu"},
+        )
+        assert center_resp.status_code == 201, center_resp.text
+        center_id = center_resp.json()["id"]
+        neighbor_resp = client.post(
+            "/v1/nodes",
+            json={"node_type": "claim", "body": "neighbor for degrade test"},
+        )
+        assert neighbor_resp.status_code == 201, neighbor_resp.text
+        neighbor_id = neighbor_resp.json()["id"]
+        edge_resp = client.post(
+            "/v1/edges",
+            json={
+                "src": center_id,
+                "dst": neighbor_id,
+                "edge_type": "composes",
+                "provenance": "human",
+            },
+        )
+        assert edge_resp.status_code == 201, edge_resp.text
+
+    page.context.add_init_script(
+        f"window.localStorage.setItem('tm_token', {json.dumps(token)});"
+    )
+
+    def fail_neighbor_fetch(route: Any) -> None:
+        route.fulfill(status=500, body="{}")
+
+    page.route(f"**/v1/nodes/{neighbor_id}", fail_neighbor_fetch)
+    page.goto(f"{base_url}/node?id={center_id}")
+
+    outbound = page.locator("#node-neighborhood .neighborhood-outbound")
+    expect(outbound).to_be_visible()
+    neighbor_link = outbound.locator("a", has_text=neighbor_id)
+    expect(neighbor_link).to_have_attribute("href", f"/node?id={neighbor_id}")
