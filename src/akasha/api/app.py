@@ -35,6 +35,7 @@ from akasha.api.routes import edges, metrics, nodes, review, search, sync, sync_
 from akasha.config import Config, default_db_path, load_config
 from akasha.contract.grammar import CONTRACT_VERSION
 from akasha.kernel import store
+from akasha.sync.origin import OriginTracker
 
 # Package-relative UI paths (never cwd-relative): api/ -> akasha/ -> ui/{static,templates}.
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
@@ -121,6 +122,15 @@ def create_app(config: Config | None = None, conn: sqlite3.Connection | None = N
         # it directly (``db_path is None`` selects that branch).
         app.state.db_path = None
     app.state.conn = conn
+
+    # Task T13.3: one OriginTracker for the app's whole lifetime -- shared by
+    # every request-path re-projection (routes/nodes.py's mutating endpoints)
+    # so a hub-side write's echo is correctly suppressed by the SAME live
+    # watcher daemon.serve wires up (see that module's docstring for why a
+    # per-request tracker would silently break echo suppression / cross-file
+    # move tracking: it must be a single, long-lived instance, never
+    # reconstructed per call).
+    app.state.origin_tracker = OriginTracker()
 
     deps.register_error_handlers(app)
     app.include_router(nodes.router)

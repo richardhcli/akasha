@@ -390,16 +390,23 @@ def serve(config: Config) -> None:
     Also starts the task T9.6 live filesystem :class:`~akasha.sync.watcher.Watcher`
     right after the startup reconcile, so a running daemon actually reacts
     to a vault file being edited rather than relying solely on process
-    restart or a manual ``POST /v1/sync/rescan``. Uses its OWN fresh
-    ``OriginTracker`` + ``Reconciler`` pair (constructed ONCE here and held
-    for the watcher's entire lifetime -- never a fresh one per event, or
-    echo suppression / cross-file move tracking would silently stop
-    working) -- deliberately NOT the startup reconcile's tracker, matching
-    ``reconcile_all``'s own docstring rationale: "a startup/rescan run has
-    no live filesystem watcher to share echo-suppression state with", and
-    every ``on_change`` call is idempotent regardless, so an unshared
-    tracker costs at most one redundant no-op cycle, never incorrect
-    state. Stopped in the same ``finally`` as ``gc_scheduler``.
+    restart or a manual ``POST /v1/sync/rescan``. Uses a fresh ``Reconciler``
+    (constructed ONCE here and held for the watcher's entire lifetime --
+    never a fresh one per event, or cross-file move tracking would silently
+    stop working) built around ``app.state.origin_tracker`` -- task T13.3:
+    THE SAME single, long-lived :class:`~akasha.sync.origin.OriginTracker`
+    instance ``api.app.create_app`` already hangs off ``app.state`` for the
+    request path's own re-projection calls (``routes/nodes.py``), never a
+    second/separate tracker -- so a write made on the request path (a
+    ``PATCH /v1/nodes/{id}`` re-projecting its managed file) is recognized
+    by THIS watcher as its own echo and never starts a second reconcile
+    cycle for the same write. Deliberately NOT the startup reconcile's
+    tracker, matching ``reconcile_all``'s own docstring rationale: "a
+    startup/rescan run has no live filesystem watcher to share
+    echo-suppression state with", and every ``on_change`` call is idempotent
+    regardless, so an unshared tracker there costs at most one redundant
+    no-op cycle, never incorrect state. Stopped in the same ``finally`` as
+    ``gc_scheduler``.
     """
     import uvicorn
 
@@ -431,7 +438,15 @@ def serve(config: Config) -> None:
             logger.info(f"startup reconcile complete: {json.dumps(summary)}")
             gc_scheduler.start()
 
-            watch_origin = OriginTracker()
+            # Task T13.3: share app.state.origin_tracker (the SAME instance
+            # routes/nodes.py's request-path re-projection writes through)
+            # rather than constructing a second, unshared tracker here.
+            # ``getattr`` with a fresh fallback keeps this robust against a
+            # stubbed/minimal ``app`` (e.g. a test double for ``create_app``
+            # that doesn't set every production attribute) without ever
+            # affecting the real, production ``create_app`` path, which
+            # always sets it (``api/app.py``).
+            watch_origin = getattr(app.state, "origin_tracker", None) or OriginTracker()
             watch_reconciler = reconcile.Reconciler(app.state.conn, watch_origin)
             watcher = Watcher(
                 app.state.conn,

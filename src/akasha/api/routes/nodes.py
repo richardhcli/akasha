@@ -14,6 +14,7 @@ rejects agents outright — never proposalized).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -26,6 +27,48 @@ from akasha.kernel.model import Facet
 from akasha.kernel.store import NeedsRedirectError, NodeNotFoundError
 
 router = APIRouter(prefix="/v1", tags=["nodes"])
+
+# Shared "akasha" logger (matches daemon.py's configure_logging target) --
+# a projection failure below is logged through it, never raised to the
+# caller (task T13.3).
+logger = logging.getLogger("akasha")
+
+
+def _reproject(request: Request, conn: Any, node_ids: list[str]) -> None:
+    """Best-effort re-projection of the managed file(s) that own ``node_ids`` (task T13.3).
+
+    Called AFTER the store transaction that changed ``node_ids`` has
+    already committed -- NEVER from inside it -- so a spoke-projection
+    failure can never roll back or fail a hub mutation that already
+    succeeded: the hub is the writer of record, and a file-backed spoke
+    projection is best-effort by doctrine (spec §1). Delegates entirely to
+    the existing ``reconcile.project_node_change`` helper (task T13.2) --
+    this function adds no reconcile logic of its own, only the request-path
+    wiring plus the swallow-and-log contract. Shares
+    ``request.app.state.origin_tracker`` (the single app-lifetime
+    ``OriginTracker`` ``api.app.create_app`` constructs, task T13.3 step 1)
+    with the daemon's live watcher (``daemon.py``'s ``serve``), so this
+    request-path write is recognized as an echo and never re-triggers a
+    second reconcile cycle.
+
+    Deferred import: mirrors the existing lazy-import pattern
+    ``store.commit_node`` already uses for ``invalidate`` (rule 0.4
+    precedent) -- avoids a module-import cycle between ``api.routes.nodes``
+    and ``sync.reconcile`` (which itself imports from deeper in the sync
+    package) since this route module is imported at app-construction time.
+
+    Any exception raised by the projection attempt is caught here and
+    logged (never re-raised) -- a projection error must NEVER turn an
+    already-successful mutation into an HTTP error.
+    """
+    from akasha.sync import reconcile
+
+    try:
+        reconcile.project_node_change(conn, node_ids, request.app.state.origin_tracker)
+    except Exception:
+        logger.exception(
+            "projection writeback failed for node_ids=%r after a successful mutation", node_ids
+        )
 
 
 class CreateNodeBody(BaseModel):
@@ -127,6 +170,12 @@ def create_node(
         if node.node_type == "claim"
         else []
     )
+    # T13.3: best-effort re-projection, after the commit above. A freshly
+    # created node normally owns no managed file yet (it stays unfiled
+    # until a human adds an anchor for it), so this is a no-op in the
+    # common case -- included for completeness/symmetry with every other
+    # mutating endpoint below.
+    _reproject(request, conn, [node.id])
     return {**_node_out(conn, node), "contradiction_candidates": candidates}
 
 
@@ -174,6 +223,7 @@ def patch_node(
         raise _not_found(exc) from exc
     except (ValueError, ValidationError) as exc:
         raise ApiError(400, "E_INVALID", str(exc)) from exc
+    _reproject(request, conn, [node_id])
     return _node_out(conn, node)
 
 
@@ -200,6 +250,7 @@ def delete_node(
         raise ApiError(409, exc.code, str(exc), {"node_id": exc.node_id}) from exc
     except NodeNotFoundError as exc:
         raise _not_found(exc) from exc
+    _reproject(request, conn, [node_id])
     return {"id": node_id, "deleted": True}
 
 
@@ -259,6 +310,10 @@ def split_node(
     # The inbound-reassignment queue is a M7/T7.6 addition; store.split_node
     # already reassigns live inbound edges to the first successor (zero
     # dangling). Return the redirect map now; the queue layers on later.
+    # T13.3: re-project both the tombstoned original (its managed file, if
+    # any, must lose the anchor) and each new successor (unfiled until a
+    # human adds one, so normally a no-op).
+    _reproject(request, conn, [node_id, *redirect.get(node_id, [])])
     return {"redirect": redirect}
 
 
@@ -284,12 +339,17 @@ def merge_nodes(
         raise _not_found(exc) from exc
     except ValueError as exc:
         raise ApiError(400, "E_INVALID", str(exc)) from exc
+    # T13.3: re-project both the survivor (node_id) and every retired id
+    # (each is now tombstoned -- its managed file, if any, must reflect
+    # that removal too).
+    _reproject(request, conn, [node_id, *payload.ids])
     return {"redirect": redirect}
 
 
 @router.post("/nodes/{node_id}/vet")
 def vet_node(
     node_id: str,
+    request: Request,
     conn: Any = Depends(get_conn),
     _ctx: auth.AuthContext = Depends(require_human),
 ) -> dict[str, Any]:
@@ -297,4 +357,5 @@ def vet_node(
         node = store.vet_node(conn, node_id)
     except NodeNotFoundError as exc:
         raise _not_found(exc) from exc
+    _reproject(request, conn, [node_id])
     return _node_out(conn, node)
