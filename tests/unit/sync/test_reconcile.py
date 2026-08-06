@@ -1147,3 +1147,175 @@ def test_golden_reconcile_case(tmp_path, case):
 
     actual_ops = [{"kind": op.kind, "node_id": op.node_id} for op in captured.get("ops", [])]
     assert actual_ops == expected_ops
+
+
+# =================================================================================
+# project_node_change (task T13.2, spec §4.8's hub-only branch + §1's
+# "hub is the writer of record, each file-backed spoke is a projection"; the
+# narrowest reading is docs/spec-questions.md's T13.3 entry)
+# =================================================================================
+
+
+def test_project_node_change_reprojects_owning_file(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    x = ids.mint()
+    _seed_node(conn, x, "claim", "original text")
+
+    base_text = render(parse(_managed(f"original text {contract_anchor(x)}\n")))
+    path = tmp_path / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    # Hub-side mutation (mirrors an API-driven PATCH /nodes/{id} commit) --
+    # nothing has touched the vault file itself.
+    store.commit_node(
+        conn, x, new_body="hub-edited text", change_class="patch", facets_touched=[], author="human"
+    )
+
+    origin = OriginTracker()
+    reconciled = reconcile.project_node_change(conn, [x], origin)
+
+    assert reconciled == [str(path)]
+    final = path.read_text(encoding="utf-8")
+    assert "hub-edited text" in final
+    assert base_store.get(conn, root_id, str(path)) == final
+
+
+def test_project_node_change_reprojects_checkbox_toggle(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    x = ids.mint()
+    _seed_node(conn, x, "task", "Buy milk", task_state="open")
+
+    base_text = render(parse(_managed(f"- [ ] Buy milk {contract_anchor(x)}\n")))
+    path = tmp_path / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    store.commit_node(
+        conn, x, task_state="done", change_class="patch", facets_touched=[], author="human"
+    )
+
+    origin = OriginTracker()
+    reconciled = reconcile.project_node_change(conn, [x], origin)
+
+    assert reconciled == [str(path)]
+    final = path.read_text(encoding="utf-8")
+    assert "- [x] Buy milk" in final
+
+
+def test_project_node_change_unfiled_node_is_noop(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    # A separate, unrelated node IS filed -- proves the empty result below
+    # is because the orphan is genuinely unowned, not because nothing in
+    # the DB is filed at all.
+    owned = ids.mint()
+    _seed_node(conn, owned, "claim", "filed text")
+    base_text = render(parse(_managed(f"filed text {contract_anchor(owned)}\n")))
+    path = tmp_path / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    # A node that was never projected into any managed file has no owner
+    # in the ProjectionIndex.
+    orphan = store.create_node(conn, node_type="claim", body="orphan text", author="human")
+
+    reconciled = reconcile.project_node_change(conn, [orphan.id], OriginTracker())
+
+    assert reconciled == []
+    # And nothing else got touched either -- the filed file is untouched.
+    assert path.read_text(encoding="utf-8") == base_text
+
+
+def test_project_node_change_dedupes_paths_for_multiple_nodes_in_same_file(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    x = ids.mint()
+    y = ids.mint()
+    _seed_node(conn, x, "claim", "first text")
+    _seed_node(conn, y, "claim", "second text")
+
+    base_text = render(
+        parse(_managed(f"first text {contract_anchor(x)}\n\nsecond text {contract_anchor(y)}\n"))
+    )
+    path = tmp_path / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    store.commit_node(
+        conn, x, new_body="first edited", change_class="patch", facets_touched=[], author="human"
+    )
+    store.commit_node(
+        conn, y, new_body="second edited", change_class="patch", facets_touched=[], author="human"
+    )
+
+    origin = OriginTracker()
+    reconciled = reconcile.project_node_change(conn, [x, y], origin)
+
+    # Both ids own the SAME path -- exactly one reconcile call, not two.
+    assert reconciled == [str(path)]
+    final = path.read_text(encoding="utf-8")
+    assert "first edited" in final
+    assert "second edited" in final
+
+
+def test_project_node_change_second_call_is_quiet_noop(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    x = ids.mint()
+    _seed_node(conn, x, "claim", "original text")
+
+    base_text = render(parse(_managed(f"original text {contract_anchor(x)}\n")))
+    path = tmp_path / "note.md"
+    path.write_text(base_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(path), base_text)
+
+    store.commit_node(
+        conn, x, new_body="hub-edited text", change_class="patch", facets_touched=[], author="human"
+    )
+
+    origin = OriginTracker()
+    reconciled = reconcile.project_node_change(conn, [x], origin)
+    assert reconciled == [str(path)]
+    final = path.read_text(encoding="utf-8")
+    assert "hub-edited text" in final
+
+    # The base snapshot was updated by the first call's base_store.put(H2),
+    # so a second immediate call has V == B == H: on_change's own quiet
+    # shortcut returns before ever reaching write_if_diff/kernel_apply.
+    # Commit count is the discriminating check -- unlike re-reading the
+    # same bytes back off disk, it can't pass by accident if the pipeline
+    # regressed into re-committing identical content on the second call.
+    commits_before = conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0]
+
+    # A second immediate call is idempotent end to end: still resolves the
+    # same owning path (the node is still filed), performs zero writes,
+    # and changes nothing on disk.
+    reconciled_again = reconcile.project_node_change(conn, [x], origin)
+    assert reconciled_again == [str(path)]
+    assert conn.execute("SELECT COUNT(*) FROM commits").fetchone()[0] == commits_before
+    assert path.read_text(encoding="utf-8") == final
+
+
+def test_project_node_change_skips_path_missing_from_disk(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    x = ids.mint()
+    _seed_node(conn, x, "claim", "original text")
+
+    base_text = render(parse(_managed(f"original text {contract_anchor(x)}\n")))
+    path = tmp_path / "note.md"
+    base_store.put(conn, root_id, str(path), base_text)
+    # Deliberately never write `path` to disk (or it vanished since the
+    # ProjectionIndex was built) -- mirrors reconcile_all's own
+    # FileNotFoundError handling exactly.
+
+    store.commit_node(
+        conn, x, new_body="hub-edited text", change_class="patch", facets_touched=[], author="human"
+    )
+
+    reconciled = reconcile.project_node_change(conn, [x], OriginTracker())
+
+    assert reconciled == []

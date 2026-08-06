@@ -1471,3 +1471,82 @@ def reconcile_all(
         "files_missing": files_missing,
         "reviews_open": reviews_open,
     }
+
+
+# --- API-mutation-triggered reprojection (task T13.2) -------------------------
+
+
+def project_node_change(
+    conn: sqlite3.Connection,
+    node_ids: list[str],
+    origin_tracker: OriginTracker,
+) -> list[str]:
+    """Re-run §4.8's ``on_change`` pipeline for the managed file(s) that own ``node_ids``.
+
+    Reusable library-level helper (build-plan T13.2); wiring a real HTTP
+    call site into this is a later task (T13.3) so the risky wiring lands
+    separately from this logic. Closes the gap
+    ``docs/spec-questions.md``'s T13.3 entry documents: today ``on_change``
+    has exactly three production entry points (daemon startup, a live
+    filesystem watcher event, ``POST /v1/sync/rescan``) and NONE of them
+    fires after a hub-side mutation (``PATCH /nodes/{id}``, the CLI, the
+    Web UI), so §4.8's own hub-only branch (``if V == B:
+    write_if_diff(path, H)``) never runs in response to that kind of edit
+    in production -- only in a test that calls ``Reconciler.on_change``
+    directly. That entry's binding narrowest reading (read in full before
+    implementing this function) is exactly what this helper implements:
+    after a hub-side commit, run the EXISTING ``on_change`` for only the
+    managed file(s) that already project the affected node(s), sharing the
+    caller's live :class:`~akasha.sync.origin.OriginTracker` so the
+    resulting write-back is echo-suppressed exactly as a watcher-driven
+    write already is (T13.3's whole reason for taking the tracker as a
+    parameter rather than constructing its own).
+
+    Resolution order, per node id: build a fresh :class:`ProjectionIndex`
+    from durable state (:meth:`ProjectionIndex.build` -- the same
+    "rebuildable at any time" index every other production caller uses,
+    never a live vault read), look up each id's owning path via
+    :meth:`ProjectionIndex.owner`, and de-duplicate the resulting paths
+    (two changed nodes projected into the SAME file trigger exactly one
+    ``on_change`` call for that file, not two). A node owned by no managed
+    file (``owner`` returns ``None``) contributes no path and no work --
+    it stays unfiled, still counted by ``GET /sync/export``'s
+    ``unfiled_node_count``; this function invents no "file assignment"
+    mechanism, which would be new spec (§1/§7 rule 0.2).
+
+    For each de-duplicated path, a fresh ``Reconciler(conn,
+    origin_tracker)`` is constructed and its existing ``on_change(path)``
+    is called verbatim -- this function never re-implements or duplicates
+    any piece of the §4.8 pipeline (no second projection/diff/write-back
+    path). A path that has vanished from disk between the index build and
+    this call is not a crash -- mirrors ``reconcile_all``'s existing
+    ``FileNotFoundError`` handling exactly: the path is skipped (excluded
+    from the returned list) rather than raising, so one missing file never
+    aborts reprojection of the others.
+
+    Returns the list of paths actually reconciled (i.e. for which
+    ``on_change`` ran to completion without raising ``FileNotFoundError``),
+    in first-encountered order over ``node_ids``. Idempotent like every
+    other ``on_change`` caller: a second immediate call over the same
+    ``node_ids`` re-derives the identical ``(V, B, H)`` triple and hits the
+    quiet shortcut (``write_if_diff`` returns ``False``), a no-op.
+    """
+    index = ProjectionIndex.build(conn)
+    paths: list[str] = []
+    seen: set[str] = set()
+    for node_id in node_ids:
+        path = index.owner(node_id)
+        if path is None or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+
+    reconciled: list[str] = []
+    for path in paths:
+        reconciler = Reconciler(conn, origin_tracker)
+        try:
+            reconciler.on_change(path)
+        except FileNotFoundError:
+            continue
+        reconciled.append(path)
+    return reconciled
