@@ -25,6 +25,12 @@ uv run akasha --token "$AKASHA_TOKEN" set <id> --body "revised text" --class min
 # search
 uv run akasha --token "$AKASHA_TOKEN" search "some query"
 
+# graph reads (build-plan T14.1) -- plain output is one ASCII line per
+# edge/commit; add --json for the machine-readable cli/v1 envelope
+uv run akasha --token "$AKASHA_TOKEN" neighborhood <id>
+uv run akasha --token "$AKASHA_TOKEN" neighborhood <id> --hops 2
+uv run akasha --token "$AKASHA_TOKEN" history <id>
+
 # review queue
 uv run akasha --token "$AKASHA_TOKEN" review list
 uv run akasha --token "$AKASHA_TOKEN" review resolve <review-id> still_holds

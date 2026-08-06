@@ -527,6 +527,57 @@ def search(ctx: typer.Context, q: str) -> None:
     _echo_ok(state, result)
 
 
+# --- neighborhood/history ----------------------------------------------------
+
+
+@app.command()
+def neighborhood(
+    ctx: typer.Context,
+    node_id: str,
+    hops: int = typer.Option(1, "--hops", help="expansion radius (default 1)"),
+) -> None:
+    """GET /v1/nodes/{id}/neighborhood?hops= (spec §4.11, build-plan T14.1).
+
+    Read-only (does not use ``_mutate``/``--dry-run`` -- see
+    ``tests/integration/test_cli_dry_run.py``'s AST meta-test, which only
+    scans for mutating HTTP verbs). Plain (non-``--json``) output is one
+    ASCII-only line per live edge: ``src -edge_type-> dst``, plus a
+    trailing ``(facet: <facet_binding>)`` when the edge carries one --
+    deliberately no graph-drawing/box characters (T9.9 Windows-console
+    precedent, module header above).
+    """
+    state = _state(ctx)
+    result = _request(
+        state, "GET", f"/v1/nodes/{node_id}/neighborhood", params={"hops": hops}
+    )
+    if state.json_mode:
+        _echo_ok(state, result)
+        return
+    for edge in result["edges"]:
+        line = f"{edge['src']} -{edge['edge_type']}-> {edge['dst']}"
+        if edge.get("facet_binding"):
+            line += f" (facet: {edge['facet_binding']})"
+        typer.echo(line)
+
+
+@app.command()
+def history(ctx: typer.Context, node_id: str) -> None:
+    """GET /v1/nodes/{id}/history (spec §4.11, build-plan T14.1).
+
+    Read-only (does not use ``_mutate``/``--dry-run``, same reasoning as
+    ``neighborhood`` above). Plain (non-``--json``) output is one
+    ASCII-only line per commit, oldest first (the endpoint's own order,
+    spec §4.5 ``store.history``): ``hash change_class message ts``.
+    """
+    state = _state(ctx)
+    result = _request(state, "GET", f"/v1/nodes/{node_id}/history")
+    if state.json_mode:
+        _echo_ok(state, result)
+        return
+    for commit in result["history"]:
+        typer.echo(f"{commit['hash']} {commit['change_class']} {commit['message']} {commit['ts']}")
+
+
 # --- review ------------------------------------------------------------------
 
 
