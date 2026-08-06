@@ -417,9 +417,14 @@ console.debug("tm ui loaded");
     );
   }
 
-  function postJson(path, token, payload) {
+  // `method` (task T13.5): optional, defaults to "POST" so every existing
+  // call site (unchanged) still sends exactly what it always sent. Added
+  // rather than a second fetch wrapper so the toggle control (below) can
+  // PATCH through the same JSON-body/error-shape plumbing every other
+  // mutating view already uses.
+  function postJson(path, token, payload, method) {
     return fetch(path, {
-      method: "POST",
+      method: method || "POST",
       headers: {
         Authorization: "Bearer " + token,
         "Content-Type": "application/json",
@@ -435,6 +440,194 @@ console.debug("tm ui loaded");
           return { ok: resp.ok, status: resp.status, data: data };
         });
     });
+  }
+
+  // Task section (task T13.5, spec §4.13 / §4.11 PATCH /nodes/{id} +
+  // GET /nodes/{id}/neighborhood, PRD §8 story 8). Gated on
+  // `node.task_state !== null` -- the SAME gate `tms/triggers.py`'s
+  // `_cond_all_subtasks_closed` uses server-side ("composes is also used
+  // for non-task hierarchy"), so a non-task node (task_state === null)
+  // renders no section at all here: no visual change from before this
+  // task (step 1). Also surfaces `maturity`, which `GET /nodes/{id}` has
+  // always returned but no view has ever rendered before this task.
+  //
+  // Subtasks (outbound composes children) and the supertask (inbound
+  // composes parent) come from the ALREADY-FETCHED neighborhood payload
+  // (no second neighborhood call); each linked task's own state is then
+  // fetched once via GET /v1/nodes/{id} -- mirrors T14.5's
+  // Promise.all-of-distinct-ids neighbor-fetch pattern, scoped to just
+  // the composes-typed ids this section needs, and reuses the existing
+  // `nodeLink` helper (D8) -- no second link builder.
+  //
+  // R9 copy discipline: never the literal word "true"; a supertask whose
+  // subtasks are all closed reads "flagged for review" (driven by a real
+  // open `subtasks_closed` review row already fetched by initNodeView),
+  // never "complete". Design invariant 3: this section never sets a
+  // SUPERTASK's own task_state itself -- the toggle below only ever
+  // PATCHes the node currently being viewed, in response to a direct
+  // human click, exactly like every other view's mutation controls.
+  //
+  // SPEC-QUESTION (T13.5): build-plan T13.5's step 1 reads "display
+  // task_state for task-type nodes ... and display the node's maturity
+  // (already returned by GET /nodes/{id}, currently rendered nowhere)"
+  // immediately followed by "Non-task nodes must look exactly as they do
+  // today" -- taken together verbatim, a maturity display that applied to
+  // EVERY node type would itself be a visual change for non-task nodes,
+  // contradicting the second sentence. Narrowest reading adopted here:
+  // maturity is surfaced only inside this task-gated section, alongside
+  // task_state, not as a separate always-on addition to `renderBody` for
+  // every node type. Non-blocking; logged in docs/spec-questions.md.
+  function renderTaskComposesList(title, className, ids, nodeMap) {
+    var div = el("div", { className: className });
+    div.appendChild(el("h4", { text: title }));
+    if (ids.length === 0) {
+      div.appendChild(el("p", { text: "None." }));
+      return div;
+    }
+    var ul = el("ul");
+    ids.forEach(function (id) {
+      var li = el("li");
+      li.appendChild(nodeLink(id, id));
+      var neighbor = nodeMap[id];
+      if (neighbor && (neighbor.task_state === "open" || neighbor.task_state === "done")) {
+        li.appendChild(
+          document.createTextNode(
+            " (" + (neighbor.task_state === "done" ? "Done" : "Open") + ")"
+          )
+        );
+      }
+      ul.appendChild(li);
+    });
+    div.appendChild(ul);
+    return div;
+  }
+
+  function renderTaskStructure(container, nodeId, neighborhood, token) {
+    container.textContent = "";
+    var edges = neighborhood.edges || [];
+
+    // Same dedup idiom T14.5's `renderNeighborhood` uses for `neighborIds`
+    // (an object-as-set, then `Object.keys`) -- `create_edge` has no
+    // uniqueness constraint, so two `composes` edges between the same pair
+    // are possible; this keeps both the fetch list and each rendered list
+    // to one entry per distinct id (step 2: "one GET per distinct id").
+    var childIdSet = {};
+    var parentIdSet = {};
+    edges.forEach(function (edge) {
+      if (edge.edge_type !== "composes") {
+        return;
+      }
+      if (edge.src === nodeId) {
+        childIdSet[edge.dst] = true;
+      }
+      if (edge.dst === nodeId) {
+        parentIdSet[edge.src] = true;
+      }
+    });
+    var childIds = Object.keys(childIdSet);
+    var parentIds = Object.keys(parentIdSet);
+
+    var fetchIdSet = {};
+    childIds.forEach(function (id) {
+      fetchIdSet[id] = true;
+    });
+    parentIds.forEach(function (id) {
+      fetchIdSet[id] = true;
+    });
+    var fetchIds = Object.keys(fetchIdSet);
+
+    Promise.all(
+      fetchIds.map(function (id) {
+        return fetchJson("/v1/nodes/" + encodeURIComponent(id), token)
+          .then(function (n) {
+            return [id, n];
+          })
+          .catch(function () {
+            return [id, null];
+          });
+      })
+    ).then(function (pairs) {
+      var nodeMap = {};
+      pairs.forEach(function (pair) {
+        if (pair[1]) {
+          nodeMap[pair[0]] = pair[1];
+        }
+      });
+      container.textContent = "";
+      container.appendChild(
+        renderTaskComposesList("Subtasks", "task-subtasks", childIds, nodeMap)
+      );
+      container.appendChild(
+        renderTaskComposesList("Supertask", "task-supertask", parentIds, nodeMap)
+      );
+    });
+  }
+
+  function renderTaskSection(container, nodeId, node, neighborhood, reviews, token, onToggled) {
+    container.textContent = "";
+    if (node.task_state !== "open" && node.task_state !== "done") {
+      return; // non-task node: section stays empty (step 1)
+    }
+    container.appendChild(el("h2", { text: "Task" }));
+    container.appendChild(
+      el("p", {
+        text: "State: " + (node.task_state === "done" ? "Done" : "Open"),
+        className: "task-state",
+      })
+    );
+    container.appendChild(
+      el("p", { text: "Maturity: " + node.maturity, className: "task-maturity" })
+    );
+
+    var subtasksClosedReview = (reviews.reviews || []).find(function (r) {
+      return r.cause_kind === "subtasks_closed";
+    });
+    if (subtasksClosedReview) {
+      container.appendChild(
+        el("p", {
+          text: "All subtasks closed -- flagged for review.",
+          className: "task-flagged",
+        })
+      );
+    }
+
+    var errorEl = el("p", { className: "task-toggle-error" });
+    var toggleBtn = el("button", {
+      text: node.task_state === "done" ? "Reopen" : "Mark done",
+      className: "task-toggle",
+    });
+    toggleBtn.addEventListener("click", function () {
+      errorEl.textContent = "";
+      var nextState = node.task_state === "done" ? "open" : "done";
+      postJson(
+        "/v1/nodes/" + encodeURIComponent(nodeId),
+        token,
+        { task_state: nextState, change_class: "patch", facets_touched: [] },
+        "PATCH"
+      )
+        .then(function (result) {
+          if (result.ok) {
+            // Re-render from the server's own response -- never
+            // optimistically from `nextState` before the server confirms
+            // (step 3).
+            onToggled(result.data);
+          } else {
+            var message =
+              (result.data && result.data.error && result.data.error.message) ||
+              "Toggle failed (" + result.status + ").";
+            errorEl.textContent = message;
+          }
+        })
+        .catch(function (err) {
+          errorEl.textContent = "Toggle failed: " + err.message;
+        });
+    });
+    container.appendChild(toggleBtn);
+    container.appendChild(errorEl);
+
+    var structureEl = el("div", { className: "task-structure" });
+    container.appendChild(structureEl);
+    renderTaskStructure(structureEl, nodeId, neighborhood, token);
   }
 
   // Review view (task T8.3, spec §4.13 / §4.9). One-click resolutions for
@@ -697,6 +890,7 @@ console.debug("tm ui loaded");
     var badgeEl = document.getElementById("node-badge");
     var bodyEl = document.getElementById("node-body");
     var facetsEl = document.getElementById("node-facets");
+    var taskEl = document.getElementById("node-task");
     var neighborhoodEl = document.getElementById("node-neighborhood");
     var historyEl = document.getElementById("node-history");
     var encodedId = encodeURIComponent(nodeId);
@@ -720,15 +914,30 @@ console.debug("tm ui loaded");
       fetchJson("/v1/review?status=open&node=" + encodedId, token),
     ])
       .then(function (results) {
-        var node = results[0];
         var neighborhood = results[1];
         var history = results[2];
         var reviews = results[3];
-        renderBody(bodyEl, node);
-        renderFacets(facetsEl, node);
+        renderBody(bodyEl, results[0]);
+        renderFacets(facetsEl, results[0]);
         renderNeighborhood(neighborhoodEl, neighborhood, nodeId, token);
         renderHistory(historyEl, history);
-        renderBadge(badgeEl, node, reviews);
+        renderBadge(badgeEl, results[0], reviews);
+        // T13.5: re-render the Task section from the toggle PATCH's own
+        // response (`onTaskToggled`'s argument), never from local state --
+        // `renderTaskSection` re-registers this same callback on every
+        // render so a second toggle click keeps working.
+        function onTaskToggled(updatedNode) {
+          renderTaskSection(
+            taskEl,
+            nodeId,
+            updatedNode,
+            neighborhood,
+            reviews,
+            token,
+            onTaskToggled
+          );
+        }
+        renderTaskSection(taskEl, nodeId, results[0], neighborhood, reviews, token, onTaskToggled);
       })
       .catch(function (err) {
         renderNotice(app, "Failed to load node: " + err.message);
