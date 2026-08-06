@@ -589,6 +589,97 @@ console.debug("tm ui loaded");
     load();
   }
 
+  // Link form (task T14.6, spec §4.11 POST /edges facet_span / PRD R8): the
+  // only UI affordance that ever POSTs /v1/edges. Renders a target-body
+  // preview (server free-text, textContent only -- same XSS discipline as
+  // renderBody) so the human can select a real span of the TARGET's body
+  // with plain window.getSelection() (step 2: no editor library, no new
+  // dependency) instead of retyping it. Submits {src: this node, dst, ...}
+  // to the EXISTING endpoint verbatim; server-side validation (facet_binding
+  // required for justification edges, spec §4.2) is never duplicated here
+  // (step 4) -- a 400 is shown using the server's own message text, and a
+  // 404 (linking to a nonexistent target, step 5) renders the same way,
+  // since both come back through the identical `data.error.message` path.
+  function renderLinkTargetPreview(container, node) {
+    container.textContent = "";
+    container.appendChild(
+      el("p", { text: node.body, className: "link-target-body" })
+    );
+  }
+
+  function initLinkForm(nodeId, token, onLinked) {
+    var formEl = document.getElementById("link-form");
+    if (!formEl) {
+      return;
+    }
+    var targetInput = document.getElementById("link-target-id");
+    var previewBtn = document.getElementById("link-preview-btn");
+    var previewEl = document.getElementById("link-target-preview");
+    var edgeTypeSelect = document.getElementById("link-edge-type");
+    var spanInput = document.getElementById("link-span");
+    var useSelectionBtn = document.getElementById("link-use-selection-btn");
+    var errorEl = document.getElementById("link-error");
+
+    previewBtn.addEventListener("click", function () {
+      errorEl.textContent = "";
+      var targetId = targetInput.value.trim();
+      if (!targetId) {
+        renderNotice(previewEl, "Enter a target node id first.");
+        return;
+      }
+      fetchJson("/v1/nodes/" + encodeURIComponent(targetId), token)
+        .then(function (node) {
+          renderLinkTargetPreview(previewEl, node);
+        })
+        .catch(function (err) {
+          renderNotice(previewEl, "Could not load target: " + err.message);
+        });
+    });
+
+    // Standard selection API only (step 2): whatever text is currently
+    // highlighted anywhere on the page (in practice, inside the preview
+    // rendered above) becomes the span. No validation of what was selected
+    // -- the server is the sole authority on whether the span is usable.
+    useSelectionBtn.addEventListener("click", function () {
+      var selection = window.getSelection().toString();
+      if (selection) {
+        spanInput.value = selection;
+      }
+    });
+
+    formEl.addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      errorEl.textContent = "";
+      var targetId = targetInput.value.trim();
+      var payload = {
+        src: nodeId,
+        dst: targetId,
+        edge_type: edgeTypeSelect.value,
+        provenance: "human",
+      };
+      var span = spanInput.value.trim();
+      if (span) {
+        payload.facet_span = span;
+      }
+      postJson("/v1/edges", token, payload)
+        .then(function (result) {
+          if (result.ok) {
+            spanInput.value = "";
+            errorEl.textContent = "";
+            onLinked();
+          } else {
+            var message =
+              (result.data && result.data.error && result.data.error.message) ||
+              "Link failed (" + result.status + ").";
+            errorEl.textContent = message;
+          }
+        })
+        .catch(function (err) {
+          errorEl.textContent = "Link failed: " + err.message;
+        });
+    });
+  }
+
   function initNodeView() {
     var app = document.getElementById("app");
     var token = getToken();
@@ -609,6 +700,18 @@ console.debug("tm ui loaded");
     var neighborhoodEl = document.getElementById("node-neighborhood");
     var historyEl = document.getElementById("node-history");
     var encodedId = encodeURIComponent(nodeId);
+
+    function refreshNeighborhood() {
+      fetchJson("/v1/nodes/" + encodedId + "/neighborhood", token)
+        .then(function (neighborhood) {
+          renderNeighborhood(neighborhoodEl, neighborhood, nodeId, token);
+        })
+        .catch(function (err) {
+          renderNotice(neighborhoodEl, "Failed to refresh neighborhood: " + err.message);
+        });
+    }
+
+    initLinkForm(nodeId, token, refreshNeighborhood);
 
     Promise.all([
       fetchJson("/v1/nodes/" + encodedId, token),

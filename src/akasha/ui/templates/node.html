@@ -20,6 +20,33 @@
     <section id="node-badge"></section>
     <section id="node-body"></section>
     <section id="node-facets"></section>
+    <section id="node-link-form">
+      <h2>Link this node</h2>
+      <form id="link-form">
+        <label>Target node id:
+          <input id="link-target-id" type="text" name="target">
+        </label>
+        <button type="button" id="link-preview-btn">Preview target</button>
+        <div id="link-target-preview"></div>
+        <label>Edge type:
+          <select id="link-edge-type" name="edge_type">
+            <option value="composes">composes</option>
+            <option value="supports">supports</option>
+            <option value="contradicts">contradicts</option>
+            <option value="depends_on">depends_on</option>
+            <option value="derived_from">derived_from</option>
+            <option value="cites">cites</option>
+            <option value="redirects_to">redirects_to</option>
+          </select>
+        </label>
+        <label>Span (paste, or select text in the target preview above and click "Use selection"):
+          <textarea id="link-span" name="facet_span"></textarea>
+        </label>
+        <button type="button" id="link-use-selection-btn">Use selection</button>
+        <button type="submit">Create link</button>
+      </form>
+      <p id="link-error"></p>
+    </section>
     <section id="node-neighborhood"></section>
     <section id="node-history"></section>
   </main>
