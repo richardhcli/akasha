@@ -39,6 +39,7 @@ class CreateNodeBody(BaseModel):
 class PatchNodeBody(BaseModel):
     body: str | None = None
     facets: list[Facet] | None = None
+    task_state: str | None = None
     change_class: str
     facets_touched: list[str] = []
     message: str = ""
@@ -142,9 +143,21 @@ def patch_node(
         store.get_node(conn, node_id)  # existence check -> 404 before proposalizing/mutating
     except NodeNotFoundError as exc:
         raise _not_found(exc) from exc
+    if "task_state" in payload.model_fields_set and payload.task_state not in (
+        "open",
+        "done",
+    ):
+        raise ApiError(
+            400,
+            "E_INVALID",
+            f"task_state must be one of 'open', 'done'; got {payload.task_state!r}",
+        )
     review = mutation_gate(conn, ctx, request, node_id=node_id, payload=payload.model_dump())
     if review is not None:
         return _proposal_response(response, review)
+    commit_kwargs: dict[str, Any] = {}
+    if "task_state" in payload.model_fields_set:
+        commit_kwargs["task_state"] = payload.task_state
     try:
         node = store.commit_node(
             conn,
@@ -155,6 +168,7 @@ def patch_node(
             facets_touched=payload.facets_touched,
             author=ctx.token_id,
             message=payload.message,
+            **commit_kwargs,
         )
     except NodeNotFoundError as exc:
         raise _not_found(exc) from exc

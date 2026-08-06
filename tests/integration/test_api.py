@@ -109,6 +109,101 @@ def test_nodes_patch_commits_edit(api):
     assert len(hist) == 2
 
 
+def test_nodes_patch_task_state_done_closes_task(api):
+    """T13.1: PATCH task_state="done" closes a task via the standard commit path."""
+    client, h = api["client"], api["human"]
+    node = _create(client, h, node_type="task", body="a task", task_state="open").json()
+    assert node["task_state"] == "open"
+    resp = client.patch(
+        f"/v1/nodes/{node['id']}",
+        json={"task_state": "done", "change_class": "patch", "facets_touched": []},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["task_state"] == "done"
+    got = client.get(f"/v1/nodes/{node['id']}", headers=h).json()
+    assert got["task_state"] == "done"
+
+
+def test_nodes_patch_omitting_task_state_leaves_it_untouched(api):
+    """Omitted field must be byte-identical to today's behavior (no clearing)."""
+    client, h = api["client"], api["human"]
+    node = _create(client, h, node_type="task", body="a task", task_state="open").json()
+    resp = client.patch(
+        f"/v1/nodes/{node['id']}",
+        json={"body": "revised", "change_class": "patch", "facets_touched": []},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["task_state"] == "open"
+
+
+def test_nodes_patch_task_state_invalid_value_returns_400(api):
+    client, h = api["client"], api["human"]
+    node = _create(client, h, node_type="task", body="a task", task_state="open").json()
+    resp = client.patch(
+        f"/v1/nodes/{node['id']}",
+        json={"task_state": "closed", "change_class": "patch", "facets_touched": []},
+        headers=h,
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "E_INVALID"
+    # node untouched
+    got = client.get(f"/v1/nodes/{node['id']}", headers=h).json()
+    assert got["task_state"] == "open"
+
+
+def test_nodes_patch_task_state_closing_last_subtask_enqueues_one_review(api):
+    """T13.1 DoD: closing the last open subtask through this endpoint enqueues
+    exactly one subtasks_closed review on the parent and never auto-closes it
+    -- asserted end-to-end through the HTTP route (no direct trigger call)."""
+    client, h, conn = api["client"], api["human"], api["conn"]
+    supertask = _create(client, h, node_type="task", body="supertask", task_state="open").json()
+    children = [
+        _create(client, h, node_type="task", body=f"child-{i}", task_state="open").json()
+        for i in range(3)
+    ]
+    for child in children:
+        resp = client.post(
+            "/v1/edges",
+            json={
+                "src": supertask["id"],
+                "dst": child["id"],
+                "edge_type": "composes",
+                "facet_binding": None,
+                "provenance": "human",
+            },
+            headers=h,
+        )
+        assert resp.status_code == 201
+
+    def open_reviews():
+        return store.find_open_reviews(
+            conn, node_id=supertask["id"], cause_kind="subtasks_closed"
+        )
+
+    for child in children[:2]:
+        resp = client.patch(
+            f"/v1/nodes/{child['id']}",
+            json={"task_state": "done", "change_class": "patch", "facets_touched": []},
+            headers=h,
+        )
+        assert resp.status_code == 200
+        assert open_reviews() == []
+
+    resp = client.patch(
+        f"/v1/nodes/{children[2]['id']}",
+        json={"task_state": "done", "change_class": "patch", "facets_touched": []},
+        headers=h,
+    )
+    assert resp.status_code == 200
+    reviews = open_reviews()
+    assert len(reviews) == 1
+    assert reviews[0]["cause_kind"] == "subtasks_closed"
+    # never auto-closed
+    assert store.get_node(conn, supertask["id"]).task_state == "open"
+
+
 def test_nodes_get_as_of_returns_earlier_body(api):
     client, h = api["client"], api["human"]
     node = _create(client, h).json()

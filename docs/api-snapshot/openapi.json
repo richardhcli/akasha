@@ -269,6 +269,17 @@
             "default": "",
             "title": "Message",
             "type": "string"
+          },
+          "task_state": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task State"
           }
         },
         "required": [
