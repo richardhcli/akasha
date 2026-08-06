@@ -11,7 +11,10 @@ by the (non-store) contract layer (``contract/render.py``,
 ``contract/linter.py``) for the same reason, so this is not a rule-0.4
 violation.
 
-Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon/init/sync``.
+Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon/init/sync``,
+plus build-plan additions ``neighborhood``/``history`` (T14.1) and
+``edge add``/``edge rm`` (T14.2, both over the already-shipped
+``POST /v1/edges``/``DELETE /v1/edges/{id}``, spec §4.11).
 Unlike every other verb, ``daemon`` does not speak HTTP to an
 already-running server -- it *is* the server process: it loads config,
 acquires the single-instance lock (``akasha.daemon.single_instance_lock``,
@@ -112,9 +115,11 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 review_app = typer.Typer(add_completion=False, no_args_is_help=True)
 token_app = typer.Typer(add_completion=False, no_args_is_help=True)
 sync_app = typer.Typer(add_completion=False, no_args_is_help=True)
+edge_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(review_app, name="review")
 app.add_typer(token_app, name="token")
 app.add_typer(sync_app, name="sync")
+app.add_typer(edge_app, name="edge")
 
 
 class ChangeClass(str, Enum):
@@ -196,6 +201,22 @@ def _exit_code_for(status_code: int, code: str) -> int:
     conflict-ish code) -> 4; everything else the server returns -> 1
     (usage errors, code 2, are reserved for this CLI's own argument
     parsing — see module docstring).
+
+    # SPEC-QUESTION (T14.2): ``POST /v1/edges``' facet-binding-rule
+    # rejection (a justification edge with no ``facet_binding``) is a
+    # ``400 E_INVALID`` (``api/routes/edges.py``), which this mapping
+    # sends to exit 1 — spec §4.12's exit-code table reads "4
+    # conflict/violation/needs-redirect", and every existing use of the
+    # word "violation" elsewhere in this codebase (``cause_kind="violation"``
+    # review items, ``sync/reconcile.py``) names a *contract*-violation
+    # concept unrelated to generic request validation, and ``E_INVALID``
+    # is used identically (400, exit 1) by every other verb's own
+    # server-side validation (e.g. ``new`` with a malformed ``node_type``,
+    # ``sync add`` with a bad root path) with no dedicated test anywhere
+    # pinning a different exit code for it. Narrowest reading: leave this
+    # shared mapping untouched rather than widen it (a cross-cutting
+    # change touching every verb, not scoped to edges) — see
+    # docs/spec-questions.md T14.2 entry.
     """
     if status_code == 404 or code == "E_NOT_FOUND":
         return 3
@@ -539,6 +560,96 @@ def search(ctx: typer.Context, q: str) -> None:
     """GET /v1/search?q=."""
     state = _state(ctx)
     result = _request(state, "GET", "/v1/search", params={"q": q})
+    _echo_ok(state, result)
+
+
+# --- edge ------------------------------------------------------------------
+
+
+@edge_app.command("add")
+def edge_add(
+    ctx: typer.Context,
+    src: str,
+    dst: str,
+    edge_type: str = typer.Argument(
+        ...,
+        help="composes|supports|contradicts|depends_on|derived_from|cites|redirects_to",
+    ),
+    facet_binding: str | None = typer.Option(
+        None,
+        "--facet-binding",
+        help="facet id on dst, or '*' -- required for justification edge types (spec §4.2)",
+    ),
+    facet_span: str | None = typer.Option(
+        None,
+        "--facet-span",
+        help=(
+            "highlighted span on dst -- mints a brand-new facet there and forces "
+            "facet_binding to it, ignoring --facet-binding if also passed (task T7.7)"
+        ),
+    ),
+    mode: str = typer.Option("track", "--mode", help="track|pin (default: track)"),
+    pinned_commit: str | None = typer.Option(
+        None, "--pinned-commit", help="commit hash to pin to (only meaningful with --mode pin)"
+    ),
+) -> None:
+    """POST /v1/edges (spec §4.11, build-plan T14.2).
+
+    Pure client of the endpoint: the facet-binding validation rule (spec
+    §4.2 -- a justification edge type requires a non-``None``
+    ``facet_binding``; ``None`` is legal only for ``composes``/
+    ``redirects_to``) is enforced **server-side only**, exactly like
+    ``--facet-span``'s facet-minting (T7.7) is server-side only. This verb
+    never duplicates either rule; a violation reaches the caller as the
+    server's own ``400 E_INVALID`` message, mapped by ``_exit_code_for``
+    like every other ``E_INVALID`` response across this CLI (see
+    ``_exit_code_for``'s docstring -- ``E_INVALID`` is not in the
+    conflict/violation/needs-redirect bucket, so it is exit 1, matching
+    every other validation error this CLI already surfaces, e.g. ``new``'s
+    invalid ``node_type``).
+
+    ``--facet-binding`` and ``--facet-span`` are mutually meaningful but
+    not client-validated against each other -- both pass straight through
+    to ``CreateEdgeBody`` and the server resolves precedence (a supplied
+    ``facet_span`` always wins, forcing ``facet_binding`` to the newly
+    minted facet's id).
+
+    ``provenance`` is always ``"human"`` -- this CLI is a human-operated
+    surface, the same value the Web UI's link form already sends
+    (``ui/static/app.js``, task T14.6); it is not exposed as a flag
+    (spec §4.12's CLI verb grammar does not name one, and ``provenance``
+    is not a token-class distinction -- agent-token writes are rewritten
+    into review-queue proposals by ``mutation_gate`` regardless of this
+    field, see ``api/routes/edges.py``).
+    """
+    state = _state(ctx)
+    payload: dict[str, Any] = {
+        "src": src,
+        "dst": dst,
+        "edge_type": edge_type,
+        "provenance": "human",
+        "mode": mode,
+    }
+    if facet_binding is not None:
+        payload["facet_binding"] = facet_binding
+    if facet_span is not None:
+        payload["facet_span"] = facet_span
+    if pinned_commit is not None:
+        payload["pinned_commit"] = pinned_commit
+    result = _mutate(state, "POST", "/v1/edges", payload)
+    _echo_ok(state, result)
+
+
+@edge_app.command("rm")
+def edge_rm(ctx: typer.Context, edge_id: str) -> None:
+    """DELETE /v1/edges/{id} (spec §4.11, build-plan T14.2).
+
+    A SOFT retract (``store.retract_edge`` sets ``retracted_at``; the
+    source/target nodes are untouched and stay live) -- same semantics as
+    the server route's own docstring.
+    """
+    state = _state(ctx)
+    result = _mutate(state, "DELETE", f"/v1/edges/{edge_id}")
     _echo_ok(state, result)
 
 

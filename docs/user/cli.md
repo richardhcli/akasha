@@ -35,6 +35,21 @@ uv run akasha --token "$AKASHA_TOKEN" neighborhood <id>
 uv run akasha --token "$AKASHA_TOKEN" neighborhood <id> --hops 2
 uv run akasha --token "$AKASHA_TOKEN" history <id>
 
+# build the definition DAG (build-plan T14.2) -- a facet-bound justification
+# edge; quote '*' so your shell doesn't glob it
+uv run akasha --token "$AKASHA_TOKEN" edge add <src-id> <dst-id> depends_on --facet-binding '*'
+uv run akasha --token "$AKASHA_TOKEN" edge add <src-id> <dst-id> depends_on --facet-binding <facet-id>
+
+# or mint a brand-new facet on the target from a highlighted span and bind
+# to it in one step (facets-from-spans capture, task T7.7)
+uv run akasha --token "$AKASHA_TOKEN" edge add <src-id> <dst-id> depends_on --facet-span "the highlighted text"
+
+# composes/redirects_to are the only edge types that allow no facet binding
+uv run akasha --token "$AKASHA_TOKEN" edge add <parent-id> <child-id> composes
+
+# retract an edge (soft -- both endpoint nodes stay live)
+uv run akasha --token "$AKASHA_TOKEN" edge rm <edge-id>
+
 # review queue
 uv run akasha --token "$AKASHA_TOKEN" review list
 uv run akasha --token "$AKASHA_TOKEN" review resolve <review-id> still_holds
@@ -53,5 +68,6 @@ uv run akasha --token "$AKASHA_TOKEN" sync add /path/to/vault --name my-vault
 - `--base-url` — point at a non-default daemon (defaults to `http://127.0.0.1:7433`).
 - `--token` — bearer token; can also be set via the `AKASHA_TOKEN` env var pattern shown in the quickstart (export it yourself, the CLI itself only reads `--token`).
 - `set --task-state open|done` — only sent when explicitly passed; an omitted flag leaves an existing task's `task_state` unchanged (`docs/mvp-spec.md` §4.12, task T13.4).
+- `edge add SRC DST TYPE` (build-plan T14.2) — `TYPE` is one of `composes|supports|contradicts|depends_on|derived_from|cites|redirects_to` (`docs/mvp-spec.md` §4.2). The five justification types (`supports|contradicts|depends_on|derived_from|cites`) **require** `--facet-binding ID` or `--facet-binding '*'`; omitting it on one of those types is rejected by the daemon itself (a `400`, surfaced verbatim, never re-implemented client-side) — `composes`/`redirects_to` are the only two types that accept no binding. `--facet-span TEXT` mints a brand-new facet on the target node from that text and binds to it, overriding any `--facet-binding` also passed.
 
 Agent-class tokens do not mutate directly: every write becomes a review-queue proposal (`docs/mvp-spec.md` §4.11). Bootstrapping the first human token is not yet CLI-supported — see [`quickstart.md`](quickstart.md) step 2.

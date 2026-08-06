@@ -190,6 +190,22 @@ DRY_RUN_CASES: list[DryRunCase] = [
         path="/v1/sync/roots",
         body_check=_assert_body_has("name", "root_path"),
     ),
+    DryRunCase(
+        id="edge add",
+        argv=["edge", "add", "srcnode1", "dstnode1", "supports", "--facet-binding", "*"],
+        method="POST",
+        path="/v1/edges",
+        body_check=_assert_body_has(
+            "src", "dst", "edge_type", "provenance", "mode", "facet_binding"
+        ),
+    ),
+    DryRunCase(
+        id="edge rm",
+        argv=["edge", "rm", "dummyedge1"],
+        method="DELETE",
+        path="/v1/edges/dummyedge1",
+        body_check=_assert_body_is_none,
+    ),
 ]
 
 
