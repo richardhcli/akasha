@@ -188,6 +188,46 @@ def test_set_missing_node_returns_exit_3(daemon):
     assert result.exit_code == 3, result.output
 
 
+def test_set_task_state_done_round_trip(daemon):
+    """T13.4 DoD: `akasha set <id> --task-state done` closes a real task
+    against a live daemon, and a subsequent `akasha get <id>` reflects it."""
+    node = json.loads(_run(daemon, "new", "task", "do the thing", "--task").output)
+    assert node["task_state"] == "open"
+
+    result = _run(daemon, "set", node["id"], "--task-state", "done")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["task_state"] == "done"
+
+    got = json.loads(_run(daemon, "get", node["id"]).output)
+    assert got["task_state"] == "done"
+
+    # re-opening round-trips too.
+    reopened = _run(daemon, "set", node["id"], "--task-state", "open")
+    assert reopened.exit_code == 0, reopened.output
+    assert json.loads(reopened.output)["task_state"] == "open"
+
+
+def test_set_omitting_task_state_leaves_it_unchanged(daemon):
+    """Omitted --task-state must send today's exact body (no `task_state`
+    key at all) -- the server's `model_fields_set` presence check (T13.1)
+    then leaves the existing task_state untouched."""
+    node = json.loads(_run(daemon, "new", "task", "do the thing", "--task").output)
+    assert node["task_state"] == "open"
+
+    result = _run(daemon, "set", node["id"], "--body", "revised body")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["task_state"] == "open"
+
+    got = json.loads(_run(daemon, "get", node["id"]).output)
+    assert got["task_state"] == "open"
+
+
+def test_set_task_state_invalid_value_is_usage_error(daemon):
+    node = json.loads(_run(daemon, "new", "task", "do the thing", "--task").output)
+    result = _run(daemon, "set", node["id"], "--task-state", "bogus")
+    assert result.exit_code == 2, result.output
+
+
 def test_set_dry_run_mutates_nothing(daemon):
     node = json.loads(_run(daemon, "new", "claim", "original").output)
     result = runner.invoke(

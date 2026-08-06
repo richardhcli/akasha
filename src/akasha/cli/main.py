@@ -494,14 +494,29 @@ def set_(
         ChangeClass.patch, "--class", help="patch|minor|major (default: patch)"
     ),
     touch: list[str] = typer.Option([], "--touch", help="facet name, repeatable"),
+    task_state: str | None = typer.Option(
+        None, "--task-state", help="open|done (T13.1); omit to leave the task state unchanged"
+    ),
 ) -> None:
-    """PATCH /v1/nodes/{id}."""
+    """PATCH /v1/nodes/{id}.
+
+    ``--task-state`` (spec §4.12) is only included in the request body when
+    explicitly passed on the command line, mirroring the server's
+    ``model_fields_set`` presence check (T13.1, ``api/routes/nodes.py``): an
+    omitted flag must produce the exact same request body this command sent
+    before T13.4, so a bare ``akasha set`` never accidentally clears/changes
+    an existing task_state.
+    """
     state = _state(ctx)
+    if task_state is not None and task_state not in ("open", "done"):
+        _usage_error(state, f"--task-state must be 'open' or 'done', got {task_state!r}")
     payload: dict[str, Any] = {
         "body": body,
         "change_class": change_class.value,
         "facets_touched": touch,
     }
+    if task_state is not None:
+        payload["task_state"] = task_state
     result = _mutate(state, "PATCH", f"/v1/nodes/{node_id}", payload)
     _echo_ok(state, result)
 

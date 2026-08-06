@@ -142,6 +142,13 @@ DRY_RUN_CASES: list[DryRunCase] = [
         body_check=_assert_body_has("body", "change_class", "facets_touched"),
     ),
     DryRunCase(
+        id="set_task_state",
+        argv=["set", "dummynode1", "--task-state", "done"],
+        method="PATCH",
+        path="/v1/nodes/dummynode1",
+        body_check=_assert_body_has("body", "change_class", "facets_touched", "task_state"),
+    ),
+    DryRunCase(
         id="rm",
         argv=["rm", "dummynode1"],
         method="DELETE",
@@ -190,9 +197,10 @@ def test_dry_run_case_table_matches_discovered_mutating_verbs() -> None:
     """If a new mutating verb lands in ``cli/main.py`` without a matching
     entry above, this fails -- closing the "future verb slips through
     uncovered" gap the task calls out explicitly."""
-    # "rm_with_redirect" is a --redirect-to variant of the "rm" verb, not a
-    # distinct command the app registers.
-    expected = {case.id for case in DRY_RUN_CASES} - {"rm_with_redirect"}
+    # "rm_with_redirect" is a --redirect-to variant of the "rm" verb, and
+    # "set_task_state" is a --task-state variant of the "set" verb (T13.4) --
+    # neither is a distinct command the app registers.
+    expected = {case.id for case in DRY_RUN_CASES} - {"rm_with_redirect", "set_task_state"}
     assert _discovered_mutating_verbs() == expected
 
 
