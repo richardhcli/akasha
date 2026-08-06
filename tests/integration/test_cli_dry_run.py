@@ -206,6 +206,13 @@ DRY_RUN_CASES: list[DryRunCase] = [
         path="/v1/edges/dummyedge1",
         body_check=_assert_body_is_none,
     ),
+    DryRunCase(
+        id="vet",
+        argv=["vet", "dummynode1"],
+        method="POST",
+        path="/v1/nodes/dummynode1/vet",
+        body_check=_assert_body_is_none,
+    ),
 ]
 
 

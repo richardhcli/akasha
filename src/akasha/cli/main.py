@@ -12,9 +12,10 @@ by the (non-store) contract layer (``contract/render.py``,
 violation.
 
 Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon/init/sync``,
-plus build-plan additions ``neighborhood``/``history`` (T14.1) and
+plus build-plan additions ``neighborhood``/``history`` (T14.1),
 ``edge add``/``edge rm`` (T14.2, both over the already-shipped
-``POST /v1/edges``/``DELETE /v1/edges/{id}``, spec §4.11).
+``POST /v1/edges``/``DELETE /v1/edges/{id}``, spec §4.11), and ``vet``
+(T14.3, over the already-shipped ``POST /v1/nodes/{id}/vet``, spec §4.11).
 Unlike every other verb, ``daemon`` does not speak HTTP to an
 already-running server -- it *is* the server process: it loads config,
 acquires the single-instance lock (``akasha.daemon.single_instance_lock``,
@@ -561,6 +562,53 @@ def search(ctx: typer.Context, q: str) -> None:
     state = _state(ctx)
     result = _request(state, "GET", "/v1/search", params={"q": q})
     _echo_ok(state, result)
+
+
+# PRD R9 ("system language says 'vetted by you,' never 'true' (including MCP
+# responses)"): the docstring below is rendered verbatim by `--help`, so the
+# forbidden word itself must never appear there -- it is only spelled out in
+# this (non-rendered) comment and in the SPEC-QUESTION below, never in the
+# docstring or in the plain-output f-string.
+@app.command()
+def vet(ctx: typer.Context, node_id: str) -> None:
+    """POST /v1/nodes/{id}/vet -- the S4 human act (spec §4.11, build-plan T14.3).
+
+    ``/vet`` is ``require_human``/exempt (spec §4.6, §4.11): unlike every
+    other mutating verb, an agent-class token is never proposalized here --
+    it gets the server's own ``403 E_HUMAN_ONLY``, surfaced through the
+    existing ``_exit_code_for`` mapping (no client-side token-class check
+    is added; see that function's own SPEC-QUESTION docstring, which this
+    verb deliberately leaves untouched).
+
+    Plain (non-``--json``) output says the node was vetted by you --
+    vetting is a claim about your own review, not a claim about the world
+    (PRD R9). ``--json`` returns the real, unmodified API response for
+    scripted callers -- see the ``SPEC-QUESTION`` comment on the
+    ``if state.json_mode`` branch below for the one open question that
+    leaves unresolved.
+    """
+    state = _state(ctx)
+    result = _mutate(state, "POST", f"/v1/nodes/{node_id}/vet", None)
+    if state.json_mode:
+        # SPEC-QUESTION (T14.3): PRD R9's parenthetical ("including MCP
+        # responses") explicitly extends the "never say the forbidden word"
+        # rule to at least one machine-facing surface, and the API's
+        # `vetted` field is a literal JSON boolean -- so a freshly-vetted
+        # node's `--json` output here necessarily contains that literal
+        # token. Narrowest reading taken here: `--json` is this CLI's
+        # documented, versioned wire contract (`cli/v1`), the same contract
+        # every other verb's `--json` mode gives a scripted caller
+        # unmodified (contrast the MCP surface R9 names, which speaks
+        # generated prose to a model, not a fixed JSON schema to a script)
+        # -- so it passes the real API response through verbatim rather
+        # than inventing a divergent response shape for this one verb
+        # (rule 0.2). This is a genuine open question, not settled by this
+        # task's narrowest reading alone -- see docs/spec-questions.md
+        # T14.3 for the human ruling needed.
+        typer.echo(json_lib.dumps({"schema": CLI_SCHEMA, "ok": True, "data": result}))
+    else:
+        maturity = result.get("maturity", "?")
+        typer.echo(f"{node_id}: vetted by you (maturity: {maturity})")
 
 
 # --- edge ------------------------------------------------------------------
