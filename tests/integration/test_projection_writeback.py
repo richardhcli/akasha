@@ -421,3 +421,52 @@ def test_review_resolve_approved_create_proposal_projects_nothing(api, vault_dir
 
     after = sorted(str(p) for p in vault_dir.rglob("*") if p.is_file())
     assert after == []
+
+
+# --- mirrors (task T19.4, spec §4.7 "Mirrors"): one node in several files ---------
+
+
+def _add_mirror(client, headers, vault_dir, x, *, body: str):
+    """Copy the anchored task line into a second file and let a real rescan
+    reconcile it -- the exact user act ("paste the line, anchor included")."""
+    mirror = vault_dir / "mirror.md"
+    mirror.write_text(_managed(f"- [ ] {body} {contract_anchor(x)}\n"), encoding="utf-8")
+    rescan = client.post("/v1/sync/rescan", headers=headers)
+    assert rescan.status_code == 200
+    return mirror
+
+
+def test_patch_rewrites_every_mirror_file_in_the_same_request(api, vault_dir):
+    client, h = api["client"], api["human"]
+    x, path = _seed_filed_task(client, h, vault_dir, body="shared body")
+    mirror = _add_mirror(client, h, vault_dir, x, body="shared body")
+    # a copy-paste is a mirror, not a violation: nothing was queued for review
+    assert client.get("/v1/review?status=open", headers=h).json()["reviews"] == []
+
+    resp = client.patch(
+        f"/v1/nodes/{x}",
+        json={"body": "revised on the hub", "change_class": "patch", "facets_touched": []},
+        headers=h,
+    )
+    assert resp.status_code == 200
+
+    for f in (path, mirror):
+        text = f.read_text(encoding="utf-8")
+        assert f"- [ ] revised on the hub {contract_anchor(x)}" in text
+        assert "\r" not in text  # canonical, LF-only (§4.3)
+
+
+def test_patch_task_state_rewrites_every_mirror_checkbox(api, vault_dir):
+    client, h = api["client"], api["human"]
+    x, path = _seed_filed_task(client, h, vault_dir, body="shared body")
+    mirror = _add_mirror(client, h, vault_dir, x, body="shared body")
+
+    resp = client.patch(
+        f"/v1/nodes/{x}",
+        json={"task_state": "done", "change_class": "patch", "facets_touched": []},
+        headers=h,
+    )
+    assert resp.status_code == 200
+
+    for f in (path, mirror):
+        assert f"- [x] shared body {contract_anchor(x)}" in f.read_text(encoding="utf-8")

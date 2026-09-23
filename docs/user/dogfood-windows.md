@@ -255,7 +255,7 @@ Keep the daemon terminal visible and work in Obsidian for a day:
 | Edit text on a line ending in `^tm-<id8>`, save | Hub updates; no thrash/echo loop |
 | Command **Create node from selection** | Line gets ` ^tm-new` → daemon rewrites to minted id once |
 | Cut a managed block to another managed note | Cross-file move (battery E04) |
-| Copy a managed block (duplicate anchor) | `E_DUP_ID` / review or certain-repair (E05) — not silent merge |
+| Copy a managed block into **another** note (same anchor) | Live **mirror** (E05/E21): no review item; edit either copy and the other follows within a sync cycle. The same anchor twice inside **one** file is still `E_DUP_ID` |
 | Toggle a task checkbox on a managed task line | Checkbox sync |
 | Stop daemon, edit vault, restart daemon | Startup reconcile converges (E11 class) |
 

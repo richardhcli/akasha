@@ -147,7 +147,8 @@ plugin only appends `^tm-new`; the daemon mints and rewrites once.
 
 Anchors are plain markdown. Native cut/copy must retain the trailing
 `^tm-<id8>` text. After both files are saved, the daemon’s three-way
-reconcile decides MOVE vs duplicate.
+reconcile decides MOVE vs live mirror (a copy into another file is a
+mirror since M19 — spec §4.7 "Mirrors"; it is no longer a violation).
 
 > **Load-bearing dependency (verify here — this is the whole point of T6.5).**
 > This scenario relies on Obsidian pasting a duplicated `^tm-<id8>` as
@@ -193,9 +194,12 @@ and the S0 companion e04b-s0-cross-file-move/).
     - Daemon treats this as a clean **MOVE** of one node — no
       duplicate / `E_DUP_ID` review raised for that anchor.
 
-### 4b. COPY scenario (cross-file duplicate)
+### 4b. COPY scenario (cross-file mirror)
 
-This corresponds to battery test **E05** (golden/reconcile/e05-cross-file-dup/).
+This corresponds to battery tests **E05** (golden/reconcile/e05-cross-file-dup/,
+re-ruled by M19/T19.3) and **E21** (golden/reconcile/e21-mirror-edit/). The
+same anchor in two different files is one node shown twice — a *mirror*, not a
+violation. (The same anchor twice inside ONE file is still `E_DUP_ID`.)
 
 1. [ ] Restore a known-good state if needed (or use a different minted line):
    file A has a line ending in `^tm-<id8>`; file B does not yet have that
@@ -214,9 +218,17 @@ This corresponds to battery test **E05** (golden/reconcile/e05-cross-file-dup/).
     - File A still has the original anchor line.
     - File B now **also** has a line with the **identical** `^tm-<id8>`
       (two live copies of the same id across files).
-    - Daemon surfaces a review-queue violation with cause code **`E_DUP_ID`**
-      (`cause_kind` conflict/violation). Status bar violation count may
-      increase accordingly.
+    - **No** `E_DUP_ID` review item is raised and the status-bar violation
+      count does **not** increase; the hub still has exactly one node for
+      that anchor.
+
+4. [ ] Edit the line's text in file B; save; wait for reconcile (~0.5 s).
+
+    Expected: file A's copy of the line now shows the same edited text
+    (and a checkbox toggled in either file follows in the other). If you
+    edit the same line in both files before either is reconciled, one
+    version wins the file and the other is kept as a conflict review item
+    — nothing is lost.
 
 ---
 
@@ -227,4 +239,4 @@ This corresponds to battery test **E05** (golden/reconcile/e05-cross-file-dup/).
   degrade with daemon stopped.
 - [ ] All T6.4 steps: `^tm-new` → single minted rewrite, no echo (E08).
 - [ ] All T6.5 cut steps: clean MOVE (E04 / e04b).
-- [ ] All T6.5 copy steps: `E_DUP_ID` review (E05).
+- [ ] All T6.5 copy steps: live mirror, no violation, edits propagate (E05 / E21).

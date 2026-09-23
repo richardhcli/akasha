@@ -25,9 +25,10 @@ Module layout (mirrors the fable implementation order)
    :class:`~akasha.contract.parser.BlockSet` values and a pure
    maturity/projection lookup, compute the ops table. This is the bulk of
    the unit-test surface.
-3. ``ProjectionIndex`` — an in-memory, rebuildable id -> owning-path map
-   used for cross-file ``E_DUP_ID``/move-detection (the M3 T3.5/T3.6
-   follow-up logged against M5 in ``docs/agents/task-status.md``).
+3. ``ProjectionIndex`` — an in-memory, rebuildable id -> set-of-owning-paths
+   map used for cross-file move detection and, since M19, for mirrors (the
+   same anchor live in several files, spec §4.7 "Mirrors"); it began as the
+   M3 T3.5/T3.6 follow-up's cross-file ``E_DUP_ID`` detector.
 4. ``hub_state_for`` / ``hub_changed_since`` / ``kernel_apply`` — the
    store-facing (I/O) primitives. Every write goes through
    ``kernel/store.py`` (rule 0.4); this module never touches SQLite
@@ -133,6 +134,11 @@ class Op(BaseModel):
     at a time). ``Op`` is this module's own in-memory pipeline type (not a
     persisted schema), so this is a documented, justified addition, not an
     invented schema/endpoint/grammar element.
+
+    ``mirror`` (build-plan T19.3, spec §4.7 "Mirrors") marks a ``created``
+    op whose anchor is ALREADY live in another file: this file is joining
+    an existing node as a mirror, not adopting a moved one. It is only
+    ever ``True`` on such an op; every other op leaves it ``False``.
     """
 
     kind: Literal["modified", "created", "deleted", "moved", "checkbox_toggled", "reparented"]
@@ -141,6 +147,7 @@ class Op(BaseModel):
     base_block: Block | None = None
     new_request: NewRequest | None = None
     parent_id: str | None = None
+    mirror: bool = False
 
 
 class ReconcileReviewItem(BaseModel):
@@ -157,7 +164,9 @@ class ReconcileReviewItem(BaseModel):
       *failure*), and
     - a cross-file ``E_DUP_ID`` (the SAME anchor id live in two different
       managed files at once -- distinct from single-file ``E_DUP_ID``,
-      which ``linter.py`` already detects).
+      which ``linter.py`` already detects). **No longer emitted** since
+      build-plan T19.3: the same anchor in several files is a mirror
+      (spec §4.7 "Mirrors"), not a violation.
 
     ``code`` is a free-form string (not the frozen ``ViolationCode``
     Literal) since these are reconcile-level findings, persisted via
@@ -309,10 +318,20 @@ class ProjectionIndex:
     instant if that file hasn't been reconciled yet this "wave". Multi-cycle
     race hardening (two files whose independent watcher events race each
     other) is explicitly T5.8's battery, not this task's.
+
+    Mirrors (build-plan T19.2, spec §4.7 "Mirrors"): the same anchor may
+    be live in several files, so a node has a *set* of owning paths
+    (:meth:`owners`). No table backs this -- membership is derived from
+    every file's base snapshot exactly as before, so a node in two files
+    was always durably recorded; only this in-memory view changed.
+    :meth:`owner` keeps its original single-path meaning (the most
+    recently updated path still holding the id) for callers that predate
+    mirrors.
     """
 
     def __init__(self) -> None:
         self._owner: dict[str, str] = {}
+        self._owners: dict[str, set[str]] = {}
         self._by_path: dict[str, set[str]] = {}
 
     @classmethod
@@ -333,22 +352,40 @@ class ProjectionIndex:
         """Return the path currently believed to own ``node_id``, or ``None``."""
         return self._owner.get(node_id)
 
+    def owners(self, node_id: str) -> frozenset[str]:
+        """Return EVERY path currently holding ``node_id`` (empty if none).
+
+        The mirror-aware counterpart of :meth:`owner`: a node whose anchor
+        is live in two files (spec §4.7 "Mirrors") has both paths here.
+        """
+        return frozenset(self._owners.get(node_id, ()))
+
     def update(self, path: str, block_ids: set[str]) -> None:
         """Record that ``path``'s base snapshot now contains exactly ``block_ids``.
 
-        Any id ``path`` previously owned but no longer contains is dropped
-        (unless another path has since claimed it, in which case it is
-        already gone from ``_owner`` under this key). Every id in
-        ``block_ids`` is (re)claimed by ``path`` -- last writer wins, which
-        is the correct "most recently reconciled" semantics for
-        single-cycle-at-a-time processing.
+        Any id ``path`` previously held but no longer contains is removed
+        from that id's owner set (an empty set is deleted outright). Every
+        id in ``block_ids`` is added to ``path``'s ownership; :meth:`owner`
+        keeps its "most recently reconciled path wins" meaning, falling
+        back to a remaining holder (lowest path, deterministic) when the
+        last writer lets go of an id another file still holds.
         """
         previous = self._by_path.get(path, set())
         for stale_id in previous - block_ids:
+            holders = self._owners.get(stale_id)
+            if holders is not None:
+                holders.discard(path)
+                if not holders:
+                    del self._owners[stale_id]
             if self._owner.get(stale_id) == path:
-                del self._owner[stale_id]
+                remaining = self._owners.get(stale_id)
+                if remaining:
+                    self._owner[stale_id] = min(remaining)
+                else:
+                    self._owner.pop(stale_id, None)
         self._by_path[path] = set(block_ids)
         for node_id in block_ids:
+            self._owners.setdefault(node_id, set()).add(path)
             self._owner[node_id] = path
 
 
@@ -526,21 +563,15 @@ def _compute_ops(
                 )
             )
             continue
-        owner = projection.owner(node_id)
-        if owner is None or owner == current_path:
-            ops.append(Op(kind="created", node_id=node_id, vault_block=vault_block))
-        else:
-            extra_review.append(
-                ReconcileReviewItem(
-                    id=node_id,
-                    code="E_DUP_ID",
-                    message=(
-                        f"anchor ^tm-{node_id} is live in both {current_path!r} and "
-                        f"{owner!r} (cross-file duplicate, copy without cut)"
-                    ),
-                    line_nos=[vault_block.line_no],
-                )
-            )
+        # T19.3 (spec §4.7 "Mirrors"): an anchor already live in ANOTHER
+        # file is not a duplicate-anchor violation -- this file is joining
+        # the node as a mirror. Same adopt op as a move, flagged ``mirror``
+        # so the pipeline can tell a join (hub wins on differing text)
+        # from a move (the vault's text wins).
+        others = projection.owners(node_id) - {current_path}
+        ops.append(
+            Op(kind="created", node_id=node_id, vault_block=vault_block, mirror=bool(others))
+        )
 
     # --- deleted: base-only ids, excluding withheld/cross-file-move-out ----
     withheld_delete = withheld_lost_anchor | withheld_deleted_s1
@@ -550,12 +581,12 @@ def _compute_ops(
             continue
         if node_id in withheld_delete:
             continue
-        owner = projection.owner(node_id)
-        if owner is not None and owner != current_path:
-            # Cross-file move-out: some other file has already (as of its
-            # own last reconcile) adopted this id. Silent -- no data loss,
-            # the other file's cycle already committed/will commit the
-            # membership transfer.
+        if projection.owners(node_id) - {current_path}:
+            # Another file still holds this anchor: either a cross-file
+            # move-out (that file already adopted the id as of its own last
+            # reconcile) or -- since T19.3 -- simply the removal of one
+            # mirror of a node that lives on elsewhere. Silent either way:
+            # no data loss, and never a hub delete while any file shows it.
             continue
         # design note (T5.8-3, fable-reviewed, human-decided 2026-07-13):
         # withhold the hard-delete (instead of the ``owner`` check above,
@@ -581,6 +612,37 @@ def _maturity_of(lookup: MaturityLookup, node_id: str) -> str | None:
     if callable(lookup):
         return lookup(node_id)
     return lookup.get(node_id)
+
+
+def _without_mirror_removals(
+    result: LintResult, projection: ProjectionIndex, current_path: str
+) -> LintResult:
+    """Drop ``E_DELETED_S1`` findings for blocks another file still holds (T19.3).
+
+    ``linter.lint`` sees one file at a time, so an S1+ block that vanished
+    from this file reads as a deletion. If another file still holds the same
+    anchor (a mirror), this file merely stopped showing a node that lives
+    on -- not a deletion, so neither a violation nor a review item. Removal
+    from the LAST file still surfaces ``E_DELETED_S1`` exactly as before.
+    Dropped before ``pause_and_diff`` counts violations, so it cannot push a
+    file over the 25% storm threshold.
+    """
+
+    def is_mirror_removal(code: str, node_id: str | None) -> bool:
+        return (
+            code == "E_DELETED_S1"
+            and node_id is not None
+            and bool(projection.owners(node_id) - {current_path})
+        )
+
+    return result.model_copy(
+        update={
+            "violations": [v for v in result.violations if not is_mirror_removal(v.code, v.id)],
+            "review_items": [
+                r for r in result.review_items if not is_mirror_removal(r.code, r.id)
+            ],
+        }
+    )
 
 
 def diff_blocks(
@@ -611,7 +673,9 @@ def diff_blocks(
     withheld by an open/unrepaired violation (``E_DELETED_S1``, unknown
     anchor, cross-file ``E_DUP_ID``, ...) never reach ``ops``.
     """
-    lint_result = linter.lint(blocks_b, blocks_v, vault_text, maturity)
+    lint_result = _without_mirror_removals(
+        linter.lint(blocks_b, blocks_v, vault_text, maturity), projection, current_path
+    )
     repaired_text = apply_repairs(vault_text, lint_result.repairs)
     # apply_repairs returns `text` verbatim (same string) when there are no
     # repairs to apply -- re-parsing it would just reproduce `blocks_v`,
@@ -1116,18 +1180,61 @@ class Reconciler:
     # -- main pipeline ---------------------------------------------------------
 
     def on_change(self, path: str) -> None:
-        """The §4.8 ``on_change(path)`` pipeline, run synchronously for ``path``.
+        """The §4.8 ``on_change(path)`` pipeline for ``path``, plus mirror propagation.
+
+        Runs :meth:`_cycle` for ``path``. If that cycle COMMITTED a node's
+        text or checkbox, every OTHER file that holds the same anchor (a
+        mirror, spec §4.7 "Mirrors" / build-plan T19.4) is then brought up
+        to date by running the same three-way :meth:`_cycle` on it -- never
+        a blind write of the hub render, so that file's own other edits
+        survive. A propagated cycle never propagates further (no
+        recursion, hence no ping-pong), a mirror that vanished from disk
+        is skipped, and a failure in one mirror is logged and never fails
+        the source file's already-completed cycle nor stops the other
+        mirrors; a mirror left stale that way is healed by its next event
+        or the startup reconcile (§4.8, idempotent).
+        """
+        committed = self._cycle(path)
+        if not committed:
+            return
+        assert self.projection is not None
+        targets: list[str] = []
+        for node_id in sorted(committed):
+            for other in sorted(self.projection.owners(node_id) - {path}):
+                if other not in targets:
+                    targets.append(other)
+        for other in targets:
+            try:
+                self._cycle(other)
+            except FileNotFoundError:
+                continue
+            except Exception:
+                logger.warning(
+                    "mirror propagation to %r (from %r) failed; it will heal on its "
+                    "next event or the startup reconcile",
+                    other,
+                    path,
+                    exc_info=True,
+                )
+
+    def _cycle(self, path: str) -> set[str]:
+        """One §4.8 ``on_change(path)`` cycle for ``path`` ONLY (no propagation).
 
         Follows the spec pseudocode verbatim, in order: quiet shortcut,
         hub-only shortcut, parse+lint+repair+diff, pause&diff (zero
         writes), conservative-profile repair routing, per-op conflict
         resolution, canonical write-back + base_store.put + projection
         update.
+
+        Returns the ids of nodes whose text/checkbox this cycle COMMITTED
+        to the hub (empty for a quiet/hub-only/paused cycle, and for ops
+        that were conflicted or already convergent) -- the set
+        :meth:`on_change` fans out to the node's other owning files.
         """
         root = self.resolve_sync_root(path)
         if root is None:
             logger.warning("on_change: %r matches no registered sync root; ignoring", path)
-            return
+            return set()
         sync_root_id = root["id"]
         conservative = detect_cloud_path(root["root_path"]) is not None
         assert self.projection is not None
@@ -1160,14 +1267,14 @@ class Reconciler:
             hub_text = render(hub_blockset)
 
             if vault_text == base_text and hub_text == base_text:
-                return  # quiet
+                return set()  # quiet
 
             if vault_text == base_text:
                 # hub-only change: project the hub onto the base skeleton.
                 self.write_if_diff(path, hub_text)
                 base_store.put(self.conn, sync_root_id, path, hub_text)
                 self.projection.update(path, set(hub_blockset.blocks.keys()))
-                return
+                return set()
 
             # blocks_b_skeleton (above) already parsed this exact base_text --
             # parse() is pure/deterministic (no DB/filesystem I/O), so a
@@ -1212,7 +1319,7 @@ class Reconciler:
                         }
                     ).decode(),
                 )
-                return  # zero writes, zero base_store.put
+                return set()  # zero writes, zero base_store.put
 
             if conservative and outcome.lint.repairs:
                 # design note (T5.4, fable-reviewed, human-decided 2026-07-12):
@@ -1314,14 +1421,37 @@ class Reconciler:
                 except store.NodeNotFoundError:
                     hub_changed_map[op.node_id] = None
 
+            committed: set[str] = set()
             vault_lines = repaired_text.split("\n")
             for op in ops:
                 if op.kind == "created":
+                    if op.mirror:
+                        # T19.4 / M19-C: this file JOINS a node another file
+                        # already shows. The hub wins -- never commit the
+                        # joining text. Identical text is a quiet no-op;
+                        # differing text is preserved as a conflict branch
+                        # + one review (nothing lost, nothing guessed), and
+                        # the write-back below rewrites this line to the
+                        # hub's text.
+                        assert op.node_id is not None and op.vault_block is not None
+                        try:
+                            joins_cleanly = _vault_matches_hub(
+                                self.conn, op.node_id, op.vault_block
+                            )
+                        except store.NodeNotFoundError:
+                            continue
+                        if not joins_cleanly:
+                            self.conflict_handler(self.conn, op, path)
+                        continue
                     new_id = kernel_apply(self.conn, op, author=SYNC_AUTHOR)
                     if op.new_request is not None and new_id is not None:
                         idx = op.new_request.line_no - 1
                         if 0 <= idx < len(vault_lines):
                             vault_lines[idx] = _render_new_line(op.new_request, new_id)
+                    elif op.node_id is not None:
+                        # cross-file adopt (a move): may have committed the
+                        # vault's text/state to the hub head.
+                        committed.add(op.node_id)
                     continue
 
                 assert op.node_id is not None
@@ -1332,6 +1462,8 @@ class Reconciler:
                     continue
                 if not changed:
                     kernel_apply(self.conn, op, author=SYNC_AUTHOR)
+                    if op.kind in ("modified", "checkbox_toggled"):
+                        committed.add(op.node_id)
                     continue
                 vault_matches = op.vault_block is not None and _vault_matches_hub(
                     self.conn, op.node_id, op.vault_block
@@ -1350,6 +1482,7 @@ class Reconciler:
             # the bytes happen to be unchanged (spec §4.8 point 6).
             base_store.put(self.conn, sync_root_id, path, hub2_text)
             self.projection.update(path, set(hub2_blockset.blocks.keys()))
+            return committed
         finally:
             metrics.record_sync_cycle_ms((time.monotonic() - cycle_start) * 1000.0)
 
@@ -1505,8 +1638,9 @@ def project_node_change(
     Resolution order, per node id: build a fresh :class:`ProjectionIndex`
     from durable state (:meth:`ProjectionIndex.build` -- the same
     "rebuildable at any time" index every other production caller uses,
-    never a live vault read), look up each id's owning path via
-    :meth:`ProjectionIndex.owner`, and de-duplicate the resulting paths
+    never a live vault read), look up EVERY file holding each id via
+    :meth:`ProjectionIndex.owners` (a mirrored node lives in several files,
+    spec §4.7 "Mirrors" / T19.4), and de-duplicate the resulting paths
     (two changed nodes projected into the SAME file trigger exactly one
     ``on_change`` call for that file, not two). A node owned by no managed
     file (``owner`` returns ``None``) contributes no path and no work --
@@ -1535,11 +1669,13 @@ def project_node_change(
     paths: list[str] = []
     seen: set[str] = set()
     for node_id in node_ids:
-        path = index.owner(node_id)
-        if path is None or path in seen:
-            continue
-        seen.add(path)
-        paths.append(path)
+        # T19.4: EVERY file holding the anchor (a mirror set), not just the
+        # last one reconciled -- a hub-side edit must rewrite them all.
+        for path in sorted(index.owners(node_id)):
+            if path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
 
     reconciled: list[str] = []
     for path in paths:

@@ -508,14 +508,18 @@ def test_e04b_s0_cross_file_move_no_data_loss(tmp_path, order):
 
 
 # =================================================================================
-# E05 -- cross-file duplicate (copy WITHOUT cut): review via ProjectionIndex,
-# never a silent apply, no data loss, no new node.
+# E05 -- cross-file duplicate (copy WITHOUT cut). RE-RULED by the user on
+# 2026-09-23 (docs/spec-questions.md M19-0, build-plan T19.3): the same anchor
+# in another file is a MIRROR, not a violation -- the copy joins the existing
+# node (one adopt op), with no review item, no data loss, no new node, and no
+# change to the node's history. (Formerly: cross-file E_DUP_ID review.)
 # =================================================================================
 
 
 def _case_e05() -> bool:
-    """Returns ``silently_mutated`` (True == a violation of the "review, not
-    apply" invariant). Also performs the case's own positive assertions.
+    """Returns ``silently_mutated`` (True == the join changed the node's
+    history -- identical text must be a quiet no-op). Also performs the
+    case's own positive assertions (T19.3 re-ruling: mirror join, no E_DUP_ID).
     """
     conn = _conn()
     case_dir = GOLDEN_ROOT / "e05-cross-file-dup"
@@ -564,14 +568,15 @@ def _case_e05() -> bool:
 
         rows = store.find_open_reviews(conn, node_id=x, cause_kind="violation")
         codes = [json.loads(r["cause_ref"])["code"] for r in rows]
-        assert "E_DUP_ID" in codes
+        assert "E_DUP_ID" not in codes  # a mirror join is not a violation (M19-0)
+        assert rows == []  # and it enqueues nothing at all
         assert c_count(conn) == 1  # never a second, spurious node created
 
     history_after = store.history(conn, x)
     return history_after != history_before
 
 
-def test_e05_cross_file_dup_is_review_only_no_silent_apply():
+def test_e05_cross_file_dup_joins_as_mirror_no_silent_apply():
     assert _case_e05() is False
 
 
@@ -949,6 +954,141 @@ def test_e20_5000_block_cycle_perf_and_memory(tmp_path):
 
 
 # =================================================================================
+# E21-E24 -- mirrors (build-plan T19.5, spec §4.7 "Mirrors"): the same anchor
+# live in several files is ONE node kept identical everywhere. NEW cases and
+# fixtures only -- no E01-E20 case or fixture is edited.
+# =================================================================================
+
+_X = "3iwckm6b"  # E21-E23's shared node
+
+
+def _mirror_pair(conn, tmp_path, case_dir, *, a_vault=None, b_vault=None):
+    """Two settled mirror files (base == disk), then the vault-side edit(s).
+
+    Returns ``(reconciler, a_path, b_path)``. The ``Reconciler`` is built
+    AFTER both base snapshots are recorded, so its ``ProjectionIndex`` sees
+    both files as owners (durable state only, no table).
+    """
+    root_id = _register_root(conn, tmp_path)
+    a_path, b_path = tmp_path / "a.md", tmp_path / "b.md"
+    for path, base in ((a_path, "a_base.md"), (b_path, "b_base.md")):
+        base_store.put(conn, root_id, str(path), _read(case_dir / base))
+        path.write_bytes(_read(case_dir / base).encode("utf-8"))
+    if a_vault is not None:
+        a_path.write_bytes(_read(case_dir / a_vault).encode("utf-8"))
+    if b_vault is not None:
+        b_path.write_bytes(_read(case_dir / b_vault).encode("utf-8"))
+    return Reconciler(conn, OriginTracker()), a_path, b_path
+
+
+def _case_e21() -> bool:
+    """Edit in A reaches B. Returns True iff the hub history grew by anything
+    other than the single human edit (a silent extra mutation)."""
+    conn = _conn()
+    case_dir = GOLDEN_ROOT / "e21-mirror-edit"
+    _seed_hub_from_json(conn, json.loads(_read(case_dir / "hub.json")))
+    history_before = store.history(conn, _X)
+    with _tmp_dir() as tmp_path:
+        reconciler, a_path, b_path = _mirror_pair(conn, tmp_path, case_dir, a_vault="a_vault.md")
+        reconciler.on_change(str(a_path))
+        assert a_path.read_bytes().decode("utf-8") == _read(case_dir / "expected_a.md")
+        assert b_path.read_bytes().decode("utf-8") == _read(case_dir / "expected_b.md")
+        assert store.get_node(conn, _X).body == "Shared text, edited in A\n"
+        assert store.find_open_reviews(conn) == []
+        # settled: a second cycle on either file writes nothing more
+        mtimes = (a_path.stat().st_mtime_ns, b_path.stat().st_mtime_ns)
+        reconciler.on_change(str(a_path))
+        reconciler.on_change(str(b_path))
+        assert (a_path.stat().st_mtime_ns, b_path.stat().st_mtime_ns) == mtimes
+    return len(store.history(conn, _X)) - len(history_before) != 1
+
+
+def test_e21_mirror_edit_in_a_reaches_b():
+    assert _case_e21() is False
+
+
+def _case_e22() -> bool:
+    """Same line edited in both files at once: one commit, one conflict, both
+    versions kept, no ping-pong. Returns True iff either version was lost or
+    more than one review was raised."""
+    conn = _conn()
+    case_dir = GOLDEN_ROOT / "e22-mirror-concurrent"
+    _seed_hub_from_json(conn, json.loads(_read(case_dir / "hub.json")))
+    with _tmp_dir() as tmp_path:
+        reconciler, a_path, b_path = _mirror_pair(
+            conn, tmp_path, case_dir, a_vault="a_vault.md", b_vault="b_vault.md"
+        )
+        reconciler.on_change(str(a_path))
+        assert a_path.read_bytes().decode("utf-8") == _read(case_dir / "expected_a.md")
+        assert b_path.read_bytes().decode("utf-8") == _read(case_dir / "expected_b.md")
+        assert store.get_node(conn, _X).body == "A version\n"
+        rows = store.find_open_reviews(conn, node_id=_X, cause_kind="conflict")
+        b_version_kept = (
+            len(rows) == 1 and json.loads(rows[0]["cause_ref"])["vault_text"] == "B version"
+        )
+        # settled: further cycles change neither file nor add reviews
+        before = (a_path.read_bytes(), b_path.read_bytes())
+        reconciler.on_change(str(a_path))
+        reconciler.on_change(str(b_path))
+        assert (a_path.read_bytes(), b_path.read_bytes()) == before
+        assert len(store.find_open_reviews(conn, node_id=_X, cause_kind="conflict")) == 1
+    return not b_version_kept
+
+
+def test_e22_mirror_concurrent_edit_conflicts_without_loss():
+    assert _case_e22() is False
+
+
+def _case_e23() -> bool:
+    """Remove one mirror: the node lives on and the other file is untouched.
+    Returns True iff the node was mutated/deleted or a review was raised."""
+    conn = _conn()
+    case_dir = GOLDEN_ROOT / "e23-mirror-remove-one"
+    _seed_hub_from_json(conn, json.loads(_read(case_dir / "hub.json")))
+    history_before = store.history(conn, _X)
+    with _tmp_dir() as tmp_path:
+        reconciler, a_path, b_path = _mirror_pair(conn, tmp_path, case_dir, a_vault="a_vault.md")
+        reconciler.on_change(str(a_path))
+        assert store.get_node(conn, _X).status == "live"
+        assert b_path.read_bytes().decode("utf-8") == _read(case_dir / "expected_b.md")
+        untouched = (
+            store.find_open_reviews(conn) == [] and store.history(conn, _X) == history_before
+        )
+        # removing the LAST mirror of an S0 node is the ordinary delete (E06)
+        b_path.write_bytes(_read(case_dir / "a_vault.md").encode("utf-8"))
+        reconciler.on_change(str(b_path))
+        with pytest.raises(store.NodeNotFoundError):
+            store.get_node(conn, _X)
+    return not untouched
+
+
+def test_e23_removing_one_mirror_keeps_the_node():
+    assert _case_e23() is False
+
+
+def test_e24_reparent_in_a_mirror_adds_a_second_composes_parent(tmp_path):
+    """M19-B: each file keeps its own nesting; a re-indent in B adds a parent
+    edge without touching A or the edge A's nesting created."""
+    conn = _conn()
+    case_dir = GOLDEN_ROOT / "e24-mirror-reparent"
+    _seed_hub_from_json(conn, json.loads(_read(case_dir / "hub.json")))
+    p1, p2, c = "4cgfdxpi", "5hqlvwua", "6p5zkk6x"
+    store.create_edge(
+        conn, src=p1, dst=c, edge_type="composes", facet_binding=None, provenance="human"
+    )
+    reconciler, a_path, b_path = _mirror_pair(conn, tmp_path, case_dir, b_vault="b_vault.md")
+    a_before = a_path.read_bytes()
+
+    reconciler.on_change(str(b_path))
+
+    assert a_path.read_bytes() == a_before  # A never touched
+    assert b_path.read_bytes().decode("utf-8") == _read(case_dir / "expected_b.md")
+    parents = {e.src for e in store.find_live_edges(conn, dst=c, edge_type="composes")}
+    assert parents == {p1, p2}  # both parents: A's edge intact, B's added
+    assert store.find_open_reviews(conn) == []
+
+
+# =================================================================================
 # Silent-guess counter: the DoD crux. Reruns every "review/pause/ignore, not
 # apply" case's own check function and asserts the total violation count is 0.
 # =================================================================================
@@ -961,6 +1101,9 @@ def test_silent_guess_count_across_battery():
         "E13": _case_e13(),
         "E14": _case_e14(),
         "E15": _case_e15(),
+        "E21": _case_e21(),
+        "E22": _case_e22(),
+        "E23": _case_e23(),
     }
     total = sum(1 for v in violations.values() if v)
     assert total == 0, f"silent-guess violations detected: {violations}"

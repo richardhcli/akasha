@@ -416,7 +416,10 @@ def test_cross_file_move_adopts_when_unowned():
     assert outcome.extra_review_items == []
 
 
-def test_cross_file_dup_withholds_and_reviews():
+def test_cross_file_dup_joins_as_mirror():
+    # T19.3 (user ruling 2026-09-23, docs/spec-questions.md M19-0): the same
+    # anchor live in a DIFFERENT file is a mirror, not E_DUP_ID. Replaces the
+    # retired test_cross_file_dup_withholds_and_reviews.
     x = "fcc6mpfa"
     projection = ProjectionIndex()
     projection.update("other.md", {x})
@@ -432,11 +435,118 @@ def test_cross_file_dup_withholds_and_reviews():
         projection=projection,
         current_path="f.md",
     )
+    assert [(op.kind, op.node_id, op.mirror) for op in outcome.ops] == [("created", x, True)]
+    assert outcome.extra_review_items == []
+
+
+def test_first_owner_of_an_anchor_is_an_adopt_not_a_mirror():
+    x = "fcc6mpfa"
+    base = parse(_managed(""))
+    vault_text = _managed(f"Only copy {contract_anchor(x)}\n")
+    outcome = diff_blocks(
+        base,
+        parse(vault_text),
+        base_text="",
+        vault_text=vault_text,
+        maturity=_maturity_map({x: "S0"}),
+        projection=ProjectionIndex(),
+        current_path="f.md",
+    )
+    assert [(op.kind, op.node_id, op.mirror) for op in outcome.ops] == [("created", x, False)]
+
+
+def test_removing_one_mirror_is_silent_and_never_deletes_the_node():
+    x = "2ha7cfbt"
+    projection = ProjectionIndex()
+    projection.update("vault.md", {x})
+    projection.update("other.md", {x})
+    base = parse(_managed(f"Shared {contract_anchor(x)}\n"))
+    vault_text = _managed("")
+    outcome = diff_blocks(
+        base,
+        parse(vault_text),
+        base_text="",
+        vault_text=vault_text,
+        maturity=_maturity_map({x: "S0"}),
+        projection=projection,
+        current_path="vault.md",
+    )
+    assert outcome.ops == []
+    assert outcome.extra_review_items == []
+
+
+def test_removing_the_last_s0_mirror_still_deletes():
+    x = "2ha7cfbt"
+    projection = ProjectionIndex()
+    projection.update("vault.md", {x})  # the only holder
+    base = parse(_managed(f"Shared {contract_anchor(x)}\n"))
+    vault_text = _managed("")
+    outcome = diff_blocks(
+        base,
+        parse(vault_text),
+        base_text="",
+        vault_text=vault_text,
+        maturity=_maturity_map({x: "S0"}),
+        projection=projection,
+        current_path="vault.md",
+    )
+    assert [(op.kind, op.node_id) for op in outcome.ops] == [("deleted", x)]
+
+
+def test_removing_one_s1_mirror_raises_no_e_deleted_s1():
+    x = "dedgoghh"
+    projection = ProjectionIndex()
+    projection.update("vault.md", {x})
+    projection.update("other.md", {x})
+    base = parse(_managed(f"Important claim {contract_anchor(x)}\n"))
+    vault_text = _managed("totally unrelated other content\n")
+    outcome = diff_blocks(
+        base,
+        parse(vault_text),
+        base_text="",
+        vault_text=vault_text,
+        maturity=_maturity_map({x: "S1"}),
+        projection=projection,
+        current_path="vault.md",
+    )
     assert all(op.node_id != x for op in outcome.ops)
-    assert len(outcome.extra_review_items) == 1
-    item = outcome.extra_review_items[0]
-    assert item.code == "E_DUP_ID"
-    assert item.id == x
+    assert not any(v.code == "E_DELETED_S1" for v in outcome.lint.violations)
+    assert not any(r.code == "E_DELETED_S1" for r in outcome.lint.review_items)
+
+
+def test_removing_the_last_s1_mirror_still_raises_e_deleted_s1():
+    x = "dedgoghh"
+    projection = ProjectionIndex()
+    projection.update("vault.md", {x})  # only holder: the ordinary S1 rule applies
+    base = parse(_managed(f"Important claim {contract_anchor(x)}\n"))
+    vault_text = _managed("totally unrelated other content\n")
+    outcome = diff_blocks(
+        base,
+        parse(vault_text),
+        base_text="",
+        vault_text=vault_text,
+        maturity=_maturity_map({x: "S1"}),
+        projection=projection,
+        current_path="vault.md",
+    )
+    assert all(op.node_id != x for op in outcome.ops)
+    assert any(r.code == "E_DELETED_S1" and r.id == x for r in outcome.lint.review_items)
+
+
+def test_same_anchor_twice_in_one_file_is_still_e_dup_id():
+    # Single-file duplicates are untouched by mirrors (spec §4.7).
+    x = "fcc6mpfa"
+    vault_text = _managed(f"First {contract_anchor(x)}\nSecond {contract_anchor(x)}\n")
+    outcome = diff_blocks(
+        parse(_managed("")),
+        parse(vault_text),
+        base_text="",
+        vault_text=vault_text,
+        maturity=_maturity_map({x: "S0"}),
+        projection=ProjectionIndex(),
+        current_path="f.md",
+    )
+    assert any(v.code == "E_DUP_ID" for v in outcome.lint.violations)
 
 
 def test_unknown_anchor_id_is_withheld_and_reviewed():
@@ -547,6 +657,57 @@ def test_projection_index_update_transfers_ownership():
     index.update("b.md", {"x1"})
     assert index.owner("x1") == "b.md"
     assert index.owner("x2") == "a.md"
+
+
+# --- ProjectionIndex: mirrors (T19.2, spec §4.7 "Mirrors") --------------------------
+
+
+def test_projection_index_owners_holds_every_file_with_the_anchor():
+    index = ProjectionIndex()
+    assert index.owners("x1") == frozenset()
+    index.update("a.md", {"x1", "x2"})
+    index.update("b.md", {"x1"})
+    assert index.owners("x1") == frozenset({"a.md", "b.md"})
+    assert index.owners("x2") == frozenset({"a.md"})
+    # legacy single-owner view: last writer still wins
+    assert index.owner("x1") == "b.md"
+
+
+def test_projection_index_removing_one_mirror_keeps_the_other():
+    index = ProjectionIndex()
+    index.update("a.md", {"x1"})
+    index.update("b.md", {"x1"})
+    index.update("b.md", set())  # b.md drops its copy
+    assert index.owners("x1") == frozenset({"a.md"})
+    # the last writer let go, so owner() falls back to the remaining holder
+    # instead of reporting the node as unowned while a.md still shows it
+    assert index.owner("x1") == "a.md"
+    index.update("a.md", set())
+    assert index.owners("x1") == frozenset()
+    assert index.owner("x1") is None
+
+
+def test_projection_index_update_is_idempotent_and_owners_is_a_snapshot():
+    index = ProjectionIndex()
+    index.update("a.md", {"x1"})
+    index.update("a.md", {"x1"})
+    assert index.owners("x1") == frozenset({"a.md"})
+    snapshot = index.owners("x1")
+    index.update("b.md", {"x1"})
+    assert snapshot == frozenset({"a.md"})  # frozenset: later updates never mutate it
+
+
+def test_projection_index_build_finds_a_node_in_two_files_from_base_snapshots():
+    # No table backs mirrors: membership comes from each file's durable base
+    # snapshot, so a node already present in two snapshots has two owners.
+    conn = _conn()
+    root_id = store.register_sync_root(conn, "vault", "/vault")["id"]
+    x = "fcc6mpfa"
+    text = _managed(f"Shared {contract_anchor(x)}\n")
+    base_store.put(conn, root_id, "/vault/a.md", text)
+    base_store.put(conn, root_id, "/vault/b.md", text)
+    index = ProjectionIndex.build(conn)
+    assert index.owners(x) == frozenset({"/vault/a.md", "/vault/b.md"})
 
 
 def test_apply_repairs_reinserts_lost_anchor_and_id_produces_no_op():
@@ -1319,3 +1480,237 @@ def test_project_node_change_skips_path_missing_from_disk(tmp_path):
     reconciled = reconcile.project_node_change(conn, [x], OriginTracker())
 
     assert reconciled == []
+
+
+# =================================================================================
+# Mirrors: propagation between files that share an anchor (T19.4, spec §4.7)
+# =================================================================================
+
+_MX = "kseuqg5j"  # the shared node's id in the mirror tests below
+
+
+def _mirror_setup(tmp_path, *, body="Shared text", task=False, extra_b=""):
+    """Two managed files, ``a.md``/``b.md``, both already showing node ``_MX``.
+
+    Both base snapshots are recorded (so a freshly built ``ProjectionIndex``
+    sees two owners) and the on-disk files equal their bases -- i.e. a
+    settled, fully synced mirror pair. Returns ``(conn, reconciler, a, b)``.
+    """
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    _seed_node(conn, _MX, "task" if task else "claim", body, "open" if task else None)
+    line = (
+        f"- [ ] {body} {contract_anchor(_MX)}\n" if task else f"{body} {contract_anchor(_MX)}\n"
+    )
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    for path, extra in ((a, ""), (b, extra_b)):
+        text = render(parse(_managed(line + extra)))
+        base_store.put(conn, root_id, str(path), text)
+        path.write_text(text, encoding="utf-8")
+    return conn, Reconciler(conn, OriginTracker()), a, b
+
+
+def _read(path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def test_mirror_edit_in_a_reaches_b_in_the_same_call(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(f"Edited in A {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(a))
+
+    assert store.get_node(conn, _MX).body == "Edited in A\n"
+    assert "Edited in A" in _read(b)
+    assert "Shared text" not in _read(b)
+    assert _read(b).endswith(f"Edited in A {contract_anchor(_MX)}\n")
+
+
+def test_mirror_edit_in_b_reaches_a_too(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    b.write_text(_managed(f"Edited in B {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(b))
+
+    assert "Edited in B" in _read(a)
+
+
+def test_mirror_checkbox_toggle_propagates(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path, body="Ship it", task=True)
+    a.write_text(_managed(f"- [x] Ship it {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(a))
+
+    assert store.get_node(conn, _MX).task_state == "done"
+    assert f"- [x] Ship it {contract_anchor(_MX)}" in _read(b)
+
+
+def test_mirror_propagation_keeps_the_other_files_own_edits(tmp_path):
+    y = "6p5zkk6x"
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    # b.md also shows a second, unrelated node the user then edits and saves.
+    _seed_node(conn, y, "claim", "other original")
+    root_id = store.list_sync_roots(conn)[0]["id"]
+    both = render(
+        parse(
+            _managed(
+                f"Shared text {contract_anchor(_MX)}\nother original {contract_anchor(y)}\n"
+            )
+        )
+    )
+    base_store.put(conn, root_id, str(b), both)
+    b.write_text(both, encoding="utf-8")
+    reconciler = Reconciler(conn, OriginTracker())  # rebuild the index from the new base
+    b.write_text(
+        _managed(f"Shared text {contract_anchor(_MX)}\nother EDITED {contract_anchor(y)}\n"),
+        encoding="utf-8",
+    )
+    a.write_text(_managed(f"Edited in A {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(a))
+
+    text_b = _read(b)
+    assert f"Edited in A {contract_anchor(_MX)}" in text_b  # the mirror text arrived...
+    assert f"other EDITED {contract_anchor(y)}" in text_b  # ...and B's own edit survived
+    assert store.get_node(conn, y).body == "other EDITED\n"  # and was reconciled, not lost
+
+
+def test_mirror_same_line_edited_in_both_files_conflicts_without_loss(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(f"A version {contract_anchor(_MX)}\n"), encoding="utf-8")
+    b.write_text(_managed(f"B version {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(a))
+
+    assert store.get_node(conn, _MX).body == "A version\n"  # the first cycle committed
+    rows = conn.execute(
+        "SELECT cause_ref FROM review_queue WHERE cause_kind='conflict'"
+    ).fetchall()
+    assert len(rows) == 1  # exactly one conflict, not a ping-pong of them
+    assert json.loads(rows[0][0])["vault_text"] == "B version"  # B's version is kept
+    assert "A version" in _read(b) and "B version" not in _read(b)  # hub wins the file
+    # settled: a further cycle on either file changes nothing
+    before = (_read(a), _read(b))
+    reconciler.on_change(str(a))
+    reconciler.on_change(str(b))
+    assert (_read(a), _read(b)) == before
+
+
+def test_mirror_propagation_does_not_recurse_or_ping_pong(tmp_path, monkeypatch):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(f"Edited in A {contract_anchor(_MX)}\n"), encoding="utf-8")
+    calls: list[str] = []
+    real_cycle = Reconciler._cycle
+
+    def spy(self, path):
+        calls.append(Path(path).name)
+        return real_cycle(self, path)
+
+    monkeypatch.setattr(Reconciler, "_cycle", spy)
+
+    reconciler.on_change(str(a))
+
+    assert calls == ["a.md", "b.md"]  # source once, its one mirror once -- never back to a.md
+    # the daemon's own write to b.md is what the watcher would see next; that
+    # cycle is quiet and does not propagate anywhere
+    calls.clear()
+    reconciler.on_change(str(b))
+    assert calls == ["b.md"]
+
+
+def test_mirror_join_with_differing_text_hub_wins_and_is_reviewed(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    _seed_node(conn, _MX, "claim", "Hub text")
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a_text = render(parse(_managed(f"Hub text {contract_anchor(_MX)}\n")))
+    base_store.put(conn, root_id, str(a), a_text)
+    a.write_text(a_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(b), render(parse(_managed(""))))
+    b.write_text(_managed(f"A stale or edited paste {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    Reconciler(conn, OriginTracker()).on_change(str(b))
+
+    assert store.get_node(conn, _MX).body == "Hub text\n"  # the join did not overwrite the hub
+    assert f"Hub text {contract_anchor(_MX)}" in _read(b)  # b.md now shows the hub's text
+    rows = conn.execute(
+        "SELECT cause_ref FROM review_queue WHERE cause_kind='conflict'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert json.loads(rows[0][0])["vault_text"] == "A stale or edited paste"
+    assert _read(a) == a_text  # the source file was never touched
+
+
+def test_mirror_join_with_identical_text_is_quiet(tmp_path):
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    _seed_node(conn, _MX, "claim", "Shared text")
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a_text = render(parse(_managed(f"Shared text {contract_anchor(_MX)}\n")))
+    base_store.put(conn, root_id, str(a), a_text)
+    a.write_text(a_text, encoding="utf-8")
+    base_store.put(conn, root_id, str(b), render(parse(_managed(""))))
+    b.write_text(_managed(f"Shared text {contract_anchor(_MX)}\n"), encoding="utf-8")
+    history_before = store.history(conn, _MX)
+
+    Reconciler(conn, OriginTracker()).on_change(str(b))
+
+    assert store.history(conn, _MX) == history_before
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_removing_one_mirror_keeps_the_node_and_the_other_file(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    b_before = _read(b)
+    a.write_text(_managed(""), encoding="utf-8")
+
+    reconciler.on_change(str(a))
+
+    assert store.get_node(conn, _MX).status == "live"
+    assert _read(b) == b_before
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_removing_the_last_mirror_deletes_an_s0_node(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(""), encoding="utf-8")
+    reconciler.on_change(str(a))
+    b.write_text(_managed(""), encoding="utf-8")
+
+    reconciler.on_change(str(b))
+
+    with pytest.raises(store.NodeNotFoundError):
+        store.get_node(conn, _MX)
+
+
+def test_a_failing_mirror_never_fails_the_source_cycle(tmp_path, monkeypatch, caplog):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(f"Edited in A {contract_anchor(_MX)}\n"), encoding="utf-8")
+    real_cycle = Reconciler._cycle
+
+    def flaky(self, path):
+        if Path(path).name == "b.md":
+            raise RuntimeError("boom")
+        return real_cycle(self, path)
+
+    monkeypatch.setattr(Reconciler, "_cycle", flaky)
+
+    with caplog.at_level("WARNING"):
+        reconciler.on_change(str(a))  # must not raise
+
+    assert store.get_node(conn, _MX).body == "Edited in A\n"  # source cycle completed
+    assert "mirror propagation" in caplog.text
+
+
+def test_project_node_change_rewrites_every_mirror(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    store.commit_node(
+        conn, _MX, new_body="Changed on the hub", change_class="patch", facets_touched=[],
+        author="human",
+    )
+
+    paths = reconcile.project_node_change(conn, [_MX], OriginTracker())
+
+    assert sorted(Path(p).name for p in paths) == ["a.md", "b.md"]
+    assert "Changed on the hub" in _read(a)
+    assert "Changed on the hub" in _read(b)

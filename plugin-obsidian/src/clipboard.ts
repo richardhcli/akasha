@@ -13,9 +13,9 @@ import type { Plugin } from "obsidian";
  * API, and does not rewrite clipboard payloads. Its job is:
  *   1. Export pure, unit-testable matchers for the anchor grammar.
  *   2. Export `registerClipboard` as the future onload() wiring point that
- *      documents the cut→MOVE (battery E04) vs copy→E_DUP_ID (battery E05)
- *      reconcile semantics that plain-text-preserving cut/copy naturally
- *      trigger once both files are saved.
+ *      documents the cut→MOVE (battery E04) vs copy→live MIRROR (battery
+ *      E05/E21, since M19) reconcile semantics that plain-text-preserving
+ *      cut/copy naturally trigger once both files are saved.
  */
 
 /** RFC4648 lowercase base32 alphabet (spec §4.1 / kernel/ids.py `A`). */
@@ -88,7 +88,9 @@ export function collectAnchors(text: string): string[] {
  *   - CUT + paste into another managed file → clean MOVE (battery E04 /
  *     golden/reconcile/e04-cross-file-move/, companion e04b-s0-cross-file-move/).
  *   - COPY + paste without removing the source → two live lines with the
- *     same id → review `E_DUP_ID` (battery E05 / golden/reconcile/e05-cross-file-dup/).
+ *     same id in different files → a live mirror of one node, kept identical
+ *     by the daemon (battery E05/E21, spec §4.7 "Mirrors"). The same id twice
+ *     inside ONE file is still `E_DUP_ID`.
  *
  * Call this from `TmHubPlugin.onload()` when a later task wires it in.
  * This task intentionally does not edit `main.ts`.
@@ -96,7 +98,7 @@ export function collectAnchors(text: string): string[] {
  * // SPEC-QUESTION: T6.5 Files list excludes main.ts, so registerClipboard
  * // is not invoked from onload() yet. If a future task decides a non-noop
  * // hook is required (e.g. to strip anchors on copy intentionally — which
- * // would break E04/E05), wire it here and call registerClipboard(this)
+ * // would break E04/E05/E21), wire it here and call registerClipboard(this)
  * // from main.ts. Until then this remains the documented no-op wiring point.
  */
 export function registerClipboard(_plugin: Plugin): void {
