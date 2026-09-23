@@ -17,7 +17,7 @@ law, not user or setup docs.
 2. `docs/mvp-spec.md` — the authoritative *what and how* for the MVP
    (repo layout, schema, algorithms, API). Implementation must match this
    spec exactly; it is not a suggestion.
-3. `docs/build-plan.md` — the current work queue (`T13.1`…`T17.3`), a
+3. `docs/build-plan.md` — the current work queue (`T13.1`…`T19.7`), a
    post-MVP usability phase sequenced into small, per-file tasks with
    explicit `Verify` commands and Definitions of Done. The MVP core that
    this plan builds on (`T0.1`…`T12.6`) is archived, all DONE, at

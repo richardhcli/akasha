@@ -1,7 +1,7 @@
 # Task status
 
-Machine-checkable status for every task in `docs/build-plan.md` (M13–M17, 19
-tasks total: 6 + 6 + 2 + 2 + 3). This file is the single source of truth for "what's done" — an
+Machine-checkable status for every task in `docs/build-plan.md` (M13–M19, 40
+tasks total: 6 + 6 + 2 + 2 + 3 + 14 + 7). This file is the single source of truth for "what's done" — an
 autonomous agent picking up work should read this file first, find the next
 `TODO` task whose `Depends on` tasks are all `DONE` **and** whose milestone's
 `Depends on:` milestones are all closed, and work it per the rules in
@@ -39,7 +39,7 @@ the task, and note anything a future agent needs (e.g. a new
 > 6h, so its duration/chunking needs re-scoping before it can), and the
 > real-deployment (non-ephemeral) autostart/kill-9 attestation has no CI
 > equivalent by nature — the 2026-07-25 local-Windows demonstration is
-> evidence toward it, not a substitute. Neither blocks anything in M13–M17.
+> evidence toward it, not a substitute. Neither blocks anything in M13–M18.
 >
 > **What this plan is for.** A spec-vs-shipped-code audit on 2026-08-05 (the
 > method `docs/agents/overnight-goals.md` §"When the list is empty"
@@ -189,3 +189,87 @@ capability that does not exist.
 | T17.1 | Rewrite onboarding docs around the installer-first flow | TODO | **This is pre-mvp T12.6, carried forward and renumbered** — its original scope, files and DoD are unchanged, and its original dependencies T12.1–T12.5 are all `DONE` in `docs/pre-mvp/task-status.md`. Carried forward rather than left behind because a `TODO` row under `docs/pre-mvp/` can never be selected by `fleet-orchestrator`, which scans only `docs/build-plan.md` + this file. `docs/pre-mvp/**` is read-only and was not edited to record this. |
 | T17.2 | Task/todo workflow guide | TODO | Teach the round trip as a user performs it, quoting §4.7's grammar exactly and stating the in-contract obligation honestly (lossless within contract; violations flagged, never guessed — PRD invariant 5). Prefer `docs/dogfood/todo-sync-report.md`'s **observed** behavior over intended behavior if T15.1 has landed. Every example must parse clean against the shipped parser — verify, do not assume. Also owns the fix for `docs/user/README.md`'s **stale project-maturity paragraph** ("M0–M10 … M11 in progress … no packaged installer yet … M12 planned" — all three now false), while keeping the two honestly-pending legs at the top of this file disclosed. Shares `docs/user/README.md` with T17.3. Depends on T13.5, T14.1. |
 | T17.3 | Definitions & the DAG guide | TODO | New `docs/user/definitions.md`: node types, facets and why edges bind to one, the S0–S4 ladder, pin vs track, then one worked example end to end using only shipped surfaces. PRD R9 language rule ("vetted by you", never "true") is both content and a verification check. Every command shown must actually execute in order against a fresh scratch daemon. Shares `docs/user/README.md` with T17.2. Depends on T14.4, T14.6. |
+
+---
+
+## M18 — Zero-flag onboarding: from install to a live, syncing vault in two commands (Depends on: nothing)
+
+Milestone DoD: a user with only `uv`/`pipx` and a vault reaches a live, syncing
+vault with two commands and no second terminal (install, then
+`akasha setup <vault>`); every later verb works with `AKASHA_TOKEN` in the
+environment and no per-call flags; demonstrated by an automated test against a
+scratch `HOME`. Per the 2026-09-23 rulings (`docs/spec-questions.md` M18-A,
+M18-B) the DoD also includes the saved `0600` human-token file (T18.9) and
+track-every-Markdown-file-by-default with a `.tmignore` deny-list
+(T18.10a–c).
+
+> **Eligibility note for the overnight/fleet scanner:** **T18.1 and T18.2 are
+> file-disjoint and are the natural first parallel cohort** (T18.1:
+> `pyproject.toml`, `kernel/store.py`, its own new test; T18.2: `cli/main.py`,
+> `test_cli.py`, `cli.md`). **T18.2 → T18.3 → T18.4 → T18.5 → T18.6 → T18.7 →
+> T18.8 is one strictly sequential chain** — every one touches
+> `src/akasha/cli/main.py` and `docs/user/cli.md` — and T18.2 additionally
+> waits on **T14.4** (the last M14 task to touch those files). **T18.12
+> shares `docs/user/quickstart.md` with T17.1: T17.1 must be `DONE` first.**
+> **T18.10a is file-disjoint from the whole CLI chain and may run in the first
+> parallel cohort** with T18.1/T18.2. T18.9 extends the CLI chain (after T18.8).
+> **T18.10b and T18.10c share `src/akasha/sync/reconcile.py` with M19
+> (live transclusion) — run them after M19's reconcile tasks.** T18.10c edits
+> `docs/mvp-spec.md` §4.7 and must leave every protected parser/linter/golden
+> test **unmodified** (see the task). **T18.11 is `BLOCKED` (needs a real
+> Linux/macOS host) and must never be flipped to `TODO` for an autonomous run**;
+> `fleet-orchestrator` selects only literal `TODO`, so this keeps it out by
+> construction. Every mutating/process verb needs its
+> `--dry-run` behavior asserted (zero side effects) and must never touch the
+> real `tm-daemon` config dir in tests.
+
+| Task | Goal | Status | Notes |
+|---|---|---|---|
+| T18.1 | Make the wheel self-contained: ship the migrations | TODO | Verified 2026-09-23: `uv build --wheel` output has **0** `.sql` files; `_migrations_dir()`'s non-frozen branch resolves outside `site-packages` for an installed wheel. Blocks every `uv tool install`/`pipx`/`pip` route. Files list includes `kernel/store.py` per the ratified T12.5 precedent (spec-questions M18-E). No dependency; file-disjoint from T18.2. |
+| T18.2 | Honor `AKASHA_TOKEN` and `AKASHA_BASE_URL` in the CLI | TODO | The quickstart already tells users to `export AKASHA_TOKEN`, but `--token` has no `envvar` — the export does nothing on its own. Environment is the only credential source this milestone adds (M18-A). Depends on T14.4 (shared `cli/main.py`). |
+| T18.3 | `akasha up` / `akasha down`: a detached daemon lifecycle | TODO | Adds `tm-daemon.pid` beside the existing lock (neutral name, M18-C). Idempotent both ways; tests spawn a real detached daemon against a `tmp_path` config. Depends on T18.2. |
+| T18.4 | Start the daemon on demand for default-endpoint verbs | TODO | Default endpoint only — never for explicit `--base-url`/`AKASHA_BASE_URL`, `--dry-run`, or `AKASHA_NO_AUTOSTART`; always a visible stderr line. Safe because startup reconcile is idempotent (§4.8). Depends on T18.2, T18.3. |
+| T18.5 | `akasha setup [VAULT]`: nothing to a live vault in one command | TODO | A **new** verb; `akasha init`'s exit-4 contract and `test_cli_init.py` stay untouched (shared mint helper only). Prints the token once + bootstrap link with a secrets warning; never writes the token to disk. Depends on T18.4. |
+| T18.6 | `akasha status`: one-screen diagnosis | TODO | Read-only (`_request` only). Whether `W_UNMANAGED_ANCHOR` reaches `/sync/status` is unverified — check, log a finding if not, do not widen scope. Depends on T18.5. |
+| T18.7 | `akasha render FILE`: see a transclusion resolved, headlessly | TODO | The only headless file-to-file view: embeds are link-form on disk and stay so; this prints them expanded, read-only, asserting the file's sha256 is unchanged. Also serves T15.1's embed leg. Depends on T18.6. |
+| T18.8 | `akasha plugin install VAULT`: one-step Obsidian plugin install | TODO | `--from DIR` copies the *built* plugin (`main.js` is gitignored; bundling into the wheel is a recorded follow-up, not done). `data.json` gets `daemonUrl` only — never a token. Depends on T18.7. |
+| T18.9 | Save the human token: a `0600` token file the CLI reads | TODO | Ruling M18-A (2026-09-23): agents may act as the human — a local agent that shells out to `akasha` uses the saved token, knowingly accepted. Narrow: rules on the CLI/plugin credential channel only; the API's agent-class-token → proposal rewrite (T4.6) is untouched. Neutral `tm-token` path, mode set at creation; plugin pre-fill only via explicit `--with-token` with a cloud/`.git` warning. Depends on T18.5, T18.8. |
+| T18.10a | `.tmignore` matcher (pure, no I/O) | TODO | Ruling M18-B (2026-09-23): deny-list, not allow-list. Neutral name `.tmignore` per rule 6 (the user wrote `akashaignore` — one-line rename if they overrule rule 6). gitignore-style subset, stdlib only, built-in defaults (`.obsidian/`, `.git/`, `.trash/`, `node_modules/`, non-`.md`). File-disjoint — first-cohort eligible. |
+| T18.10b | Apply the deny-list in the watcher and discovery | TODO | Ignored paths never reach the debouncer or `discover_untracked_files`; editing `.tmignore` applies live. Shares `sync/reconcile.py` with M19 — run after it. Depends on T18.10a. |
+| T18.10c | Track every non-ignored Markdown file by default | TODO | Reconcile-layer adoption shim (parse with virtual `tm: 1`); parser/linter/golden untouched and must pass **unmodified**; prose-only files are never written; real `tm: 1` added lazily on first projection. Amends §4.7's "never parsed" sentence. Depends on T18.10b. |
+| T18.11 | Login-time service install for Linux/macOS | BLOCKED: needs a real Linux/macOS host to attest (same class as T12.4/T12.5, `docs/acceptance.md` row 9) | Polish, not a prerequisite — T18.4 makes a stopped daemon safe. |
+| T18.12 | Rewrite the quickstart around the two-command flow | TODO | Doc-only with objective checks (every command runs in order against a scratch `HOME`; every verb in `--help`). Depends on T17.1 (same file), T18.1–T18.9 and T18.10a–c. |
+
+---
+
+## M19 — Live transclusion: the same anchor in several files is one node, kept identical everywhere (Depends on: nothing)
+
+Milestone DoD: with two files sharing a `^tm-id` line, an edit or checkbox toggle
+in either rewrites the other within one sync cycle (no rescan, no restart); an
+`akasha set`/UI edit rewrites both; deleting one mirror never deletes the node;
+a same-line edit in both files loses nothing (conflict branch + one review, no
+write ping-pong); a real watcher thread proves it end to end; the E05 case is
+re-ruled explicitly and E04/E04b/single-file `E_DUP_ID` pass **unmodified**;
+`make check` + `make battery` green. User ruling and its F3 consequences:
+`docs/spec-questions.md` M19-0. Scope limit: **one-line blocks only** (M19-A).
+
+> **Eligibility note for the overnight/fleet scanner:** **T19.1 is doc-only and
+> first.** T19.2 → T19.3 → T19.4 is one strictly sequential chain (all three
+> edit `src/akasha/sync/reconcile.py` and `tests/unit/sync/test_reconcile.py`).
+> T19.5 and T19.6 are file-disjoint from each other and may run in parallel
+> after T19.4. **T19.3 deliberately edits protected tests** (the E05 unit test,
+> battery case and golden `expected_ops.json`) — its Files list and "Authorized
+> changes" section name them exactly; nothing else in `tests/golden` or
+> `tests/battery` may change in that task (verify with `git diff --stat`).
+> **T18.10b/c (M18) share `reconcile.py` and run after T19.4.** T19.7 shares
+> `docs/user/README.md` with T17.2/T17.3, so it waits for T17.3.
+
+| Task | Goal | Status | Notes |
+|---|---|---|---|
+| T19.1 | Amend the spec and the PRD: same anchor across files is a mirror | DONE | Doc-only. Narrows §4.7 `E_DUP_ID` to "twice in one file", adds a Mirrors paragraph, and edits the **F3 row itself** in `vision.md` (§5 is normative) with a scoped exception (a mirror is one atom shown twice — identity, not substitution). No other F-row touched. **Landing evidence:** Run 2026-09-23 (interactive session, implemented inline — no separate `fleet-verifier`). §4.7 `E_DUP_ID` narrowed to "twice in one file"; Mirrors paragraph added; §4.8 propagation paragraph added; §6.2's E05 line re-worded; the **F3 row itself** in `vision.md` carries the scoped exception. Verify (objective greps): `twice in a sync root` absent from `mvp-spec.md`; `mirror` present in both docs; `git diff --stat` touched only `mvp-spec.md`/`vision.md`. **Correction (a late review caught the first draft of this note, which wrongly said no doc edit was needed):** `docs/user/dogfood-windows.md` (one manual-test row), `plugin-obsidian/TESTPLAN.md` (§4b + pass criteria) and `plugin-obsidian/src/clipboard.ts` (comments only; `tsc --noEmit` clean) DID state the old cross-file `E_DUP_ID` rule and were corrected — Files list completed under the ratified T8.0/T8.1 rule, logged in M19-0. `acceptance.md` needed none (its `E_DUP_ID` mention is the single-file certain-repair). Verified also that the plugin itself does **not** rewrite pasted anchors (`registerClipboard` is a no-op), so copy-paste mirrors work with the plugin enabled. |
+| T19.2 | `ProjectionIndex`: a node may have several owning files | DONE | Additive `owners()`; `owner()` (last-writer) unchanged so the existing test passes. **No schema change** — membership is already derived from every file's base snapshot. Depends on T19.1. **Landing evidence:** Additive `ProjectionIndex.owners()` (frozenset); `owner()` unchanged in meaning, now falling back to a remaining holder instead of `None` when the last writer lets go of an id another file holds. No schema/table change — `build()` still derives from base snapshots (asserted by a two-snapshot test). `owner()` callers audited: `_compute_ops` (created/deleted branches, both moved to `owners()` in T19.3) and `project_node_change` (T19.4). Verify: `tests/unit/sync/test_reconcile.py` green; ruff clean; `pyright` 0 errors on the file. |
+| T19.3 | Mirror-aware ops, and the explicit re-ruling of E05 | DONE | Pure logic. Join ⇒ existing adopt op flagged `mirror`, not `E_DUP_ID`; removing one mirror is silent; `E_DELETED_S1` filtered only when another owner exists. Authorized protected changes: `test_cross_file_dup_withholds_and_reviews`, the E05 battery case, `e05-cross-file-dup/expected_ops.json` — nothing else. Depends on T19.2. **Landing evidence:** Pure logic in `_compute_ops`/`diff_blocks`: join ⇒ adopt `Op(mirror=True)` (never `E_DUP_ID`); removal with another owner is silent; `E_DELETED_S1` filtered only when another owner exists (before `pause_and_diff` counts). **Protected-test changes were exactly the three authorized** and nothing else (`git diff --stat tests/golden tests/battery` confirms): the E05 unit test → `test_cross_file_dup_joins_as_mirror`, the E05 battery case, `e05-cross-file-dup/expected_ops.json` (`[]` → one adopt op). E04, E04b, `tests/golden/test_serialization.py` (single-file `E_DUP_ID`) and `tests/unit/contract/**` pass **unmodified**. Verify: `tests/unit/sync tests/unit/contract tests/golden tests/battery` 275 passed at landing. |
+| T19.4 | Propagate a committed edit to every other mirror | DONE | The feature. `on_change` = `_cycle(path)` + `_cycle` on each other owner (three-way, never a blind write, non-recursive). Join with differing text: hub wins + conflict branch (M19-C). `project_node_change` reprojects all owners. Depends on T19.3. **Landing evidence:** The feature. `on_change` = `_cycle(path)` + a full three-way `_cycle` on every other owner of each committed id (non-recursive; a failing mirror is logged, never fails the source cycle). Join with differing text: hub wins + conflict branch + one review (M19-C). `project_node_change` reprojects all owners. **Mutation-checked**: disabling propagation fails 7 of the new tests; disabling join handling fails the join test; both restored byte-identical. 12 new unit tests + 2 API tests (`PATCH` body and `task_state` rewrite both mirror files in the same request, LF-only). Verify: `tests/unit/sync tests/integration/test_projection_writeback.py tests/battery` green. |
+| T19.5 | Battery: mirror cases E21–E24 | DONE | New cases/fixtures only; existing E01–E20 untouched. E24 records the multi-parent `composes` choice (M19-B). Depends on T19.4. **Landing evidence:** New cases E21 (edit A→B, settles), E22 (concurrent same-line edit ⇒ one conflict, B's version kept, hub wins the file, settled), E23 (remove one mirror ⇒ node live, other file byte-identical, then last S0 mirror ⇒ deleted), E24 (re-indent in B ⇒ second `composes` parent, A untouched, M19-B); E21–E23 join the aggregate silent-guess counter (0). New fixture dirs only; the only deleted battery lines are the authorized E05 ones. `make battery`: 51 passed. |
+| T19.6 | Live proof: a real watcher, file to file | DONE | Real `Watcher` thread modelled on the D10 wiring test; A→B within 3 s, checkbox, no echo loop (cycle count asserted), hub `PATCH` rewrites both. Depends on T19.4. **Landing evidence:** Real `watchdog` observer + persistent `OriginTracker`/`Reconciler`/`Watcher` + real `create_app`: A→B in **0.122–0.124 s** (debounce 0.1 s; expect ≈0.5 s at the production 500 ms), B→A, checkbox, non-`.md` ignored (D10), hub `PATCH` rewrites both files in-request, and **each mirror is written exactly once** (no ping-pong). **Real finding while stabilizing it:** an initial version asserted zero forwarded reconcile cycles for the daemon's own writes and failed ~1/40 — the origin tracker's echo record is single-use, so a second filesystem event for the same write reaches the reconciler as a *quiet* cycle (no write, no propagation). Harmless and pre-existing; the test now asserts on *writes*. Post-fix: 60/60 runs green (a 2.5% flake would still pass 60 runs ~22% of the time, so this is reassurance, not proof). Also verified by hand with a real `akasha daemon` process across three files (edit either side, checkbox, `akasha set`): all propagated, zero review items. |
+| T19.7 | User guide: transclusion | TODO | New `docs/user/transclusion.md`; states the limits (one-line blocks, per-file indentation, conflict behavior). Every example executed against a scratch daemon. Depends on T19.6 and T17.3 (shared `docs/user/README.md`). |

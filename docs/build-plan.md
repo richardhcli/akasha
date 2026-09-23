@@ -18,7 +18,7 @@ hosted `windows-latest`/`ubuntu-latest` CI runners have been genuinely green
 since run `30183257449` (2026-07-26). **Do not re-open, re-litigate, or
 re-verify any pre-mvp task**; build forward from that state.
 
-**Purpose of this plan (M13–M17).** The MVP is code-complete and
+**Purpose of this plan (M13–M19).** The MVP is code-complete and
 acceptance-green, but a spec-vs-shipped-code audit performed 2026-08-05 (the
 method `docs/agents/overnight-goals.md` §"When the list is empty" prescribes,
 the same one that found T10.2c, T9.2c, T9.3b and T9.6) found that the two
@@ -46,6 +46,22 @@ of a real user with a real daemon, because automated tests have never been
 the thing this project trusts on its own (every real Windows bug in its
 history was found by running the product, not by a test). M17 rewrites the
 user-facing docs around what M13/M14 land.
+
+**M18 (added 2026-09-23, user-directed — `docs/spec-questions.md` entry
+M18-0)** is a second onboarding pass. M12 shipped the pieces (`akasha init`,
+`akasha sync add`, the web-UI bootstrap link, the Windows installer); a live
+run of the shipped daemon on a scratch vault the same day showed the
+*sequence* is still the barrier: install → `init` → copy a secret → start the
+daemon in a second terminal → `export` the secret and pass `--token` on every
+verb → `sync add` → hand-add `tm: 1` front matter to every file. The file
+watching itself was already event-driven and needed no work. The reference
+point was `codegraph`, whose whole setup is one install line plus one
+`init`, with no process for the user to babysit. Two defects found while
+checking the ground truth are M18's first tasks: the built **wheel contains
+zero `.sql` migrations** (so `uv tool install`/`pip install` yields a daemon
+with no schema — only the PyInstaller path was ever fixed, T12.5), and the
+CLI **never reads `AKASHA_TOKEN`** even though the quickstart tells users to
+`export` it.
 
 **Nothing in this plan invents schema, endpoints, ID formats, or grammar.**
 Every task is either wiring an already-shipped code path to an already-
@@ -156,6 +172,16 @@ green result is never read as "the vault is now usable."
                        └─┬─► M17 (docs)
                          │
   **M14 (definition DAG)** ─┴─► **M16 (real-use: definition DAG)**
+
+  M18 (onboarding):  T18.1 (wheel) ── free-standing, no dependency
+                     T18.2 … T18.8 (CLI chain) ◄── T14.4   [share cli/main.py]
+                     T18.12 (quickstart) ◄── T17.1 + T18.1–T18.8 [share quickstart.md]
+                     T18.9 (token file) ◄── T18.5, T18.8 [cli/main.py]
+                     T18.10a → T18.10b → T18.10c (.tmignore, track-by-default)
+                       T18.10b/c share sync/reconcile.py with M19 → run after T19.4
+  M19 (live transclusion): T19.1 (spec) → T19.2 → T19.3 → T19.4 → T19.5 / T19.6 → T19.7
+                       T19.2–T19.4 share sync/reconcile.py → strictly sequential
+                     T18.11 ── BLOCKED (real host)
 ```
 
 M13 and M14 both depend on nothing (their real prerequisite, M0–M12, is
@@ -168,7 +194,13 @@ automatically. Within M13, T13.1 and T13.2 are file-disjoint and may run in
 one parallel cohort. M15 and M16 are leaf milestones — nothing depends on
 them, which is deliberate: each contains a `BLOCKED: human-only` task, so a
 milestone gate pointing at them could never be satisfied. M17 therefore
-depends on M13 and M14 only.
+depends on M13 and M14 only. M18 has **no milestone gate** (its wheel fix
+and env-var task are independent of everything above), but its CLI tasks
+share `src/akasha/cli/main.py`, `tests/integration/test_cli_dry_run.py` and
+`docs/user/cli.md` with M13/M14's, so they carry per-task dependencies on
+T14.4 (the last M14 task to touch those files) and on each other, and run
+sequentially; T18.1 is file-disjoint from all of them and may run in the
+first parallel cohort with T18.2.
 
 ---
 
@@ -400,6 +432,247 @@ step describing a capability that does not exist.
 - **Steps** — (1) Explain, in user language, the pieces that make the loop work: node types, what a facet is and why edges bind to one, the maturity ladder S0→S4 and what each stage buys, and pin vs track. (2) Walk one worked example end to end using **only shipped surfaces**: `akasha new definition ... --facet`, link via the UI span form, `akasha neighborhood`, break a facet, see the badge, resolve it three ways, `akasha split`, work the reassignment queue, `akasha vet`. (3) State PRD R9's language rule and honor it throughout: "vetted by you", never "true"; the system guarantees your graph's internal consistency, not correspondence with reality. (4) Explain `facet_coverage` on the dashboard and why a low number means the loop is inert. (5) Link from `docs/user/README.md`.
 - **Verify** — Doc-only. Objective check: every command shown runs successfully in order against a scratch daemon (run them; a command that errors is a doc bug), and `grep -rn "\btrue\b" docs/user/definitions.md` surfaces no claim-about-the-world usage (PRD R9). Plus a fresh-eyes read-through.
 - **DoD** — every worked-example command executes as written against a fresh scratch daemon; the guide covers create → link-with-span → navigate → break → adjudicate → refactor → vet; R9 language respected throughout.
+
+---
+
+## M18 — Zero-flag onboarding: from install to a live, syncing vault in two commands (Depends on: nothing)
+
+**Milestone DoD:** a user with only `uv`/`pipx` and a vault directory reaches a
+live, syncing vault with **two commands and no second terminal** — (1) install,
+(2) `akasha setup <vault>` — and every later verb works with `AKASHA_TOKEN`
+in the environment and no per-call flags. Concretely: the installed wheel
+carries its own migrations; the daemon is running detached; the vault is
+registered and reconciled; the printed link opens the authenticated web UI;
+a verb run while the daemon is down starts it (visibly, on the default
+endpoint only); `akasha status` says in one screen why nothing is syncing;
+`akasha render` shows an embed resolved to its source's current text; and the
+Obsidian plugin can be installed into a vault with one command. Demonstrated
+by an automated test that drives `setup` → edit → `set` → `render` against a
+scratch `HOME`, never the real `tm-daemon` dir. `make check` + `make battery`
+green. Per the 2026-09-23 rulings (`docs/spec-questions.md` M18-A, M18-B) the
+DoD also includes: the human token is saved to a `0600` file the CLI reads
+(T18.9), and every Markdown file under a sync root is tracked by default with
+a `.tmignore` deny-list (T18.10a–c).
+
+**What M18 does not do (guardrails).**
+- It never mints, links, adopts or vets a node (design invariant 3). `setup`
+  handles infrastructure only; a node still comes into being only when the
+  human types `^tm-new` or calls a create verb.
+- Per ruling M18-A the human token **is** saved (T18.9: `0600`, neutral path),
+  so a local agent that shells out to `akasha` acts as the human — knowingly
+  accepted. Nothing in M18 touches the API's agent-class-token → proposal
+  rewrite (§4.11, T4.6), and no task lets an unauthenticated caller reach a
+  `human only ∅` endpoint.
+- It does not add text propagation between files: embeds stay `![[path#^tm-id]]`
+  link-form on disk (`contract/render.py`), and `akasha render` (T18.7) is a
+  read-only view. Mirroring text into other files would be a §4.7 grammar
+  change adjacent to PRD F3 and is **not** proposed here; it needs its own
+  ruling.
+- No new endpoint, schema, ID format or grammar. New operational artifacts
+  are limited to `tm-daemon.pid` (T18.3, neutral name, beside the existing
+  lock file) and a plugin install directory inside a vault (T18.8).
+
+### T18.1 — Make the wheel self-contained: ship the migrations
+- **Goal** — Fix the defect the 2026-09-23 audit verified: `uv build --wheel` on this repo yields a wheel with **zero** `.sql` files (`unzip -l … | grep -c '\.sql'` → `0`), because `pyproject.toml`'s `packages = ["src/akasha"]` cannot see the repo-root `migrations/` and `kernel/store.py::_migrations_dir()`'s non-frozen branch resolves `parents[3]/"migrations"`, which for an installed wheel is a path outside `site-packages`. Only the PyInstaller path was ever fixed (T12.5). Until this lands, no `uv tool install`/`pipx install`/`pip install` route can work.
+- **Depends on** — none.
+- **Files** — `pyproject.toml`, `src/akasha/kernel/store.py`, `tests/integration/test_wheel_install.py` (new). (`kernel/store.py` is outside a packaging task's natural Files list; its inclusion follows the ratified T12.5 precedent — `docs/spec-questions.md` T12.5 and M18-E.)
+- **Spec** — §3 (toolchain), §4.4 (migrations are forward-only numbered `.sql`); `docs/spec-questions.md` T12.5, **M18-E**.
+- **Steps** — (1) Add a hatch `force-include` mapping the repo-root `migrations/` into the wheel as package data at `akasha/migrations`; **do not move the directory** (golden fixtures, `scripts/windows/build-exe.ps1`'s `--add-data`, and every existing test resolve the repo-root path). (2) In `_migrations_dir()`, keep the frozen branch first and unchanged; add a second branch — if `Path(__file__).resolve().parents[1] / "migrations"` exists (installed wheel), use it; otherwise fall through to the existing repo-root path, so every source-checkout caller is byte-for-byte unchanged. (3) New `tests/integration/test_wheel_install.py`: build the wheel into `tmp_path` (`uv build --wheel -o`), assert its `.sql` member set equals `migrations/*.sql` byte-for-byte, then **without network** unzip it to a temp dir and, in a subprocess with `PYTHONPATH` pointing at the unzipped tree, cwd elsewhere, and the repo root **not** importable, call `store.run_migrations` on a fresh temp DB and assert the schema exists (e.g. `nodes`, `sync_roots`, `tokens` tables). Skip cleanly (with a stated reason) only if `uv` is not on `PATH`.
+- **Verify** — `uv run pytest tests/integration/test_wheel_install.py tests/unit -k "migrat or wheel"`
+- **DoD** — the built wheel contains every migration, identical to the repo's; an unzipped-wheel subprocess with no repo root on the path migrates a fresh DB successfully; the frozen and source-checkout resolution paths are unchanged (existing migration tests green); `make check` + `make battery` green.
+
+### T18.2 — Honor `AKASHA_TOKEN` and `AKASHA_BASE_URL` in the CLI
+- **Goal** — Make the environment variable the quickstart already tells users to `export` actually work, so a user sets the secret once per shell instead of passing `--token "$AKASHA_TOKEN"` on every call. This is the cheapest real onboarding win: today (`cli/main.py`'s callback) `--token` has no `envvar`, so `export AKASHA_TOKEN=…` does nothing on its own.
+- **Depends on** — T14.4 (shares `src/akasha/cli/main.py` and `docs/user/cli.md`; run after it, never in parallel).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli.py`, `docs/user/cli.md`.
+- **Spec** — §4.12 (global flags `--token`, `--base-url`); §4.11 preamble (token classes); `docs/spec-questions.md` **M18-A** (why the environment is the *only* credential source this milestone adds).
+- **Steps** — (1) In the `main` callback, give `--token` `envvar="AKASHA_TOKEN"` and `--base-url` `envvar="AKASHA_BASE_URL"`. Precedence is typer's: explicit flag > environment > default. (2) An empty-string `AKASHA_TOKEN` must behave as unset (assert it — an exported-but-empty variable must not become an empty bearer). (3) `--help` may name the variables but must never print a token value (assert against `show_default`/`show_envvar` leaking a set value). (4) No other behavior change: `--json`, `--dry-run`, exit-code mapping untouched; `daemon`/`init`/`tray` still ignore both. (5) Document both variables in `docs/user/cli.md` next to the global flags.
+- **Verify** — `uv run pytest tests/integration/test_cli.py tests/integration/test_cli_dry_run.py`
+- **DoD** — with `AKASHA_TOKEN` set and no `--token`, a verb authenticates against a live test daemon; an explicit `--token` overrides the variable; an empty variable is treated as unset; `--help` output contains no secret; the dry-run meta-test is unchanged and green; `make check` + `make battery` green.
+
+### T18.3 — `akasha up` / `akasha down`: a detached daemon lifecycle
+- **Goal** — Remove "open a second terminal and leave it running": one verb starts the daemon detached and waits until it is healthy; one stops it. Idempotent in both directions.
+- **Depends on** — T18.2 (shares `cli/main.py`, `docs/user/cli.md`).
+- **Files** — `src/akasha/daemon.py`, `src/akasha/cli/main.py`, `tests/integration/test_cli_up.py` (new), `docs/user/cli.md`.
+- **Spec** — §4.12 (`daemon` is the only verb that is not an HTTP client — `up`/`down` are process verbs of the same class, like `init`/`tray`); the existing single-instance lock (`daemon.py`, T4.9); `docs/spec-questions.md` **M18-C**, **M18-D**.
+- **Steps** — (1) `daemon.serve()` writes its pid to `tm-daemon.pid` beside `tm-daemon.lock` **after** the lock is acquired and removes it in the same `finally` that logs shutdown; a second instance must never touch the first's pid file. (2) `up [--config PATH]`: if `GET /health` already answers at the config's `bind:port`, print the URL and exit 0 (no second spawn). Otherwise spawn `[sys.executable, "-m", "akasha.cli.main", "daemon", "--config", PATH]` — or `[sys.executable, "daemon", …]` when `sys.frozen` — detached (`start_new_session=True` on POSIX; `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` on Windows) with stdio to the null device (the daemon already writes its own rotating log in the config dir; print that path), then poll `/health` with a bounded timeout. Timeout → exit 1 naming the log path. Lock held but `/health` silent → exit 4 (spec §4.12 conflict class, same mapping `daemon` uses). (3) `down [--config PATH]`: read `tm-daemon.pid`; a missing file or a pid that is no longer a live process is a clean "not running" exit 0 and removes a stale file; otherwise terminate (POSIX `SIGTERM`; Windows terminate) and wait for the lock to release. State plainly in the docstring that an abrupt stop is safe by design — startup reconcile is idempotent (§4.8) and the project already survives `kill -9`. (4) Tests spawn a **real** detached daemon against a `tmp_path` config on a free port (never the default `tm-daemon` dir — assert `HOME`/`APPDATA` redirection): `up` → `/health` answers; second `up` → same pid, exit 0; `down` → process gone, lock released, pid file removed; stale pid file handled; a second `daemon` after `up` still exits 4.
+- **Verify** — `uv run pytest tests/integration/test_cli_up.py tests/integration/test_daemon_lock.py tests/integration/test_daemon_lock_multiprocess.py`
+- **DoD** — `up` leaves a healthy detached daemon and returns; repeat `up` is a no-op; `down` stops it and leaves no stale pid or held lock; the existing lock tests are unregressed; nothing touches the real config dir; `make check` + `make battery` green.
+
+### T18.4 — Start the daemon on demand for default-endpoint verbs
+- **Goal** — Give the user codegraph's "nothing to babysit" property: if an HTTP-client verb finds the daemon down, it starts it (once, visibly) and retries, so the daemon never has to be a thing the user remembers.
+- **Depends on** — T18.2, T18.3 (shares `cli/main.py`).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_autostart.py` (new), `docs/user/cli.md`.
+- **Spec** — §4.8 (startup reconcile is idempotent, so edits made while the daemon was down are reconciled on start — this is what makes lazy start *correct*, not just convenient); `docs/dogfood-plan.md` §B (the daemon must never do something the user cannot see); `docs/spec-questions.md` **M18-C**.
+- **Steps** — (1) In the HTTP request helper, on a connection-refused error, and **only when neither `--base-url` nor `AKASHA_BASE_URL` was supplied** (the default local endpoint) and `AKASHA_NO_AUTOSTART` is unset, run T18.3's `up` logic once and retry the request once. Never for an explicit base URL (test daemons, remote), never for `--dry-run` (it issues no HTTP). (2) Always print one line to stderr — `started daemon (log: <path>)` — never silent. (3) When a verb fails 401 and **no token was supplied by any route** (no flag, no env), append a one-line hint pointing at `akasha setup` and `export AKASHA_TOKEN=…`; when a token *was* supplied, print nothing extra. (4) Tests redirect `HOME`/`APPDATA` to `tmp_path` (assert the real `tm-daemon` dir is untouched): a verb against a down default endpoint starts a daemon, prints the notice, and succeeds; an explicit `--base-url` to a dead port fails without spawning anything (assert no process was started); `AKASHA_NO_AUTOSTART=1` disables it; `--dry-run` never spawns.
+- **Verify** — `uv run pytest tests/integration/test_cli_autostart.py tests/integration/test_cli_up.py tests/integration/test_cli.py`
+- **DoD** — a default-endpoint verb against a stopped daemon starts it exactly once with a visible notice and completes; every explicit-endpoint and `--dry-run` path spawns nothing (asserted, not assumed); the hint appears only when no credential was supplied; `make check` + `make battery` green.
+
+### T18.5 — `akasha setup [VAULT]`: nothing to a live vault in one command
+- **Goal** — Collapse the first-run sequence (init → start daemon → register vault → rescan → open UI) into one verb, **without touching `akasha init`'s documented contract** (exit 4 when a token exists; covered by `tests/integration/test_cli_init.py`).
+- **Depends on** — T18.4 (shares `cli/main.py`).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_setup.py` (new), `tests/integration/test_cli_dry_run.py` (only if `_discovered_mutating_verbs()` picks the verb up — see Steps), `docs/user/cli.md`.
+- **Spec** — §4.11 (`POST /sync/roots`, `POST /sync/rescan`, both human-only), §4.12; T11.1/T12.1 (`init`'s bootstrap transport ruling — `setup` reuses the same `auth`/`store` primitives, no second mint path); T12.2 (`sync add`); T12.3 (web-UI `?token=` bootstrap link); `docs/spec-questions.md` **M18-A**, **M18-D**.
+- **Steps** — (1) Extract `init`'s mint sequence into one private helper that both `init` and `setup` call; `init`'s output, exit codes and tests stay byte-identical. (2) `setup [VAULT] [--config PATH] [--name NAME]`: fresh DB → run migrations and mint one human token (as `init`); a token already exists → skip minting; if no credential is then available via `--token`/`AKASHA_TOKEN`, exit 4 with the exact instruction to supply it (a token is unrecoverable, so a re-run cannot fetch it). (3) `up` (T18.3). (4) When `VAULT` is given: `POST /v1/sync/roots` (name defaults to the basename, as `sync add`) then `POST /v1/sync/rescan`; re-running with the same vault is a no-op (the registration is an upsert). Print `sync.watcher.detect_cloud_path`'s OneDrive/Dropbox warning if it applies (the daemon already logs it; surface it here too). (5) Print, once: the web-UI link with the bootstrap token (`http://HOST:PORT/?token=…`), the `export AKASHA_TOKEN=…` line, and a plain warning that the link and token are secrets (browser history, shared terminals). (6) After registering, tell the user that every Markdown file under the vault is tracked by default and that a `.tmignore` file at the vault root opts paths out (T18.10a–c; until those land the older §4.7 rule still applies and files need `tm: 1` front matter) — a hint, never an auto-edit. (7) `--dry-run` must print the plan and mint nothing, spawn nothing and register nothing (test all three). If the meta-test's AST discovery flags the verb because it calls `_mutate`, add its `DryRunCase` row rather than exempting it.
+- **Verify** — `uv run pytest tests/integration/test_cli_setup.py tests/integration/test_cli_init.py tests/integration/test_cli_sync_add.py tests/integration/test_cli_dry_run.py`
+- **DoD** — against a scratch `HOME`, one `setup <vault>` yields a healthy detached daemon, exactly one human token, a registered and reconciled root, and the printed link authenticates the web UI; a second run is idempotent; `init`'s tests are unchanged and green; `--dry-run` has zero side effects (asserted); `make check` + `make battery` green.
+
+### T18.6 — `akasha status`: one-screen diagnosis of "why isn't it syncing"
+- **Goal** — Replace guesswork with one read-only command that reports the state a first-time user needs and names the three classic first-run failures.
+- **Depends on** — T18.5 (shares `cli/main.py`).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_status.py` (new), `docs/user/cli.md`.
+- **Spec** — §4.11 (`GET /health`, `GET /sync/status`, `GET /review`); precedent T14.1 (read-only verbs use `_request`, never `_mutate`, and are correctly outside the dry-run meta-test).
+- **Steps** — (1) Report: daemon reachable (version, contract version); whether the token was accepted; each sync root (path, files tracked); open violations and pauses grouped by code; open review count. (2) Emit a hint line for each of: no credential supplied; no sync roots registered; a root registered but zero files tracked (→ check the path and any `.tmignore`; before T18.10c lands, files need `tm: 1` front matter). (3) **Do not change `sync/`**: whether `W_UNMANAGED_ANCHOR` (the advisory lint for a `^tm-` anchor in an unmanaged file, `contract/linter.py`) actually reaches `GET /sync/status` is unverified — check it empirically against a scratch daemon; if it does not, record that in `docs/spec-questions.md` as a finding and have `status` say nothing about it, rather than widening scope. (4) Exit 0 when healthy; the shared mapping for unreachable/unauthorized. `--json` emits the versioned `cli/v1` envelope. ASCII-only default output (T9.9/T14.1 precedent).
+- **Verify** — `uv run pytest tests/integration/test_cli_status.py tests/integration/test_cli_graph.py`
+- **DoD** — each of the three first-run failures produces its named hint against a real scratch daemon (asserted by real state, not string-only); a healthy vault produces none; the verb issues only GETs; `make check` + `make battery` green.
+
+### T18.7 — `akasha render FILE`: see a transclusion resolved, headlessly
+- **Goal** — Give the user (and T15.1's embed leg) a way to *see* an embed resolve without Obsidian: print a managed file with each `![[path#^tm-id]]` replaced by the target node's **current** body. This is the only headless file-to-file view the system can offer, because on disk an embed is a link and stays one (`contract/render.py`: "managed-file bytes stay the wiki-link form").
+- **Depends on** — T18.6 (shares `cli/main.py`).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_render.py` (new), `docs/user/cli.md`.
+- **Spec** — §4.7 (`embed`: "render the target's current body (read-only …)"); §4.11 `GET /nodes/{id}`; `docs/spec-questions.md` **M18-D**.
+- **Steps** — (1) Read `FILE` locally, parse it with the shipped `contract` parser, and for each embed line `GET /v1/nodes/{embed.id}`. (2) Print the file with each embed line replaced by the target's body, quoted and labelled with its id (`> … (^tm-<id>, from <path>)`); a tombstoned or missing target prints a visible `[unresolved: ^tm-<id> (<status>)]` marker rather than disappearing. (3) **Never write any file** — read-only by construction; assert `sha256` of `FILE` and of the source file are unchanged across every call. (4) `--json` lists each embed with its resolved body/state. (5) The command is a viewer, not propagation: it must say so in `--help` ("does not modify files").
+- **Verify** — `uv run pytest tests/integration/test_cli_render.py`
+- **DoD** — against a live scratch daemon with `A.md` (anchored) and `B.md` (embeds it): `render B.md` shows A's text; after `akasha set <id> --body …` it shows the new text; `B.md`'s bytes are identical throughout (asserted); a deleted target prints the unresolved marker; `make check` + `make battery` green.
+
+### T18.8 — `akasha plugin install VAULT`: one-step Obsidian plugin install
+- **Goal** — Remove the manual npm-build-and-copy-three-files step from onboarding, without pretending Obsidian's own consent step can be automated.
+- **Depends on** — T18.7 (shares `cli/main.py`).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli_plugin_install.py` (new), `docs/user/cli.md`.
+- **Spec** — `docs/user/obsidian.md` (manual install and the Restricted-mode requirement), `plugin-obsidian/manifest.json`; D4/D7 (CORS and `.obsidian/` watcher handling, already fixed); `docs/spec-questions.md` **M18-A**, **M18-D**.
+- **Steps** — (1) `plugin install VAULT --from DIR` copies `manifest.json` and the **built** `main.js` from `DIR` (a built `plugin-obsidian/`; `main.js` is gitignored and produced by `npm run build`, so this task does not bundle it — bundling built assets into the wheel is recorded as a follow-up in M18-D, not done here) into `VAULT/.obsidian/plugins/tm-hub/`, creating directories as needed. A missing `main.js` is a clear one-line "run `npm ci && npm run build` in plugin-obsidian/ first" error, exit 3. (2) Write `data.json` with **`daemonUrl` only** — the token is never written by this task (M18-A); an existing `data.json` is merged, never clobbered, and any existing `token` field is preserved untouched. (3) Add `tm-hub` to `VAULT/.obsidian/community-plugins.json` (create if absent; preserve existing entries and order; no duplicates). (4) Print exactly what remains for the human: turn off Restricted mode once in Obsidian, enable `tm-hub`, paste the token in the plugin's settings. (5) Honor the global `--dry-run`: print the file operations, write nothing (assert). (6) Idempotent: a second run changes nothing.
+- **Verify** — `uv run pytest tests/integration/test_cli_plugin_install.py`
+- **DoD** — against a `tmp_path` vault, the three files land where Obsidian expects them; `data.json` never contains a token this task did not find already; re-running is a byte-identical no-op; `--dry-run` writes nothing (asserted); an unbuilt plugin dir fails clearly; `make check` + `make battery` green.
+
+### T18.9 — Save the human token: a `0600` token file the CLI reads (ruling M18-A)
+- **Goal** — Authenticate once. `init`/`setup` save the human token they mint; every verb then finds it without `--token`/`AKASHA_TOKEN`; `plugin install --with-token` can pre-fill the plugin. Per ruling M18-A an agent that shells out to `akasha` acts as the human — accepted, not a bug.
+- **Depends on** — T18.5, T18.8 (shares `cli/main.py`).
+- **Files** — `src/akasha/config.py`, `src/akasha/cli/main.py`, `tests/integration/test_cli_token_file.py` (new), `tests/integration/test_cli_init.py`, `docs/user/cli.md`.
+- **Spec** — §4.11 (token classes; `human only ∅`), §4.12; T11.1/T12.1 (`init`'s bootstrap ruling); rule 6 (neutral names); `docs/spec-questions.md` **M18-A** (binding: what is and is not approved).
+- **Steps** — (1) `config.py`: `default_token_path(config_dir)` → `<config dir>/tm-token` (neutral name, rule 6) plus read/write helpers. Write with the mode set **at creation** (`os.open(..., 0o600)`, then atomic replace) so the secret is never briefly world-readable; on Windows rely on the per-user `%APPDATA%` ACL and say so in the docstring (no ACL code). (2) `init` and `setup` save the token through the shared mint helper; `init`'s stdout, exit codes and the once-only printing are unchanged (extend `test_cli_init.py`, do not weaken it). An existing token file is never overwritten by `setup`. (3) Credential resolution order: `--token` > `AKASHA_TOKEN` > token file, read from the default per-OS config dir. (4) Default base URL is derived from the config's `bind:port` when neither `--base-url` nor `AKASHA_BASE_URL` was given, so a token file for a non-default port is actually used; absent a config it equals today's `DEFAULT_BASE_URL`. (5) The file only ever holds the human token `init`/`setup` minted — agent-class tokens are never written there and `token create`'s output is unchanged. (6) `plugin install --with-token` writes the token into the plugin's `data.json`; opt-in only, and warn on stderr when `sync.watcher.detect_cloud_path(vault)` matches or `VAULT/.git` exists, because the token would then sit in a synced or committed location. (7) Update T18.4's 401 hint: when the credential came from the file, say it was rejected and may have been revoked. (8) Tests use a `tmp_path` `HOME`/`APPDATA` (assert the real config dir is untouched): file created with mode `0600` (POSIX), correct precedence, revoked-token hint, `--dry-run` writes nothing.
+- **Verify** — `uv run pytest tests/integration/test_cli_token_file.py tests/integration/test_cli_init.py tests/integration/test_cli_setup.py tests/integration/test_cli_dry_run.py`
+- **DoD** — after `setup`, a verb with no flag and no env var authenticates from the saved file; precedence is flag > env > file; the file is `0600` at creation and holds only the human token; `init`'s tests unchanged and green; the plugin token is written only with `--with-token`, with the cloud/git warning; `make check` + `make battery` green.
+
+### T18.10a — `.tmignore` matcher (pure, no I/O) (ruling M18-B)
+- **Goal** — The deny-list logic, isolated and testable before anything depends on it.
+- **Depends on** — none (file-disjoint from everything else in M18).
+- **Files** — `src/akasha/sync/ignore.py` (new), `tests/unit/sync/test_ignore.py` (new).
+- **Spec** — `docs/spec-questions.md` **M18-B** (binding: name `.tmignore`, gitignore-style, built-in defaults, `.gitignore` not consulted); rule 6.
+- **Steps** — (1) `is_ignored(rel_path, patterns) -> bool` plus `parse_patterns(text) -> list[str]`, stdlib only (no new dependency). Supported subset, stated in the docstring: blank lines and `#` comments; `*`, `?`, `**`; a trailing `/` = directory-only; a leading `/` = anchored to the root; `!` negation; last matching pattern wins. An unsupported construct is skipped with a returned warning, never guessed at. (2) Built-in default denies (applied before user patterns, overridable by `!`): `.obsidian/`, `.git/`, `.trash/`, `node_modules/`, and every non-`.md` file. (3) Paths are POSIX root-relative; the function must give the same answer for a Windows-separator input. (4) Tests cover each supported construct, precedence/negation, the defaults, and a hypothesis property that `is_ignored` never raises on arbitrary pattern text.
+- **Verify** — `uv run pytest tests/unit/sync/test_ignore.py`
+- **DoD** — the supported subset behaves as documented; defaults deny exactly the listed paths; arbitrary pattern text never raises; ruff and pyright strict clean; `make check` green.
+
+### T18.10b — Apply the deny-list in the watcher and discovery (ruling M18-B)
+- **Goal** — Ignored paths never enter the debouncer or `discover_untracked_files`, and editing `.tmignore` takes effect without a restart.
+- **Depends on** — T18.10a, and T19.4 (the last M19 task to touch `sync/reconcile.py`; run after M19).
+- **Files** — `src/akasha/sync/watcher.py`, `src/akasha/sync/reconcile.py`, `tests/unit/sync/test_watcher.py`, `tests/integration/test_watcher_wiring.py`.
+- **Spec** — §4.8 (startup discovery), the existing `_is_managed_candidate` `.md` filter and debug-plan D7/D10 (the watcher's prior ignore fixes); `docs/spec-questions.md` **M18-B**.
+- **Steps** — (1) Load each root's `.tmignore` (absent = defaults only) and filter raw events through `is_ignored` **before** they reach the debouncer, alongside the existing `.md`/temp-file/non-content-event filters. (2) `discover_untracked_files` skips ignored paths. (3) An event for the root's own `.tmignore` reloads the patterns and triggers one rescan of that root. (4) A file that becomes ignored after it was tracked stops being reconciled; its `sync_files` row and base snapshot are left in place (narrowest reading — no deletion of history), and `akasha status` may show it. (5) Tests: a real watcher thread with a `tmp_path` root — an ignored file's edit produces no cycle; a normal file's still does within the debounce window; editing `.tmignore` un-ignores and picks up the file.
+- **Verify** — `uv run pytest tests/unit/sync/test_watcher.py tests/integration/test_watcher_wiring.py tests/unit/sync/test_reconcile.py`
+- **DoD** — ignored paths are inert (asserted with a live watcher, not just the pure function); `.tmignore` edits apply live; existing watcher tests unregressed; `make check` + `make battery` green.
+
+### T18.10c — Track every non-ignored Markdown file by default (ruling M18-B)
+- **Goal** — Remove the "hand-add `tm: 1` to every file" step. A non-ignored `.md` file under a sync root is parsed as managed even without front matter; nothing is written to a file until it actually has something to project.
+- **Depends on** — T18.10b (and therefore T19.4).
+- **Files** — `docs/mvp-spec.md` (amend §4.7's sentence only), `src/akasha/sync/reconcile.py`, `tests/unit/sync/test_reconcile.py`, `tests/battery/test_edit_battery.py` (**only** to add a case; existing cases are not edited).
+- **Spec** — §4.7 (file-level rule; lossless container), §4.8, spec rule 0.3; `docs/spec-questions.md` **M18-B** (binding). **Protected tests that must stay green and unmodified** — they pin the *parser/linter* rule this task deliberately leaves alone: `tests/unit/contract/test_parser.py` (`test_unmanaged_file_*`), `tests/unit/contract/test_linter.py` and `tests/golden/test_serialization.py` (`W_UNMANAGED_ANCHOR`), `tests/unit/contract/test_render.py` (`test_front_matter_absent_when_unmanaged`).
+- **Steps** — (1) Do **not** change `contract/parser.py`, `linter.py` or `render.py`. In `Reconciler.on_change`, when `parse(V).managed` is false and the path is not ignored (T18.10a/b), parse an **in-memory adopted copy** of `V` instead: if `V` already opens with a YAML front-matter block that lacks `tm:`, **inject** `tm: 1` as a key inside it; only when `V` has no front matter at all, prepend a `tm: 1` front-matter block. Never emit a second front-matter block — Obsidian keeps properties such as `title:`/`tags:` in that YAML and a duplicate would corrupt them. (2) **Write suppression:** if the adopted file has no contract constructs at all (no anchored block, `^tm-new`, embed or ref), do nothing — no write, no base-snapshot rewrite, byte-identical on disk. (3) The first cycle that has something to project writes the real front matter (§4.7: added on first projection), then behaves exactly as a managed file. (4) An ignored file keeps today's behavior, including advisory `W_UNMANAGED_ANCHOR`. (5) Amend §4.7's "files without it are never parsed for management" to state the new rule and cite M18-B. (6) Tests: an all-prose file with foreign `^abc123` block ids is byte-identical after reconcile; a file with `- [ ] x ^tm-new` and no front matter is minted and gains `tm: 1`; a file whose existing front matter has `tags:`/`title:` keeps them byte-for-byte and gains only a `tm: 1` key (exactly one front-matter block, asserted); an ignored file with the same line mints nothing; the whole existing battery and the protected tests pass unchanged; add one battery case for adoption, never edit an existing one.
+- **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py tests/unit/contract tests/golden tests/battery`
+- **DoD** — a plain prose file is never modified; a file with a minting request is adopted and gains `tm: 1` on first projection; ignored files are unchanged; every protected test passes **unmodified** (state the git diff of those files is empty); the battery reports 0 silent guesses; `make check` + `make battery` green.
+
+### T18.11 — Login-time service install for Linux/macOS (**BLOCKED: needs a real host**)
+- **Goal** — Extend what T12.5 did for Windows (Startup shortcut + supervisor) to a `systemd --user` unit and a `launchd` agent, so the daemon is up before the first verb.
+- **Why blocked** — same reasoning as T12.4/T12.5: the unit-file/plist generation is unit-testable, but "it actually survives a reboot and a `kill -9`" has no honest CI equivalent (`docs/acceptance.md` row 9). T18.4's on-demand start already makes a stopped daemon safe, so this is polish, not a prerequisite. Becomes `TODO` only when a real Linux/macOS host is available to attest it.
+- **Depends on** — T18.3.
+- **Files / Verify / DoD** — to be defined at that time.
+
+### T18.12 — Rewrite the quickstart around the two-command flow
+- **Goal** — Make `docs/user/quickstart.md` lead with what M18 built, and demote the manual sequence.
+- **Depends on** — T17.1 (**same file**: it rewrites the quickstart installer-first and must land first so this task edits its result, not a soon-to-be-stale version), T18.1–T18.9, T18.10a–c.
+- **Files** — `docs/user/quickstart.md`.
+- **Spec** — the landed behavior of T18.1–T18.8 only; `docs/user/cli.md`.
+- **Steps** — (1) Lead with install + `akasha setup <vault>`; then `akasha status`, `akasha render`, `akasha plugin install`. (2) State honestly what is still manual: turning off Obsidian's Restricted mode and enabling the plugin (and pasting the token unless `--with-token` was used). State the two behaviors the rulings created: the human token is saved to a `0600` file so anything that runs `akasha` as you acts as you (M18-A), and every Markdown file under the vault is tracked unless `.tmignore` excludes it (M18-B). (3) Keep the from-source sequence as a developer appendix pointing at `docs/dev/setup.md`. (4) Describe nothing that does not exist; a missing capability is a `# SPEC-QUESTION`, not prose.
+- **Verify** — Doc-only, with objective checks: every command shown runs successfully in order against a scratch `HOME` (a command that errors is a doc bug); every verb named appears in `uv run akasha --help`; `grep -n "uv run python -c" docs/user/quickstart.md` returns nothing.
+- **DoD** — a new user can go from nothing to a syncing vault using only the quickstart; every command executes as written; the still-manual steps are stated, not hidden.
+
+---
+
+## M19 — Live transclusion: the same anchor in several files is one node, kept identical everywhere (Depends on: nothing)
+
+**Origin.** User ruling, 2026-09-23 (`docs/spec-questions.md` M19-0): editing a transcluded block in one Markdown file must change the same text in the other file(s) as soon as possible. Syntax ruling (asked and answered the same day): **no new syntax — the same `^tm-id` anchor appearing in more than one file *is* the declaration** (a *mirror*). To make an independent copy instead, replace the pasted anchor with `^tm-new`.
+
+**Why this is smaller than it sounds.** `hub_state_for` already projects every file from the hub's *current* node, so two files sharing an anchor already render from one source. Three things stop mirrors from working today, all in `src/akasha/sync/reconcile.py`: (1) `ProjectionIndex` allows **one** owning file per node ("last writer wins"); (2) `_compute_ops` flags a second file's copy of an anchor as cross-file `E_DUP_ID` and never applies it, and deleting one copy can hard-delete a node another file still shows; (3) nothing re-projects the *other* files after a file-side commit — `on_change(A)` writes only A. **No schema or new table is needed**: `ProjectionIndex.build` already derives membership from every file's base snapshot, so a node in two files is already recorded durably; only the in-memory index changes from "one owner" to "a set of owners".
+
+**Milestone DoD:** with `A.md` and `B.md` both containing `^tm-<id>` lines: an edit or checkbox toggle in **either** file rewrites the other within one sync cycle (debounce + cycle, no rescan, no restart); an `akasha set`/UI edit rewrites **both**; deleting one mirror never deletes the node; deleting the last follows the existing delete rules; an edit made in both files at once loses nothing (conflict branch + one review, no write ping-pong); a real watcher thread proves it end to end; the E05 case is re-ruled explicitly and E04/E04b/single-file `E_DUP_ID` pass unmodified; the battery reports 0 silent guesses; `make check` + `make battery` green.
+
+**Scope limits (stated, not hidden).**
+- **One-line blocks only.** The contract grammar is line-oriented — a paragraph or task is exactly one line, and a hub body containing a newline is unprojectable (`E_UNPROJECTABLE_BODY`). A multi-line "section" cannot be mirrored; that would be a grammar extension (block ranges) and is not proposed here (M19-A).
+- Indentation is per file; a mirror keeps its own nesting. A `reparented` op in any file may add a further `composes` parent (M19-B).
+- Any local editor that has the target file open and dirty can race the daemon's rewrite; Obsidian reloads a clean file that changed on disk. This is the pre-existing write-back behavior, not new to M19.
+
+### T19.1 — Amend the spec and the PRD: same anchor across files is a mirror (doc-only)
+- **Goal** — Make the normative documents say what the user ruled, before any code changes, so no later task is implementing against a contradicted spec. F3 (PRD §5) is normative: "reintroducing any item requires overturning its stated reason", so its row is edited here, not just logged.
+- **Depends on** — none.
+- **Files** — `docs/mvp-spec.md`, `docs/vision.md`; `docs/user/dogfood-windows.md` and `docs/acceptance.md` **only if** they state that a cross-file duplicate anchor is a violation. **Files list completed at landing** (ratified T8.0/T8.1 rule; logged under `docs/spec-questions.md` M19-0): `plugin-obsidian/TESTPLAN.md` (§4b and the pass criteria told a tester to expect an `E_DUP_ID` review on a cross-file copy) and `plugin-obsidian/src/clipboard.ts` (**comments only**), strictly entailed by this task's Goal of leaving no document contradicting the ruling.
+- **Spec** — §4.7, §4.8; PRD §5 F2/F3, §6 ("edits within a facet propagate automatically as rendering"); `docs/spec-questions.md` **M19-0**, **M19-A**, **M19-B**, **M19-C** (binding wording).
+- **Steps** — (1) §4.7: narrow `E_DUP_ID` from "same anchor twice in a sync root (copy without cut)" to "twice **in one file**", keeping its certain-repair unchanged. Add a *Mirrors* paragraph: an anchor live in two or more files is one node projected into each; indentation is per file; edits commit at `SYNC_CHANGE_CLASS`; blocks are one line; joining with text that differs from the hub keeps the hub's text and preserves the vault's version as a conflict branch plus one review (M19-C); removing one mirror never deletes the node; to detach, replace the anchor with `^tm-new`. (2) §4.8: state that ownership is a *set* and that after a file's cycle commits, every other file holding an affected anchor is reconciled through the same three-way pipeline (never a blind write). (3) `vision.md` F3 row: append a scoped exception — a block the human co-anchors in several files is **one atom shown more than once** (identity, not substitution); its propagation is patch-class rendering as §6 already allows; interface breaks (facet breaks, retraction) still flag dependents exactly as before; nothing here lets text propagate into a *different* atom. (4) Do not weaken any other F-row.
+- **Verify** — Doc-only, objective: `grep -n "twice in a sync root" docs/mvp-spec.md` returns nothing; `grep -n -i "mirror" docs/mvp-spec.md docs/vision.md` shows the §4.7/§4.8 paragraphs and the F3 exception; `git diff --stat` touches only the listed files.
+- **DoD** — the spec, the PRD and the four spec-questions entries agree; F3's exception is scoped as above and no other §5 row changed.
+
+### T19.2 — `ProjectionIndex`: a node may have several owning files
+- **Goal** — Represent "this node lives in these files" without changing any existing caller's behavior.
+- **Depends on** — T19.1.
+- **Files** — `src/akasha/sync/reconcile.py`, `tests/unit/sync/test_reconcile.py` (**add** tests; the existing `ProjectionIndex` test around `index.owner("x1") == "a.md"` stays unchanged and must pass).
+- **Spec** — §4.8; T13.2's `project_node_change` docstring; `docs/spec-questions.md` **M19-0**.
+- **Steps** — (1) Keep `_owner` (last-writer) so `owner()` is byte-for-byte unchanged. Add `_owners: dict[str, set[str]]`, maintained by `update()` (a path that no longer contains an id is removed from that id's set; an empty set is deleted) and read by new `owners(node_id) -> frozenset[str]`. (2) `build()` is unchanged in *source* (base snapshots) — assert in a test that building from two base snapshots containing the same id yields both owners; **no migration, no new table**. (3) Audit and list every `owner()` caller in the task's landing note: `_compute_ops` (created and deleted branches) and `project_node_change`; `store.py`'s comment mention is prose only.
+- **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py`
+- **DoD** — `owners()` correct across updates/removals/rebuilds; `owner()` unchanged; ruff and pyright strict clean; `make check` green.
+
+### T19.3 — Mirror-aware ops, and the explicit re-ruling of E05
+- **Goal** — A second file's copy of an anchor becomes a mirror instead of a violation, and removing one mirror stops threatening the node. Pure logic (zero I/O) — propagation is T19.4.
+- **Depends on** — T19.2.
+- **Files** — `src/akasha/sync/reconcile.py`, `tests/unit/sync/test_reconcile.py`, `tests/battery/test_edit_battery.py` (**the E05 case and its comments only**), `tests/golden/reconcile/e05-cross-file-dup/expected_ops.json`.
+- **Spec** — §4.7 (as amended by T19.1), §4.8; spec rule 0.3; `docs/spec-questions.md` **M19-0**, **M19-C**.
+- **Authorized changes to protected tests (spec rule 0.3, by the user's ruling of 2026-09-23 — this task is the explicit authorization)** — (a) `tests/unit/sync/test_reconcile.py::test_cross_file_dup_withholds_and_reviews` is replaced by `test_cross_file_dup_joins_as_mirror` (one `created` adopt op for the id, no `E_DUP_ID`, no extra review item); (b) the E05 battery case (`_case_e05`, `test_e05_cross_file_dup_is_review_only_no_silent_apply` and their comments) now expects **no** `E_DUP_ID`, exactly one adopt op, node count still 1 and node history unchanged; (c) `tests/golden/reconcile/e05-cross-file-dup/expected_ops.json` changes from `[]` to `[{"kind": "created", "node_id": "3iwckm6b"}]`. **Everything else must pass unmodified**, in particular E04/E04b, `tests/golden/test_serialization.py` (the single-file `E_DUP_ID` copy-paste repair), and `tests/unit/contract/**`.
+- **Steps** — (1) `_compute_ops` created branch: when `projection.owners(id) - {current_path}` is non-empty, emit the existing adopt `Op(kind="created", node_id=...)` with a new optional `mirror: bool = False` field set `True` — never `E_DUP_ID`. A one-owner-or-none id behaves exactly as today. (2) Deleted branch: if any other owner exists, skip silently (this file's copy is being removed; the node lives on); only removal from the last file reaches the existing hard-delete / `E_DELETED_S1` handling, and the `anchor_elsewhere` scan is kept as is. (3) `diff_blocks`: drop `E_DELETED_S1` review items for ids that still have another owner, **before** `pause_and_diff` counts violations. (4) Same anchor twice in **one** file stays `E_DUP_ID` (linter, untouched). (5) Unit tests: join emits one adopt op; removal with another owner is silent; removal of the last S0 owner still emits `deleted`; removal of the last S1+ owner is still withheld with `E_DELETED_S1`; the `E_DELETED_S1` filter applies only when another owner exists.
+- **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py tests/unit/contract tests/golden tests/battery`
+- **DoD** — the listed protected changes and no others (`git diff --stat` on `tests/golden` and `tests/battery` shows exactly the files named above); E04, E04b and every other battery case pass unmodified; single-file `E_DUP_ID` unchanged; `make check` + `make battery` green.
+
+### T19.4 — Propagate a committed edit to every other mirror
+- **Goal** — The feature: after a file's cycle commits a node's text or checkbox, every *other* file holding that anchor is brought up to date immediately, through the same three-way pipeline.
+- **Depends on** — T19.3.
+- **Files** — `src/akasha/sync/reconcile.py`, `tests/unit/sync/test_reconcile.py`, `tests/integration/test_projection_writeback.py`.
+- **Spec** — §4.8 (as amended); T13.2/T13.3 (`project_node_change`, echo suppression via the shared `OriginTracker`); `docs/spec-questions.md` **M19-B**, **M19-C**.
+- **Steps** — (1) Split `Reconciler.on_change` into a private `_cycle(path) -> set[str]` (the existing body, returning the node ids whose text/state this cycle **committed** — `modified`, `checkbox_toggled`, and an adopt that committed; not conflicted ops) and a public `on_change` that runs `_cycle(path)` and then, for each returned id and each `p` in `projection.owners(id) - {path}` (each `p` once), runs `_cycle(p)`. A propagated `_cycle` **never propagates further** (no recursion, no ping-pong); a `FileNotFoundError` for one mirror is skipped, never aborting the others. Never write the hub render straight into a mirror — running the full three-way cycle is what preserves that file's other, unsaved-then-saved edits. (2) Mirror join (`op.mirror`): if the vault's text/state differs from the hub head, **the hub wins** — do not commit the vault text; hand the op to `conflict_handler` so the vault version is preserved as a conflict branch with one review (M19-C); identical text is a quiet no-op. (3) Concurrent edits to the same line in A and B: the first cycle commits, the second sees `hub_changed_since` and takes the existing conflict path — assert exactly one conflict review, both versions retrievable, and a bounded number of file writes. (4) `project_node_change`: resolve **all** owners via `owners()` (keep its signature and its once-per-path dedup), so an API/CLI/UI hub-side edit rewrites every mirror. (5) Every write goes through `write_if_diff`, so each is recorded in the origin tracker and echo-suppressed. (6) Tests: A edit → B rewritten within the same `on_change` call; checkbox toggle propagates; A's edit while B has an unrelated edit on another line → B keeps it and gains the mirror text; concurrent same-line edit → one conflict, no ping-pong; hub `PATCH` rewrites both files; removing one mirror leaves the node live and the other file byte-identical; join with differing text → hub wins + conflict review.
+- **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py tests/integration/test_projection_writeback.py tests/battery/test_edit_battery.py`
+- **DoD** — every leg in Step 6 asserted against real files and a real store; no recursion (asserted by counting cycles); a projection failure in one mirror never fails the source file's cycle; battery unregressed; `make check` + `make battery` green.
+
+### T19.5 — Battery: mirror cases
+- **Goal** — Put the new behavior under the same "0 silent guesses" discipline as E01–E20.
+- **Depends on** — T19.4.
+- **Files** — `tests/battery/test_edit_battery.py` (**append** cases only), new golden fixture directories `tests/golden/reconcile/e21-mirror-edit/`, `e22-mirror-concurrent/`, `e23-mirror-remove-one/`, `e24-mirror-reparent/`.
+- **Spec** — `docs/mvp-spec.md` §6.2 (edit battery), the existing E-case helpers (`_conn`, `_seed_hub_from_json`, `_register_root`); rule 0.3 (these are **new** fixtures; no existing fixture is edited).
+- **Steps** — E21 edit in A reaches B; E22 concurrent same-line edit → one conflict review, both versions kept; E23 remove one mirror → node live and the other file unchanged, then remove the last (S0) → deleted; E24 reparent in B adds a second `composes` parent and leaves A's edge intact (M19-B). Each returns `silently_mutated` like its neighbours and is added to the battery's aggregate silent-guess count.
+- **Verify** — `uv run pytest tests/battery`
+- **DoD** — E21–E24 green; existing E01–E20 untouched and green; aggregate silent-guess count 0; `make battery` green.
+
+### T19.6 — Live proof: a real watcher, file to file
+- **Goal** — Prove the user-visible claim with the real production path, not just `on_change` called directly (debug-plan D10 is the precedent for what direct-call tests miss).
+- **Depends on** — T19.4.
+- **Files** — `tests/integration/test_mirror_live.py` (new).
+- **Spec** — `tests/integration/test_watcher_wiring.py::test_live_edit_is_reconciled_with_no_manual_rescan` (the pattern to model); §4.8; PRD §8 story 8.
+- **Steps** — (1) Real `Watcher` thread + shared `OriginTracker` + `Reconciler` on a `tmp_path` root with `A.md` and `B.md` sharing one anchor. (2) Write a new body into `A.md` on disk → assert `B.md`'s bytes change within 3 s with no rescan call, and record the measured latency. (3) Toggle the checkbox in `B.md` → `A.md` follows. (4) Count cycles: the daemon's own write to the mirror must **not** trigger another reconcile (echo-suppressed), and after settling, neither file changes again. (5) A hub-side `PATCH /v1/nodes/{id}` through the real app rewrites both files. (6) `.md` only and non-content events still ignored (no regression of D10).
+- **Verify** — `uv run pytest tests/integration/test_mirror_live.py tests/integration/test_watcher_wiring.py`
+- **DoD** — A→B, B→A, checkbox and hub-side legs pass against real files under a real observer thread; no echo loop (asserted); measured latency recorded in the test's docstring; `make check` + `make battery` green.
+
+### T19.7 — User guide: transclusion
+- **Goal** — Teach the feature as a user performs it, including its limits.
+- **Depends on** — T19.6, T17.3 (both edit `docs/user/README.md`; T17.2/T17.3 own it first).
+- **Files** — `docs/user/transclusion.md` (new), `docs/user/README.md`.
+- **Spec** — §4.7 (as amended), `docs/spec-questions.md` M19-A/B/C.
+- **Steps** — (1) How to create a mirror (copy the anchored line, `^tm-id` included, into another file), how to edit either, how to detach (`^tm-new`). (2) State the limits plainly: one-line blocks only; per-file indentation; conflict behavior (hub wins, your version is kept and reviewed); a dirty editor buffer can race the rewrite. (3) Show what a hub-side `akasha set` does to both files. (4) Link from `docs/user/README.md`.
+- **Verify** — Doc-only, objective: every command and file shown is run in order against a scratch daemon and behaves as written; every anchor form shown parses with zero violations against the shipped parser.
+- **DoD** — a user can create, edit and detach a mirror using only this guide; every example executes as written; the limits are stated.
 
 ---
 

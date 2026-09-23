@@ -6,7 +6,7 @@ T13.1, T13.2, T13.3, T13.4, T14.1, T14.5, T14.6 all `DONE` via two live
 green throughout — 678 tests passed, zero regressions. The predecessor
 M0-M12 goal set this file used to describe is archived at
 `docs/pre-mvp/task-status.md`; this file now tracks the new
-`docs/build-plan.md` M13-M17 plan exclusively.
+`docs/build-plan.md` M13-M19 plan exclusively.
 **Read by:** `overnight_prompt.md`, as priority guidance only — see
 "What this document is not" below before using it for anything else.
 
@@ -80,8 +80,10 @@ a dependency) and `fleet-orchestrator`'s scan of `docs/build-plan.md` +
 per `overnight_prompt.md`'s existing "When to stop instead of guessing"
 section and stops. If M13 and M14 have both closed and T15.1/T16.1 are also
 `DONE`, the only remaining rows are T17.1/T17.2/T17.3 (doc-only, milestone-
-gated on M13+M14) and the two permanent `BLOCKED: human-only` rows — once
-T17.1-T17.3 land too, the whole M13-M17 plan is closed and generating the
+gated on M13+M14), M18's onboarding rows (T18.1-T18.8 and T18.12 — see
+`task-status.md` for their sequencing; T18.9-T18.11 are `BLOCKED` and are
+never dispatched), and the two permanent `BLOCKED: human-only` rows — once
+those (and M19's live-transclusion rows T19.1-T19.7) land too, the whole M13-M19 plan is closed and generating the
 *next* goal set is a human decision, using the same spec-vs-shipped-code
 audit procedure that produced this plan (`docs/build-plan.md`'s own header
 documents the method): audit `docs/mvp-spec.md` section by section against
