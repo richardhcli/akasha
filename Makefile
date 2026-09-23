@@ -1,4 +1,4 @@
-.PHONY: fmt check check-fast battery run dev-ui
+.PHONY: fmt check check-fast battery run dev-ui demo-transclusion demo-transclusion-check
 
 fmt:
 	uv run ruff format .
@@ -35,3 +35,14 @@ run:
 
 dev-ui:
 	uv run python scripts/dev/seed_and_run.py
+
+# Mirror/transclusion playground: a real, fully isolated daemon + a scratch vault
+# with three files sharing ^tm-id anchors (edit one, watch the others change).
+# Ctrl-C to stop. Needs the M19 mirror support in sync/reconcile.py.
+demo-transclusion:
+	uv run python scripts/dev/transclusion_demo.py
+
+# Same, non-interactive: builds the vault from scratch, proves edit/checkbox/hub-side/
+# delete/detach behaviour with measured latency, tears down; exit 0 = mirrors work.
+demo-transclusion-check:
+	uv run python scripts/dev/transclusion_demo.py --selftest

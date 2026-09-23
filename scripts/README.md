@@ -10,6 +10,13 @@ Development-time scripts and utilities. Not part of the akasha product itself.
     against it for manual browser testing. `uv run python scripts/dev/seed_and_run.py`
     (or `make dev-ui`); `--seed-only` seeds and exits without serving (used by
     the `make dev-ui` verify step). Never touches the real default DB.
+  - `transclusion_demo.py` — builds a mirror (transclusion) playground from scratch:
+    a real, isolated daemon (own config/DB/lock/port/token), a vault with `A.md`/`B.md`/`C.md`
+    sharing `^tm-id` anchors, a `./ak` CLI wrapper, a cheat-sheet and a live change monitor.
+    `make demo-transclusion` to play; `make demo-transclusion-check` (`--selftest`) proves
+    edit-in-A→B/C, edit-in-C→A/B, checkbox, hub-side `akasha set`, delete-one-copy and
+    detach-with-`^tm-new` with measured latency, then tears down (exit 0/1). Needs the M19
+    mirror support in `sync/reconcile.py`. Never touches the real default DB.
 
 - **`dogfood/`** (Bash / Git Bash / MSYS — needs `cygpath`) — stand up a
   disposable dogfood vault + daemon instance: scratch DB, bootstrap token, a
