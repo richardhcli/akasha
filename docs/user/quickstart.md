@@ -58,7 +58,7 @@ akasha search caffeine
 2. Copy that line, id included, into any other notes, in any folder under the vault.
 3. Edit or tick it in **any** of them: every other copy changes to match within about a second. Edits made while the daemon is off are picked up the next time it starts. To make an *independent* copy instead, replace the pasted id with `^tm-new`.
 
-Each note keeps its own indentation, and the rest of each note is never touched. If two notes change the *same* line in the same instant, one version wins and the other is kept as a review item (`akasha review list`) — nothing is lost.
+Each note keeps its own indentation, and the rest of each note is never touched. **Copying a line into a new note and editing it in the same save is fine:** a change made after the line's last edit wins and reaches every copy; pasting an *old* version back is simply overwritten with the current text, silently. If two notes change the *same* line in the same instant — or a pasted copy is older than the line's latest edit, or your file times can't be trusted (a cloud-synced folder) — one version wins and the other is kept as a review item (`akasha review list`); nothing is lost.
 
 **By default the whole line is shared** (`text ^tm-id`). To share only *part* of a line, or *several lines*, wrap it in braces and follow it with the id:
 

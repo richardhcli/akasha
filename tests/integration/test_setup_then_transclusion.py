@@ -292,3 +292,37 @@ def test_spans_transclude_part_of_a_line_and_several_lines_after_one_setup(
     for note in (one, two, three):
         assert not note.read_text(encoding="utf-8").startswith("---"), note.name
 
+
+def test_a_pasted_copy_edited_in_the_same_save_keeps_the_edit_and_a_stale_paste_loses(
+    env: dict[str, Any],
+) -> None:
+    """M20-D through the real daemon (the sandbox's "if I modify the new version, will the old
+    version change?"): a line copied into a new file and edited before the daemon ever saw the
+    copy is a NEW change -- it wins and reaches the original. An OLD version pasted back does
+    not."""
+    vault: Path = env["vault"]
+    original, copy_, stale = vault / "orig.md", vault / "copy.md", vault / "stale.md"
+    original.write_text("- [ ] plan the trip ^tm-new\n", encoding="utf-8")
+    result = runner.invoke(cli_app, ["setup", "--config", env["config"], str(vault)])
+    assert result.exit_code == 0, result.output
+    [node_id] = _ID_RE.findall(original.read_text(encoding="utf-8"))
+    headers = _headers(result)
+
+    def tracked() -> int:
+        status = httpx.get(f"{env['url']}/v1/sync/status", headers=headers).json()
+        return len(status["sync_roots"][0]["files"])
+
+    # copied AND edited in one save, so the daemon's first sight of the copy already differs
+    copy_.write_text(f"- [ ] plan the trip to Lisbon {node_id}\n", encoding="utf-8")
+    assert _wait_until(lambda: "Lisbon" in original.read_text(encoding="utf-8"))
+    assert "Lisbon" in copy_.read_text(encoding="utf-8")  # the copy kept its edit
+    assert _wait_until(lambda: tracked() == 2)
+    reviews = httpx.get(f"{env['url']}/v1/review?status=open", headers=headers).json()
+    assert reviews["reviews"] == []  # no conflict: nothing was thrown away
+
+    # the very first wording, pasted back into a fresh file: history, not news
+    stale.write_text(f"- [ ] plan the trip {node_id}\n", encoding="utf-8")
+    assert _wait_until(lambda: "Lisbon" in stale.read_text(encoding="utf-8"))
+    assert "Lisbon" in original.read_text(encoding="utf-8")  # the hub's text stayed
+    reviews = httpx.get(f"{env['url']}/v1/review?status=open", headers=headers).json()
+    assert reviews["reviews"] == []

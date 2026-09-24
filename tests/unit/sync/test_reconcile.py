@@ -892,9 +892,7 @@ def test_a_file_is_never_paused_and_a_bad_checksum_line_gets_a_new_node(tmp_path
     x, y = "pakprpmm", "pit7kgjj"
     _seed_node(conn, x, "claim", "alpha")
     _seed_node(conn, y, "claim", "beta")
-    base_text = render(
-        parse(_managed(f"alpha {contract_anchor(x)}\nbeta {contract_anchor(y)}\n"))
-    )
+    base_text = render(parse(_managed(f"alpha {contract_anchor(x)}\nbeta {contract_anchor(y)}\n")))
     path = tmp_path / "note.md"
     path.write_text(base_text, encoding="utf-8")
     base_store.put(conn, root_id, str(path), base_text)
@@ -1628,11 +1626,7 @@ def _two_mirrored_lines(tmp_path, files=("a.md", "b.md")):
     _seed_node(conn, _MX, "claim", "x original")
     _seed_node(conn, _MY, "claim", "y original")
     text = render(
-        parse(
-            _managed(
-                f"x original {contract_anchor(_MX)}\ny original {contract_anchor(_MY)}\n"
-            )
-        )
+        parse(_managed(f"x original {contract_anchor(_MX)}\ny original {contract_anchor(_MY)}\n"))
     )
     paths = [tmp_path / name for name in files]
     for path in paths:
@@ -1784,7 +1778,6 @@ def test_projection_refresh_only_reparses_files_whose_base_changed(tmp_path, mon
     assert len(parsed) == 1  # only b's new base
 
 
-
 def test_a_corrupted_id_on_an_unchanged_mirror_line_keeps_the_mirror_linked(tmp_path):
     conn, reconciler, a, b = _mirror_setup(tmp_path)
     b.write_text(_managed("Shared text ^tm-aaaaaaab\n"), encoding="utf-8")  # only the id damaged
@@ -1839,27 +1832,85 @@ def test_mirror_propagation_does_not_recurse_or_ping_pong(tmp_path, monkeypatch)
     assert calls == ["b.md"]
 
 
-def test_mirror_join_with_differing_text_hub_wins_and_is_reviewed(tmp_path):
+def _join_setup(tmp_path, *, b_text: str, b_mtime_offset: float, second_version: bool = False):
+    """Node ``_MX`` shown in a.md; b.md (untracked) joins it with ``b_text``.
+
+    ``b_mtime_offset`` is b.md's file time relative to now (negative: older than the hub's last
+    commit). ``second_version`` gives the node a second commit ("Hub v2"), so "Hub v1" is history.
+    """
+    import os
+    import time
+
     conn = _conn()
     root_id = _register_root(conn, tmp_path)
-    _seed_node(conn, _MX, "claim", "Hub text")
+    _seed_node(conn, _MX, "claim", "Hub v1")
+    if second_version:
+        store.commit_node(
+            conn, _MX, new_body="Hub v2", change_class="patch", facets_touched=[], author="human"
+        )
+    head = "Hub v2" if second_version else "Hub v1"
     a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a_text = render(parse(_managed(f"Hub text {contract_anchor(_MX)}\n")))
+    a_text = render(parse(f"{head} {contract_anchor(_MX)}\n"))
     base_store.put(conn, root_id, str(a), a_text)
     a.write_text(a_text, encoding="utf-8")
-    base_store.put(conn, root_id, str(b), render(parse(_managed(""))))
-    b.write_text(_managed(f"A stale or edited paste {contract_anchor(_MX)}\n"), encoding="utf-8")
+    base_store.put(conn, root_id, str(b), "")
+    b.write_text(f"{b_text} {contract_anchor(_MX)}\n", encoding="utf-8")
+    when = time.time() + b_mtime_offset
+    os.utime(b, (when, when))
+    return conn, Reconciler(conn, OriginTracker()), a, b
 
-    Reconciler(conn, OriginTracker()).on_change(str(b))
 
-    assert store.get_node(conn, _MX).body == "Hub text\n"  # the join did not overwrite the hub
-    assert f"Hub text {contract_anchor(_MX)}" in _read(b)  # b.md now shows the hub's text
-    rows = conn.execute(
-        "SELECT cause_ref FROM review_queue WHERE cause_kind='conflict'"
-    ).fetchall()
-    assert len(rows) == 1
-    assert json.loads(rows[0][0])["vault_text"] == "A stale or edited paste"
-    assert _read(a) == a_text  # the source file was never touched
+def _conflicts(conn) -> list[dict]:
+    rows = conn.execute("SELECT cause_ref FROM review_queue WHERE cause_kind='conflict'").fetchall()
+    return [json.loads(r[0]) for r in rows]
+
+
+def test_mirror_join_newer_change_wins_and_reaches_every_mirror(tmp_path):
+    """M20-D: text the hub has never held, in a file changed AFTER the hub's last commit."""
+    conn, r, a, b = _join_setup(tmp_path, b_text="A pasted line, then edited", b_mtime_offset=+5)
+    r.on_change(str(b))
+    assert store.get_node(conn, _MX).body == "A pasted line, then edited\n"
+    assert _read(a).endswith(
+        f"A pasted line, then edited {contract_anchor(_MX)}\n"
+    )  # the mirror follows
+    assert (
+        _conflicts(conn) == []
+        and conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+    )
+
+
+def test_mirror_join_stale_paste_loses_silently(tmp_path):
+    """M20-D: an OLD version pasted back has a fresh file time but is not new: hub wins."""
+    conn, r, a, b = _join_setup(tmp_path, b_text="Hub v1", b_mtime_offset=+5, second_version=True)
+    r.on_change(str(b))
+    assert store.get_node(conn, _MX).body == "Hub v2\n"
+    assert f"Hub v2 {contract_anchor(_MX)}" in _read(b)  # rewritten to the hub's text
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_mirror_join_new_text_in_a_file_older_than_the_hub_head_is_a_conflict(tmp_path):
+    conn, r, a, b = _join_setup(tmp_path, b_text="A stale or edited paste", b_mtime_offset=-1000)
+    r.on_change(str(b))
+    assert store.get_node(conn, _MX).body == "Hub v1\n"  # the join did not overwrite the hub
+    assert f"Hub v1 {contract_anchor(_MX)}" in _read(b)  # b.md now shows the hub's text
+    [conflict] = _conflicts(conn)
+    assert conflict["vault_text"] == "A stale or edited paste"  # ...and its version is kept
+    assert _read(a).endswith(f"Hub v1 {contract_anchor(_MX)}\n")  # the source file untouched
+
+
+def test_mirror_join_with_an_untrustworthy_file_time_is_a_conflict(tmp_path):
+    conn, r, a, b = _join_setup(tmp_path, b_text="From the future", b_mtime_offset=+3600)
+    r.on_change(str(b))
+    assert store.get_node(conn, _MX).body == "Hub v1\n" and len(_conflicts(conn)) == 1
+
+
+def test_mirror_join_on_a_conservative_root_never_trusts_file_times(tmp_path, monkeypatch):
+    monkeypatch.setattr(reconcile, "detect_cloud_path", lambda _p: "OneDrive")
+    conn, r, a, b = _join_setup(
+        tmp_path, b_text="Newer, but the client sets times", b_mtime_offset=+5
+    )
+    r.on_change(str(b))
+    assert store.get_node(conn, _MX).body == "Hub v1\n" and len(_conflicts(conn)) == 1
 
 
 def test_mirror_join_with_identical_text_is_quiet(tmp_path):

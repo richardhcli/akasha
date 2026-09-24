@@ -348,18 +348,16 @@ class Demo:
             still,
             "kept" if still else "lost",
         )
-        # 6. a pasted copy with DIFFERENT text: the hub's text wins, your version goes to review
+        # 6. an OLD version pasted back (a stale copy): the hub's text wins, silently -- no review
         conflicts_before = self._open_conflicts()
-        d = self.vault / "D.md"
-        d.write_text(
-            f"My own wording of the note. ^tm-{self.note_id}\n", encoding="utf-8"
-        )
-        healed = _wait_until(lambda: "Set from the hub" in _read(d), _SETTLE_TIMEOUT)
+        e = self.vault / "E.md"
+        e.write_text(f"{_NOTE_TEXT} ^tm-{self.note_id}\n", encoding="utf-8")
+        healed = _wait_until(lambda: "Set from the hub" in _read(e), _SETTLE_TIMEOUT)
         time.sleep(0.5)
         added = self._open_conflicts() - conflicts_before
         record(
-            "a differing copy in D.md is rewritten to the hub's text, one conflict review kept",
-            healed and added == 1,
+            "an old version pasted into E.md is rewritten to the hub's text, with no review",
+            healed and added == 0,
             f"rewritten={healed}, new conflict reviews={added}",
         )
         # 7. detach: give B's copy ^tm-new -> it becomes its own node; A no longer drives it
@@ -385,6 +383,17 @@ class Demo:
                 _read(self.b) == before,
                 "unchanged" if _read(self.b) == before else "B changed",
             )
+        # 8. a pasted copy with NEW wording, saved after the hub's last change: the new change wins
+        d = self.vault / "D.md"
+        d.write_text(f"My own wording of the note. ^tm-{self.note_id}\n", encoding="utf-8")
+        won = _wait_until(
+            lambda: all("My own wording" in _read(p) for p in (self.a, e)), _SETTLE_TIMEOUT
+        )
+        record(
+            "a pasted copy with new wording in D.md wins and reaches A.md and E.md",
+            won,
+            "propagated" if won else "not seen",
+        )
         return results
 
     def _open_conflicts(self) -> int:

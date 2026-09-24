@@ -1232,6 +1232,37 @@ def get_commit_snapshot(conn: sqlite3.Connection, commit_hash: str) -> dict[str,
     }
 
 
+def node_versions(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
+    """Read-only: every version a node has had, oldest first (M20-D, the mirror join rule).
+
+    One row per commit (conflict-branch commits included -- a text the hub has already seen and
+    set aside is not "new"): ``{"hash", "ts", "body", "task_state", "is_head"}``. ``ts`` is the
+    commit's ISO 8601 instant, ``is_head`` is true for the commit(s) whose content is the node's
+    current head. Raises ``NodeNotFoundError`` for an unknown node.
+    """
+    head = conn.execute("SELECT head_hash FROM nodes WHERE id=?", (node_id,)).fetchone()
+    if head is None:
+        raise NodeNotFoundError(node_id)
+    rows = conn.execute(
+        "SELECT c.hash, c.ts, c.object_hash, o.bytes FROM commits c "
+        "JOIN objects o ON o.hash = c.object_hash WHERE c.node_id=? ORDER BY c.rowid ASC",
+        (node_id,),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for commit_hash, ts, object_hash_, blob in rows:
+        content = json.loads(blob)
+        out.append(
+            {
+                "hash": commit_hash,
+                "ts": ts,
+                "body": content["body"],
+                "task_state": content.get("task_state"),
+                "is_head": object_hash_ == head[0],
+            }
+        )
+    return out
+
+
 def get_maturity(conn: sqlite3.Connection, node_id: str) -> str:
     """Return node_id's current persisted maturity stage (read-only, spec §4.6).
 

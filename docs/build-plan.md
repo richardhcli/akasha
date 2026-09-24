@@ -772,7 +772,7 @@ Milestone DoD: a note is transcluded either as a whole line (`text ^tm-id`) or a
 - **Depends on** — T20.6.
 - **Files** — `src/akasha/sync/reconcile.py`, `src/akasha/kernel/store.py` (`node_versions` read helper), tests.
 - **Steps** — replace the `op.mirror` branch by `classify_join`: equal ⇒ quiet; equals an earlier version ⇒ hub wins, no review; new text and file mtime after the hub head `ts` ⇒ commit as a sync edit and propagate; else (older, future mtime, conservative root) ⇒ today's conflict path.
-- **Authorized changes to protected tests (by name):** `tests/unit/sync/test_reconcile.py::test_mirror_join_with_differing_text_hub_wins_and_is_reviewed` (split into the four cases) and the demo self-test line for a differing copy; E05/E21–E24 unchanged.
+- **Authorized changes to protected tests (by name) — as landed:** `tests/unit/sync/test_reconcile.py::test_mirror_join_with_differing_text_hub_wins_and_is_reviewed` (replaced by five cases with explicit file times; the old test passed only because filesystem mtimes lag the hub's microsecond clock by a few ms) and the demo self-test's differing-copy step (now: an old version pasted back is silent; new wording pasted later wins); E05/E21–E24 unchanged.
 - **Verify** — unit tests per case; real-watcher test "paste then edit within one window".
 - **DoD** — the sandbox case ("modify the new version, will the old change?") passes.
 

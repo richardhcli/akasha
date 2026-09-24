@@ -61,6 +61,7 @@ import time
 import unicodedata
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -95,6 +96,10 @@ logger = logging.getLogger("akasha")
 # per-file cycles one source event may trigger. Legitimate fan-out is one cycle per
 # distinct mirror file plus one per relayed edit; this is far above any real vault.
 MAX_PROPAGATION_CYCLES = 1000
+
+# M20-D: a file time more than this far in the future is a broken clock or a sync client's
+# doing, not evidence the user just changed the file.
+JOIN_CLOCK_SLACK_SECONDS = 300.0
 
 # design note (T5.4, fable-reviewed, human-decided 2026-07-12) -- DECIDED
 # gap #1: the node_type minted for a `^tm-new` paragraph (non-task) block.
@@ -1455,7 +1460,8 @@ class Reconciler:
             conservative=conservative,
         )
         self._enqueue_findings(path, outcome, extra_review)
-        committed, vault_lines = self._apply_ops(path, ops, repaired_text)
+        changed_at = None if conservative else self._file_changed_at(path)
+        committed, vault_lines = self._apply_ops(path, ops, repaired_text, changed_at)
 
         final_blocks = parse(canonicalize_text("\n".join(vault_lines)))
         hub2_blockset = hub_state_for(self.conn, final_blocks, path=path)
@@ -1572,7 +1578,7 @@ class Reconciler:
             )
 
     def _apply_ops(
-        self, path: str, ops: list[Op], repaired_text: str
+        self, path: str, ops: list[Op], repaired_text: str, changed_at: float | None = None
     ) -> tuple[set[str], list[str]]:
         """Apply ``ops`` through the store; return (committed node ids, the vault's lines).
 
@@ -1602,7 +1608,7 @@ class Reconciler:
         shifts: dict[int, int] = {}  # per line: characters already added by span-marker mints
         for op in ops:
             if op.kind == "created":
-                self._apply_created(op, path, vault_lines, committed, shifts)
+                self._apply_created(op, path, vault_lines, committed, shifts, changed_at)
             else:
                 self._apply_existing(op, path, hub_changed_map, committed)
         return committed, vault_lines
@@ -1614,22 +1620,28 @@ class Reconciler:
         vault_lines: list[str],
         committed: set[str],
         shifts: dict[int, int],
+        changed_at: float | None = None,
     ) -> None:
         if op.mirror:
-            # T19.4 / M19-C: this file JOINS a node another file
-            # already shows. The hub wins -- never commit the
-            # joining text. Identical text is a quiet no-op;
-            # differing text is preserved as a conflict branch
-            # + one review (nothing lost, nothing guessed), and
-            # the write-back below rewrites this line to the
-            # hub's text.
+            # T19.4 / M20-D: this file JOINS a node another file already shows.
             assert op.node_id is not None and op.vault_block is not None
             try:
-                joins_cleanly = _vault_matches_hub(self.conn, op.node_id, op.vault_block)
+                verdict = self._classify_join(op, changed_at)
             except store.NodeNotFoundError:
                 return
-            if not joins_cleanly:
+            if verdict == "conflict":
+                # The hub head is newer than the file (or the file time cannot be trusted):
+                # the hub wins, the file's version is preserved as a conflict branch + one
+                # review (nothing lost, nothing guessed), and the write-back below rewrites
+                # this line to the hub's text.
                 self.conflict_handler(self.conn, op, path)
+            elif verdict == "newer":
+                # A change nobody has seen, made after the hub's last one: it wins, is
+                # committed as a sync edit and reaches every other mirror.
+                kernel_apply(self.conn, op, author=SYNC_AUTHOR)
+                committed.add(op.node_id)
+            # "quiet" (identical) and "stale" (an old version pasted back): the hub wins
+            # silently; the write-back below rewrites this line to the hub's text.
             return
         new_id = kernel_apply(self.conn, op, author=SYNC_AUTHOR)
         if op.new_request is not None and new_id is not None:
@@ -1648,6 +1660,48 @@ class Reconciler:
             # cross-file adopt (a move): may have committed the
             # vault's text/state to the hub head.
             committed.add(op.node_id)
+
+    @staticmethod
+    def _file_changed_at(path: str) -> float | None:
+        """When the file last changed, or ``None`` if that cannot be trusted (a future time)."""
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            return None
+        return mtime if mtime <= time.time() + JOIN_CLOCK_SLACK_SECONDS else None
+
+    def _classify_join(
+        self, op: Op, changed_at: float | None
+    ) -> Literal["quiet", "stale", "newer", "conflict"]:
+        """Decide a mirror join whose text differs from the hub's (M20-D, in this order).
+
+        ``quiet``: the same as the hub head. ``stale``: equal to an EARLIER version in the node's
+        history (an old copy pasted back; file times cannot see this: yesterday's text saved now
+        has a fresh time). ``newer``: text the hub has never held, in a file changed after the hub
+        head's commit. ``conflict``: text the hub has never held, but the hub head is newer or the
+        file time is unreliable.
+        """
+        assert op.node_id is not None and op.vault_block is not None
+        vb = op.vault_block
+        node = store.get_node(self.conn, op.node_id)
+        text_same = _body_line(node.body) == vb.text
+        state_same = vb.kind != "task" or node.task_state == vb.task_state
+        if text_same and state_same:
+            return "quiet"
+        versions = store.node_versions(self.conn, op.node_id)
+        for v in versions:
+            if v["is_head"]:
+                continue
+            if _body_line(v["body"]) == vb.text and (
+                vb.kind != "task" or v["task_state"] == vb.task_state
+            ):
+                return "stale"
+        if changed_at is None:
+            return "conflict"
+        head_ts = max((v["ts"] for v in versions if v["is_head"]), default=None)
+        if head_ts is None:
+            return "conflict"
+        return "newer" if changed_at > datetime.fromisoformat(head_ts).timestamp() else "conflict"
 
     def _apply_existing(
         self,
