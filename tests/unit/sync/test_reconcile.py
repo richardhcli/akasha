@@ -1789,6 +1789,23 @@ def test_a_corrupted_id_on_an_unchanged_mirror_line_keeps_the_mirror_linked(tmp_
     assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
 
 
+def test_replacing_an_id_with_tm_new_detaches_cleanly_even_for_a_single_file_node(tmp_path):
+    """The documented way to detach a copy. The `^tm-new` line must not also be read as a "lost
+    anchor" of the node it replaces (that appended a second marker and left it in the text)."""
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    r = Reconciler(conn, OriginTracker())
+    path = tmp_path / "a.md"
+    path.write_text("- [ ] ship the documentation for the release ^tm-new\n", encoding="utf-8")
+    r.on_change(str(path))
+    path.write_text("- [ ] ship the documentation for the release ^tm-new\n", encoding="utf-8")
+    r.on_change(str(path))
+    assert re.fullmatch(
+        r"- \[ \] ship the documentation for the release \^tm-(?!new)[0-9a-z]{8}\n", _read(path)
+    )
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1  # old node gone (S0)
+
+
 def test_mirror_same_line_edited_in_both_files_conflicts_without_loss(tmp_path):
     conn, reconciler, a, b = _mirror_setup(tmp_path)
     a.write_text(_managed(f"A version {contract_anchor(_MX)}\n"), encoding="utf-8")

@@ -374,6 +374,8 @@ def _detect_lost_and_deleted(
     for line_no, line in vault_lines:
         if not line.strip():
             continue
+        if grammar.NEW_MARKER_EOL_RE.search(line):
+            continue  # already asking for a new node (the way to detach a copy): not a lost anchor
         eol_id = _eol_anchor_id(line)
         if eol_id is None:
             candidates.append((line_no, line, line.rstrip("\r"), False))
