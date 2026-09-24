@@ -239,15 +239,15 @@ Block grammar (line-oriented; EBNF):
 
 ```
 anchor      := "^tm-" id8
-managed_par := text SP anchor EOL                       ; paragraph node
-task_line   := indent "- [" ("x"|" ") "] " text SP anchor EOL
-new_line    := (text | task_form) SP "^tm-new" EOL      ; user requests minting
+managed_par := text [SP] anchor EOL                     ; paragraph node (SP optional on read, M20-F)
+task_line   := indent "- [" ("x"|" ") "] " text [SP] anchor EOL
+new_line    := (text | task_form) [SP] "^tm-new" EOL    ; user requests minting
 embed       := "![[" path "#^tm-" id8 "]]"              ; read-only transclusion
 ref         := "[[" path "#^tm-" id8 "]]"               ; inline reference
 indent      := (2 spaces)*                              ; nesting depth = indent/2
 ```
 
-Semantics: a `task_line` maps to a task node (`- [x]` ⇔ `task_state=done`); an indented task under another task ⇒ `composes(parent→child)` edge; `^tm-new` ⇒ daemon mints an ID and rewrites the line (this rewrite is origin-tagged, not an echo); embeds render the target's current body (read-only in Obsidian by nature). Anything inside fenced code blocks is ignored entirely. Text matching the anchor pattern *not* at end-of-line is plain text.
+Semantics: a `task_line` maps to a task node (`- [x]` ⇔ `task_state=done`); an indented task under another task ⇒ `composes(parent→child)` edge; `^tm-new` ⇒ daemon mints an ID and rewrites the line (this rewrite is origin-tagged, not an echo); embeds render the target's current body (read-only in Obsidian by nature). Anything inside fenced code blocks is ignored entirely. Text matching the anchor pattern *not* at end-of-line is plain text. *The space before an end-of-line anchor or `^tm-new` is optional on read (M20-F, user ruling 2026-09-24):* typing at the end of a line puts the cursor before the anchor and eats the space (`…text^tm-id`), which is the same block, not `E_LOST_ANCHOR`; write-back always emits the canonical single space, so it is repaired silently with no violation, pause or review item.
 
 Violations (linter codes): `E_ID_CHECKSUM` malformed anchor; `E_DUP_ID` same anchor twice **in one file** (copy without cut; the same anchor in *different* files is a mirror, see below); `E_LOST_ANCHOR` managed block's text found (fuzzy ≥ 0.9 similarity to base) but anchor deleted; `E_DELETED_S1` managed block deleted whose node is S1+. **Certain auto-repairs** (silent, logged, undoable): `E_LOST_ANCHOR` where text is byte-identical to base except the anchor ⇒ re-insert anchor; `E_DUP_ID` where one copy is byte-identical to base ⇒ the identical copy keeps the ID, the other gets `^tm-new` minting proposed. Everything else ⇒ review item. **Pause & diff:** if violations affect > 25% of a file's managed blocks in one sync cycle (formatter storm), make no writes, snapshot the file, open one review item with a diff. A managed file is a lossless container: lines that are not contract constructs pass through write-back verbatim by position; the hub owns only anchored lines.
 
@@ -275,7 +275,7 @@ on_change(path) after 500 ms debounce:
   base_store.put(sync_root_id, path, H2)
 ```
 
-Echo suppression: writes performed by the daemon record `(path, hash)` in `origin.py`; a watcher event whose content hash matches a recorded write is dropped. Startup: run `on_change` for every managed file (idempotent — this is also crash recovery). Conflict semantics: hub keeps both versions as branches on the node's commit DAG; review item `cause_kind=conflict`. **Mirror propagation:** a node's owning files form a *set* (derived from every file's base snapshot — no separate table). After a file's cycle commits a node's text or checkbox, every *other* file that holds that anchor is reconciled through this same pipeline — a full three-way `on_change`, never a blind write of the hub render, so that file's other edits survive; the propagated cycle does not itself propagate further, and each write is echo-suppressed as above. A concurrent edit of the same line in two files resolves through the conflict rule above: one commits, the other is branched and reviewed, nothing is lost.
+Echo suppression: writes performed by the daemon record `(path, hash)` in `origin.py`; a watcher event whose content hash matches a recorded write is dropped. Startup: run `on_change` for every managed file (idempotent — this is also crash recovery). Conflict semantics: hub keeps both versions as branches on the node's commit DAG; review item `cause_kind=conflict`. **Mirror propagation:** a node's owning files form a *set* (derived from every file's base snapshot — no separate table). After a file's cycle commits a node's text or checkbox, every *other* file that holds that anchor is reconciled through this same pipeline — a full three-way `on_change`, never a blind write of the hub render, so that file's other edits survive; a hub-to-file write-back is never itself propagated further (no ping-pong), but a node the propagated cycle *commits* — that file's own pending edit to a different mirrored line, found while it was brought up to date — is relayed to that node's other owners the same way, so two files edited within one debounce window converge (`docs/spec-questions.md` M19-D); the fan-out is capped as a runaway guard, and each write is echo-suppressed as above. A concurrent edit of the same line in two files resolves through the conflict rule above: one commits, the other is branched and reviewed, nothing is lost.
 
 ### 4.9 Invalidation walk (tms/invalidate.py)
 

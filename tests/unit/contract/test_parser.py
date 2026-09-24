@@ -359,3 +359,24 @@ def test_unmanaged_file_raw_lines_is_total() -> None:
     bs = parser.parse(text)
     assert bs.managed is False
     assert bs.raw_lines == {1: f"Some claim ^tm-{id_}", 2: "More prose"}
+
+
+# --- glued anchors (M20-F) --------------------------------------------------------
+
+
+def test_anchor_glued_to_the_text_is_still_that_block() -> None:
+    """Typing at the end of a line eats the space before the anchor; the block survives."""
+    glued = parser.parse("---\ntm: 1\n---\nsome words tet 1^tm-yuqpxpaz\n")
+    spaced = parser.parse("---\ntm: 1\n---\nsome words tet 1 ^tm-yuqpxpaz\n")
+    assert list(glued.blocks) == ["yuqpxpaz"] and glued.blocks == spaced.blocks
+    assert glued.blocks["yuqpxpaz"].text == "some words tet 1"
+
+
+def test_glued_task_line_and_new_marker() -> None:
+    bs = parser.parse("---\ntm: 1\n---\n  - [x] nested task^tm-y35j4dxi\n- [ ] fresh^tm-new\n")
+    assert bs.blocks["y35j4dxi"].text == "nested task" and bs.blocks["y35j4dxi"].depth == 1
+    assert [(r.text, r.shape) for r in bs.new_requests] == [("fresh", "task")]
+
+
+def test_a_line_that_is_only_an_anchor_is_not_a_block() -> None:
+    assert parser.parse("---\ntm: 1\n---\n^tm-yuqpxpaz\n").blocks == {}

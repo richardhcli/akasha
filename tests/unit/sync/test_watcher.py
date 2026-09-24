@@ -234,7 +234,7 @@ def test_a_root_registered_after_start_is_picked_up_by_the_poll_loop():
     daemon (and its watcher) is already running -- the realistic common
     case, since a human normally starts the daemon first and registers a
     vault moments later -- meant the new root was never watched for the
-    rest of the process's life. ``_watch_new_roots`` (called every poll
+    rest of the process's life. ``watch_new_roots`` (called every poll
     tick) is the fix; this drives it directly rather than waiting on the
     real poll thread's timing, keeping this test deterministic.
     """
@@ -245,11 +245,64 @@ def test_a_root_registered_after_start_is_picked_up_by_the_poll_loop():
     assert spy.scheduled == []  # nothing registered yet
 
     store.register_sync_root(conn, "late", "/home/u/vault-late")
-    w._watch_new_roots()
+    w.watch_new_roots()
 
     assert spy.scheduled == [("/home/u/vault-late", True)]
     assert {r.name for r in w.roots.values()} == {"late"}
 
+    w.stop()
+
+
+def test_concurrent_watch_new_roots_schedules_a_root_once():
+    """Debug-plan D11: the poll thread and `POST /v1/sync/roots` both call it."""
+    import threading
+
+    conn = _conn()
+    spy = _SpyObserver()
+    w = Watcher(conn, lambda _p: None, observer_factory=lambda: spy)
+    w.start()
+    store.register_sync_root(conn, "late", "/home/u/vault-late")
+
+    gate = threading.Barrier(8)
+
+    def call() -> None:
+        gate.wait()
+        w.watch_new_roots()
+
+    threads = [threading.Thread(target=call) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert spy.scheduled == [("/home/u/vault-late", True)]
+    w.stop()
+
+
+def test_a_root_whose_watch_failed_is_retried_not_forgotten():
+    conn = _conn()
+
+    class _FlakyObserver(_SpyObserver):
+        fail_next = False
+
+        def schedule(self, event_handler, path, *, recursive=False):
+            if self.fail_next:
+                self.fail_next = False
+                raise OSError("inotify watch limit reached")
+            return super().schedule(event_handler, path, recursive=recursive)
+
+    spy = _FlakyObserver()
+    w = Watcher(conn, lambda _p: None, observer_factory=lambda: spy)
+    w.start()
+    store.register_sync_root(conn, "late", "/home/u/vault-late")
+
+    spy.fail_next = True
+    with pytest.raises(OSError):
+        w.watch_new_roots()
+    assert w.roots == {}  # not recorded as watched
+
+    w.watch_new_roots()
+    assert spy.scheduled == [("/home/u/vault-late", True)]
     w.stop()
 
 

@@ -20,6 +20,8 @@ Plus a golden-fixture loader driving the 6 seeded cases under
 from __future__ import annotations
 
 import json
+import logging
+import re
 import sqlite3
 from pathlib import Path
 
@@ -1573,6 +1575,170 @@ def test_mirror_propagation_keeps_the_other_files_own_edits(tmp_path):
     assert f"Edited in A {contract_anchor(_MX)}" in text_b  # the mirror text arrived...
     assert f"other EDITED {contract_anchor(y)}" in text_b  # ...and B's own edit survived
     assert store.get_node(conn, y).body == "other EDITED\n"  # and was reconciled, not lost
+
+
+def _two_mirrored_lines(tmp_path, files=("a.md", "b.md")):
+    """Every file shows BOTH nodes ``_MX`` and ``_MY``; settled (base == disk)."""
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    _seed_node(conn, _MX, "claim", "x original")
+    _seed_node(conn, _MY, "claim", "y original")
+    text = render(
+        parse(
+            _managed(
+                f"x original {contract_anchor(_MX)}\ny original {contract_anchor(_MY)}\n"
+            )
+        )
+    )
+    paths = [tmp_path / name for name in files]
+    for path in paths:
+        base_store.put(conn, root_id, str(path), text)
+        path.write_text(text, encoding="utf-8")
+    return conn, Reconciler(conn, OriginTracker()), paths
+
+
+_MY = "6p5zkk6x"
+
+
+def _both_lines(x: str, y: str) -> str:
+    return _managed(f"{x} {contract_anchor(_MX)}\n{y} {contract_anchor(_MY)}\n")
+
+
+def test_two_files_edited_on_different_mirrored_lines_converge(tmp_path):
+    """Debug-plan D12: the second file's own edit is committed while it is being brought up
+    to date with the first file's -- it must then reach the first file too, not stay stranded."""
+    conn, reconciler, (a, b) = _two_mirrored_lines(tmp_path)
+    a.write_text(_both_lines("x EDITED in A", "y original"), encoding="utf-8")
+    b.write_text(_both_lines("x original", "y EDITED in B"), encoding="utf-8")
+
+    reconciler.on_change(str(a))  # the watcher's first debounced event; b's own event comes later
+
+    assert store.get_node(conn, _MX).body == "x EDITED in A\n"
+    assert store.get_node(conn, _MY).body == "y EDITED in B\n"
+    for path in (a, b):
+        assert _read(path).endswith(
+            f"x EDITED in A {contract_anchor(_MX)}\ny EDITED in B {contract_anchor(_MY)}\n"
+        ), path.name
+    before = (_read(a), _read(b))  # settled: b's own (now stale) event and a re-run change nothing
+    reconciler.on_change(str(b))
+    reconciler.on_change(str(a))
+    assert (_read(a), _read(b)) == before
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_a_relayed_edit_reaches_a_third_file_and_never_ping_pongs(tmp_path, monkeypatch):
+    conn, reconciler, (a, b, c) = _two_mirrored_lines(tmp_path, ("a.md", "b.md", "c.md"))
+    a.write_text(_both_lines("x EDITED in A", "y original"), encoding="utf-8")
+    b.write_text(_both_lines("x original", "y EDITED in B"), encoding="utf-8")
+    calls: list[str] = []
+    real_cycle = Reconciler._cycle
+
+    def spy(self, path):
+        calls.append(Path(path).name)
+        return real_cycle(self, path)
+
+    monkeypatch.setattr(Reconciler, "_cycle", spy)
+
+    reconciler.on_change(str(a))
+
+    for path in (a, b, c):
+        assert _read(path).endswith(
+            f"x EDITED in A {contract_anchor(_MX)}\ny EDITED in B {contract_anchor(_MY)}\n"
+        ), path.name
+    assert len(calls) <= 6, calls  # a, then b and c; b's y relayed to a and c -- a bounded fan-out
+
+
+def test_mirror_fan_out_is_capped_as_a_runaway_guard(tmp_path, monkeypatch, caplog):
+    conn, reconciler, (a, b, c) = _two_mirrored_lines(tmp_path, ("a.md", "b.md", "c.md"))
+    a.write_text(_both_lines("x EDITED in A", "y original"), encoding="utf-8")
+    monkeypatch.setattr(reconcile, "MAX_PROPAGATION_CYCLES", 1)
+
+    with caplog.at_level(logging.WARNING, logger="akasha"):
+        reconciler.on_change(str(a))  # must not raise
+
+    assert any("stopped after 1 cycles" in r.getMessage() for r in caplog.records)
+    assert "x EDITED in A" in _read(b) and "x EDITED in A" not in _read(c)  # c heals later
+
+
+def test_glued_anchor_is_repaired_silently_and_still_propagates(tmp_path):
+    """M20-F: typing at the end of a line puts the cursor before the anchor and eats its space
+    (`...text^tm-id`). That is not a lost anchor: the line is the same block, re-spaced, with no
+    violation, no pause and no review item -- and the edit still reaches the mirror."""
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(f"Edited in A{contract_anchor(_MX)}\n"), encoding="utf-8")  # glued
+
+    reconciler.on_change(str(a))
+
+    assert store.get_node(conn, _MX).body == "Edited in A\n"
+    assert _read(a).endswith(f"Edited in A {contract_anchor(_MX)}\n")  # A re-spaced
+    assert _read(b).endswith(f"Edited in A {contract_anchor(_MX)}\n")  # and B follows
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_a_glued_anchor_with_unchanged_text_is_only_re_spaced(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    a.write_text(_managed(f"Shared text{contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(a))
+
+    assert _read(a).endswith(f"Shared text {contract_anchor(_MX)}\n")
+    assert store.get_node(conn, _MX).body == "Shared text\n"
+    assert len(store.history(conn, _MX)) == 1  # no spurious commit
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_a_glued_new_marker_is_minted_like_a_spaced_one(tmp_path):
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    note = tmp_path / "n.md"
+    note.write_text(_managed("- [ ] glued request^tm-new\n"), encoding="utf-8")
+
+    Reconciler(conn, OriginTracker()).on_change(str(note))
+
+    text = _read(note)
+    assert "^tm-new" not in text and re.search(r"- \[ \] glued request \^tm-[0-9a-z]{8}\n", text)
+
+
+def test_a_reconciler_built_before_the_files_were_reconciled_still_finds_every_mirror(tmp_path):
+    """Debug-plan D13: the daemon's long-lived Reconciler is built at start-up, before any vault is
+    registered; `setup` then reconciles the vault through a throwaway Reconciler (the rescan route).
+    The long-lived one must learn those owners from the database, or an edit typed into a COPY never
+    reaches the original (which it has never seen) until the original is itself edited once."""
+    conn = _conn()
+    root_id = _register_root(conn, tmp_path)
+    _seed_node(conn, _MX, "claim", "Shared text")
+    long_lived = Reconciler(conn, OriginTracker())  # built while no file is tracked yet
+    assert long_lived.projection is not None and long_lived.projection.owners(_MX) == frozenset()
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    text = render(parse(_managed(f"Shared text {contract_anchor(_MX)}\n")))
+    for path in (a, b):  # reconciled by "another Reconciler": only the database knows
+        base_store.put(conn, root_id, str(path), text)
+        path.write_text(text, encoding="utf-8")
+    b.write_text(_managed(f"Edited in the copy {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    long_lived.on_change(str(b))
+
+    assert store.get_node(conn, _MX).body == "Edited in the copy\n"
+    assert _read(a).endswith(f"Edited in the copy {contract_anchor(_MX)}\n")  # the original follows
+
+
+def test_projection_refresh_only_reparses_files_whose_base_changed(tmp_path, monkeypatch):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    index = reconciler.projection
+    assert index is not None
+    parsed: list[str] = []
+    real_parse = reconcile.parse
+    monkeypatch.setattr(reconcile, "parse", lambda t: (parsed.append(t), real_parse(t))[1])
+
+    index.refresh(conn)
+    assert parsed == []  # nothing changed since build
+
+    root_id = store.list_sync_roots(conn)[0]["id"]
+    other = render(parse(_managed(f"Other {contract_anchor(_MX)}\n")))
+    base_store.put(conn, root_id, str(b), other)
+    index.refresh(conn)
+    assert len(parsed) == 1  # only b's new base
+
 
 
 def test_mirror_same_line_edited_in_both_files_conflicts_without_loss(tmp_path):

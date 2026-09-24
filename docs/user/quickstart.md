@@ -1,6 +1,6 @@
 # Quickstart
 
-From nothing to a live, syncing vault in two commands: install, then `akasha setup <folder-of-notes>`.
+From nothing to a live, syncing vault in two commands: install, then `akasha setup <folder-of-notes>`. From that moment a line shared between notes is kept identical in all of them — edit any copy and every other copy changes (see [Transclusion](#transclusion-the-same-line-in-several-notes)).
 
 ## 1. Install
 
@@ -16,7 +16,7 @@ uv tool install .        # puts `akasha` on your PATH (run `uv tool update-shell
 ## 2. Set up
 
 ```bash
-akasha setup ~/notes        # any folder of Markdown files
+akasha setup ~/notes        # any folder of Markdown files (or `cd ~/notes && akasha setup .`)
 ```
 
 That one command:
@@ -43,14 +43,26 @@ akasha status               # one screen: is it running, is my token good, what 
 
 Within a moment the daemon rewrites that line with a real id (`^tm-…`) and adds a `tm: 1` front-matter key to the note (inside your existing front matter if you have one; your other keys are untouched). Prose-only notes are never modified.
 
-**Same id in two notes = one thing.** Copy an anchored line into another file and edit either copy: the other changes to match within about a second (transclusion). `akasha render notes/B.md` prints a file with its `![[note#^tm-id]]` embeds replaced by the target's current text, without touching any file.
-
 **Leave things out** with a `.tmignore` file at the folder's root (gitignore-style: `# comments`, `*`, `?`, `**`, a trailing `/` for a folder, `!` to re-include). `.obsidian/`, `.git/`, `.trash/`, `node_modules/` and non-Markdown files are always skipped.
 
 ```bash
 akasha new claim "caffeine impairs sleep"     # nodes can also be made directly
 akasha search caffeine
 ```
+
+### Transclusion: the same line in several notes
+
+**Same id in two notes = one thing.** That is the whole mechanism, and it is on from the moment `setup` returns — nothing to enable per folder or per note.
+
+1. In any note write a task or a claim with `^tm-new` (as above); the daemon gives it an id, e.g. `- [ ] renew passport ^tm-4cgfdxpi`.
+2. Copy that line, id included, into any other notes, in any folder under the vault.
+3. Edit or tick it in **any** of them: every other copy changes to match within about a second. Edits made while the daemon is off are picked up the next time it starts. To make an *independent* copy instead, replace the pasted id with `^tm-new`.
+
+Each note keeps its own indentation, and the rest of each note is never touched. If two notes change the *same* line in the same instant, one version wins and the other is kept as a review item (`akasha review list`) — nothing is lost.
+
+**What is shared is one line** — a task line or a one-line paragraph. A multi-line section cannot be shared yet (only its anchored last line would be); that needs a grammar decision (`docs/spec-questions.md` M19-A).
+
+`akasha render notes/B.md` prints a file with its `![[note#^tm-id]]` embeds replaced by the target's current text, without touching any file.
 
 ## 4. Obsidian (optional)
 

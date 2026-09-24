@@ -775,6 +775,12 @@ def setup(
             "        every Markdown file in it is tracked by default; add a .tmignore file "
             "at its root to opt paths out"
         )
+        typer.echo(
+            "        transclusion is live: the same ^tm- id in several notes is one line kept "
+            "identical in all of them.\n"
+            '        Try it: write "- [ ] something ^tm-new" in a note, then copy that line '
+            "(id included) into another."
+        )
         if warning:
             typer.echo(f"warning: {warning}")
     if minted is not None:

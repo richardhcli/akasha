@@ -10,9 +10,9 @@ here, not duplicated, per the task instructions.
 EBNF reproduced verbatim from mvp-spec.md §4.7::
 
     anchor      := "^tm-" id8
-    managed_par := text SP anchor EOL                       ; paragraph node
-    task_line   := indent "- [" ("x"|" ") "] " text SP anchor EOL
-    new_line    := (text | task_form) SP "^tm-new" EOL      ; user requests minting
+    managed_par := text [SP] anchor EOL                     ; paragraph node
+    task_line   := indent "- [" ("x"|" ") "] " text [SP] anchor EOL
+    new_line    := (text | task_form) [SP] "^tm-new" EOL    ; user requests minting
     embed       := "![[" path "#^tm-" id8 "]]"              ; read-only transclusion
     ref         := "[[" path "#^tm-" id8 "]]"               ; inline reference
     indent      := (2 spaces)*                              ; nesting depth = indent/2
@@ -52,13 +52,16 @@ ID8_RE = re.compile(f"^{ID8_PATTERN}$")
 ANCHOR_PATTERN = rf"\^tm-(?P<id>{ID8_PATTERN})"
 ANCHOR_RE = re.compile(ANCHOR_PATTERN)
 
-# A "real" anchor per spec §4.7: preceded by whitespace and sitting at
-# end-of-line (trailing whitespace tolerated, but nothing else after it).
+# A "real" anchor per spec §4.7: sitting at end-of-line (trailing whitespace
+# tolerated, but nothing else after it). The canonical form has one space
+# before it, but the space is optional on READ (M20-F): typing at the end of a
+# line puts the cursor before the anchor and eats the space, and that is the
+# same block, not a lost anchor. `render` always writes the canonical space back.
 # A match of ANCHOR_RE that does *not* also satisfy this is plain text.
-ANCHOR_EOL_RE = re.compile(rf"\s+{ANCHOR_PATTERN}\s*$")
+ANCHOR_EOL_RE = re.compile(rf"\s*{ANCHOR_PATTERN}\s*$")
 
 # `^tm-new` marker (new_line token): also only meaningful at end-of-line.
-NEW_MARKER_EOL_RE = re.compile(r"\s+\^tm-new\s*$")
+NEW_MARKER_EOL_RE = re.compile(r"\s*\^tm-new\s*$")
 
 # --- indent --------------------------------------------------------------
 
@@ -81,13 +84,13 @@ def indent_depth(indent: str) -> int:
 # --- managed_par -----------------------------------------------------------
 
 # managed_par := text SP anchor EOL
-MANAGED_PAR_RE = re.compile(rf"^(?P<text>\S.*?)\s+{ANCHOR_PATTERN}\s*$")
+MANAGED_PAR_RE = re.compile(rf"^(?P<text>\S.*?)\s*{ANCHOR_PATTERN}\s*$")
 
 # --- task_line ---------------------------------------------------------------
 
 # task_line := indent "- [" ("x"|" ") "] " text SP anchor EOL
 TASK_LINE_RE = re.compile(
-    rf"^(?P<indent>(?: {{2}})*)- \[(?P<state>[x ])\] (?P<text>\S.*?)\s+{ANCHOR_PATTERN}\s*$"
+    rf"^(?P<indent>(?: {{2}})*)- \[(?P<state>[x ])\] (?P<text>\S.*?)\s*{ANCHOR_PATTERN}\s*$"
 )
 
 # --- new_line ------------------------------------------------------------
@@ -104,7 +107,7 @@ NEW_LINE_RE = re.compile(
     r"(?P<indent>(?: {2})*)- \[(?P<state>[x ])\] (?P<task_text>\S.*?)"
     r"|"
     r"(?P<text>\S.*?)"
-    r")\s+\^tm-new\s*$"
+    r")\s*\^tm-new\s*$"
 )
 
 # --- embed / ref -----------------------------------------------------------

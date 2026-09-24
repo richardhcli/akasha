@@ -59,6 +59,7 @@ import secrets
 import sqlite3
 import time
 import unicodedata
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -89,6 +90,11 @@ if TYPE_CHECKING:
     from akasha.sync.origin import OriginTracker
 
 logger = logging.getLogger("akasha")
+
+# Runaway guard for `Reconciler.on_change`'s mirror fan-out (debug-plan D12): the most
+# per-file cycles one source event may trigger. Legitimate fan-out is one cycle per
+# distinct mirror file plus one per relayed edit; this is far above any real vault.
+MAX_PROPAGATION_CYCLES = 1000
 
 # design note (T5.4, fable-reviewed, human-decided 2026-07-12) -- DECIDED
 # gap #1: the node_type minted for a `^tm-new` paragraph (non-task) block.
@@ -340,6 +346,7 @@ class ProjectionIndex:
         self._owner: dict[str, str] = {}
         self._owners: dict[str, set[str]] = {}
         self._by_path: dict[str, set[str]] = {}
+        self._base_hash: dict[str, str | None] = {}  # the base each path's entry was read from
 
     @classmethod
     def build(cls, conn: sqlite3.Connection) -> ProjectionIndex:
@@ -352,8 +359,31 @@ class ProjectionIndex:
             if base_text is None:
                 continue
             block_set = parse(base_text)
-            index.update(path, set(block_set.blocks.keys()))
+            index.update(path, set(block_set.blocks.keys()), base_hash=row["base_hash"])
         return index
+
+    def refresh(self, conn: sqlite3.Connection) -> None:
+        """Re-sync with the database: learn files this instance never reconciled itself.
+
+        Debug-plan D13: a long-lived index (the daemon's watcher) is built once, at start-up,
+        when no vault is registered yet; the vault is then reconciled by a throwaway
+        ``Reconciler`` (``POST /v1/sync/rescan``), whose ``update`` calls land in its own,
+        discarded index. Without this, an edit typed into a COPY could not find the original
+        as an owner and never reached it. Only files whose stored base hash differs from the
+        one this index last read are re-parsed, so a quiet cycle costs one small query.
+        """
+        seen: set[str] = set()
+        for row in store.list_sync_files(conn):
+            path = row["path"]
+            seen.add(path)
+            if path in self._by_path and self._base_hash.get(path) == row["base_hash"]:
+                continue
+            base_text = store.read_base_snapshot(conn, row["sync_root_id"], path)
+            ids: set[str] = set(parse(base_text).blocks) if base_text is not None else set()
+            self.update(path, ids, base_hash=row["base_hash"])
+        for gone in set(self._by_path) - seen:
+            self.update(gone, set())
+            self._base_hash.pop(gone, None)
 
     def owner(self, node_id: str) -> str | None:
         """Return the path currently believed to own ``node_id``, or ``None``."""
@@ -367,8 +397,11 @@ class ProjectionIndex:
         """
         return frozenset(self._owners.get(node_id, ()))
 
-    def update(self, path: str, block_ids: set[str]) -> None:
+    def update(self, path: str, block_ids: set[str], *, base_hash: str | None = None) -> None:
         """Record that ``path``'s base snapshot now contains exactly ``block_ids``.
+
+        ``base_hash`` is the ``sync_files.base_hash`` that snapshot was stored under; it lets
+        :meth:`refresh` skip files nobody else has touched.
 
         Any id ``path`` previously held but no longer contains is removed
         from that id's owner set (an empty set is deleted outright). Every
@@ -391,6 +424,7 @@ class ProjectionIndex:
                 else:
                     self._owner.pop(stale_id, None)
         self._by_path[path] = set(block_ids)
+        self._base_hash[path] = base_hash
         for node_id in block_ids:
             self._owners.setdefault(node_id, set()).add(path)
             self._owner[node_id] = path
@@ -1194,35 +1228,58 @@ class Reconciler:
         mirror, spec §4.7 "Mirrors" / build-plan T19.4) is then brought up
         to date by running the same three-way :meth:`_cycle` on it -- never
         a blind write of the hub render, so that file's own other edits
-        survive. A propagated cycle never propagates further (no
-        recursion, hence no ping-pong), a mirror that vanished from disk
-        is skipped, and a failure in one mirror is logged and never fails
-        the source file's already-completed cycle nor stops the other
-        mirrors; a mirror left stale that way is healed by its next event
-        or the startup reconcile (§4.8, idempotent).
+        survive. Those own edits are the one thing a propagated cycle can
+        itself COMMIT (debug-plan D12: two files each edited, on different
+        mirrored lines, inside one debounce window); each such node is relayed
+        to ITS other owners, so both edits reach every file. A hub-to-file
+        write-back commits nothing and is never relayed, so there is no
+        ping-pong, and the fan-out is capped as a runaway guard. A mirror
+        that vanished from disk is skipped, and a failure in one mirror is
+        logged and never fails the source file's already-completed cycle nor
+        stops the other mirrors; a mirror left stale that way is healed by its
+        next event or the startup reconcile (§4.8, idempotent).
         """
         committed = self._cycle(path)
         if not committed:
             return
         assert self.projection is not None
-        targets: list[str] = []
-        for node_id in sorted(committed):
-            for other in sorted(self.projection.owners(node_id) - {path}):
-                if other not in targets:
-                    targets.append(other)
-        for other in targets:
-            try:
-                self._cycle(other)
-            except FileNotFoundError:
-                continue
-            except Exception:
-                logger.warning(
-                    "mirror propagation to %r (from %r) failed; it will heal on its "
-                    "next event or the startup reconcile",
-                    other,
-                    path,
-                    exc_info=True,
-                )
+        relay: deque[tuple[str, set[str]]] = deque([(path, committed)])
+        budget = MAX_PROPAGATION_CYCLES
+        while relay:
+            source, node_ids = relay.popleft()
+            targets: list[str] = []
+            for node_id in sorted(node_ids):
+                for other in sorted(self.projection.owners(node_id) - {source}):
+                    if other not in targets:
+                        targets.append(other)
+            for other in targets:
+                if budget == 0:
+                    logger.warning(
+                        "mirror propagation from %r stopped after %d cycles; the remaining "
+                        "mirrors heal on their next event or the startup reconcile",
+                        path,
+                        MAX_PROPAGATION_CYCLES,
+                    )
+                    return
+                budget -= 1
+                try:
+                    own_edits = self._cycle(other)
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    logger.warning(
+                        "mirror propagation to %r (from %r) failed; it will heal on its "
+                        "next event or the startup reconcile",
+                        other,
+                        source,
+                        exc_info=True,
+                    )
+                    continue
+                # SPEC-QUESTION: M19-D -- §4.8 said a propagated cycle never propagates further;
+                # relaying what it COMMITTED (its own pending edit) is the narrowest reading
+                # that keeps the §4.7 promise (docs/spec-questions.md M19-D, debug-plan D12).
+                if own_edits:
+                    relay.append((other, own_edits))
 
     def _cycle(self, path: str) -> set[str]:
         """One §4.8 ``on_change(path)`` cycle for ``path`` ONLY (no propagation).
@@ -1251,6 +1308,7 @@ class Reconciler:
             return set()
         conservative = detect_cloud_path(root["root_path"]) is not None
         assert self.projection is not None
+        self.projection.refresh(self.conn)  # D13: learn files another Reconciler reconciled
 
         # design note (T9.2c): timing starts here, after the unregistered
         # sync-root guard above -- an event for a path with no registered
@@ -1294,8 +1352,10 @@ class Reconciler:
             if vault_text == base_text:
                 # hub-only change: project the hub onto the base skeleton.
                 self.write_if_diff(path, hub_text)
-                base_store.put(self.conn, sync_root_id, path, hub_text)
-                self.projection.update(path, set(hub_blockset.blocks.keys()))
+                base_hash = base_store.put(self.conn, sync_root_id, path, hub_text)
+                self.projection.update(
+                    path, set(hub_blockset.blocks.keys()), base_hash=base_hash
+                )
                 return set()
 
             # blocks_b_skeleton (above) already parsed this exact base_text --
@@ -1502,8 +1562,10 @@ class Reconciler:
             self.write_if_diff(path, hub2_text)
             # base_store.put unconditionally -- agreement may be new even if
             # the bytes happen to be unchanged (spec §4.8 point 6).
-            base_store.put(self.conn, sync_root_id, path, hub2_text)
-            self.projection.update(path, set(hub2_blockset.blocks.keys()))
+            base_hash = base_store.put(self.conn, sync_root_id, path, hub2_text)
+            self.projection.update(
+                path, set(hub2_blockset.blocks.keys()), base_hash=base_hash
+            )
             return committed
         finally:
             metrics.record_sync_cycle_ms((time.monotonic() - cycle_start) * 1000.0)

@@ -105,7 +105,7 @@ import os
 import re
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any, Protocol
@@ -134,6 +134,7 @@ DEFAULT_DEBOUNCE_SECONDS = 0.5
 # vault file.
 _RECONCILE_TEMP_FILE_RE = re.compile(r"^\..+\.tmp-[0-9a-f]{16}$")
 
+
 # debug-plan Dx: the live watcher recursively observes EVERY filesystem
 # change under a sync root's root_path (watchdog is scheduled with
 # recursive=True over the whole tree, module-level in Watcher.start), not
@@ -158,6 +159,7 @@ _RECONCILE_TEMP_FILE_RE = re.compile(r"^\..+\.tmp-[0-9a-f]{16}$")
 # project's primary dogfood platform, per README) are case-insensitive.
 def _is_managed_candidate(path: str) -> bool:
     return PurePath(path).suffix.lower() == ".md"
+
 
 # debug-plan D10: watchdog event-type strings that never represent a content
 # change -- a plain read-without-write raises exactly these on this
@@ -665,6 +667,9 @@ class Watcher:
             logger=self.logger,
         )
         self._roots: dict[str, WatchedRoot] = {}
+        # Serializes `watch_new_roots`: it is called from the poll thread AND, at
+        # registration time, from an API request thread.
+        self._roots_lock = threading.Lock()
         self._observer: _Scheduler | None = None
         self._handler: _WatchdogEventHandler | None = None
         self._poll_stop_event = threading.Event()
@@ -707,7 +712,7 @@ class Watcher:
         self._roots = {row["id"]: self._build_watched_root(row) for row in rows}
         return list(self._roots.values())
 
-    def _watch_new_roots(self) -> None:
+    def watch_new_roots(self, rows: Sequence[Mapping[str, Any]] | None = None) -> None:
         """Pick up any sync root registered AFTER :meth:`start` already ran
         (build-plan T9.6): :meth:`load_roots` used to run exactly once,
         inside ``start()`` -- a root registered via ``POST /v1/sync/roots``
@@ -720,15 +725,34 @@ class Watcher:
         small, cheap query (a handful of rows, no vault content), so a
         separate timer/cadence is not worth the added complexity. A no-op
         (zero new roots) is the overwhelmingly common case per tick.
+
+        Also called synchronously by ``POST /v1/sync/roots`` before it
+        responds (debug-plan D11): the poll loop alone left a window of up to
+        one tick in which a file written right after registration was neither
+        in the caller's follow-up rescan nor seen by any filesystem event, and
+        was lost until the daemon restarted. Watching first and scanning second
+        closes it -- anything written earlier is found by the scan, anything
+        later raises an event.
+
+        ``rows`` are the registered roots as the CALLER read them: the request thread passes
+        rows read on its own per-request connection, so it never touches ``self.conn``, which
+        the poll thread's reconcile cycles are using. Omitted (the poll loop), they are read here.
         """
         if self._observer is None or self._handler is None:
             return
-        for row in store.list_sync_roots(self.conn):
-            if row["id"] in self._roots:
-                continue
-            watched = self._build_watched_root(row)
-            self._roots[watched.id] = watched
-            self._observer.schedule(self._handler, watched.root_path, recursive=True)
+        with self._roots_lock:
+            for row in store.list_sync_roots(self.conn) if rows is None else rows:
+                if row["id"] in self._roots:
+                    continue
+                watched = self._build_watched_root(row)
+                # Recorded BEFORE scheduling so the first event (delivered on
+                # watchdog's own thread the instant the watch exists) finds its root.
+                self._roots[watched.id] = watched
+                try:
+                    self._observer.schedule(self._handler, watched.root_path, recursive=True)
+                except Exception:
+                    del self._roots[watched.id]  # not watched: the next call retries it
+                    raise
 
     def start(self) -> None:
         """Start watching every loaded (or freshly-loaded) sync root's ``root_path``.
@@ -778,7 +802,7 @@ class Watcher:
     def _poll_loop(self) -> None:
         while True:
             try:
-                self._watch_new_roots()
+                self.watch_new_roots()
                 self.poll()
             except Exception:
                 # A failed cycle must never crash the watcher's poll thread
@@ -794,7 +818,7 @@ class Watcher:
         """The loaded root whose ``root_path`` is the longest prefix of ``path``."""
         best: WatchedRoot | None = None
         # Snapshot: this runs on watchdog's dispatch thread while the poll thread's
-        # `_watch_new_roots` may insert a freshly registered root into the dict.
+        # `watch_new_roots` may insert a freshly registered root into the dict.
         for root in list(self._roots.values()):
             try:
                 PurePath(path).relative_to(PurePath(root.root_path))

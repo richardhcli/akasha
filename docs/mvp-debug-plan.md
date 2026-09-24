@@ -708,3 +708,97 @@ authoritative for `D*` entries; there is no separate status tracker.
   passed, 10 deselected `[chromium]` tests not runnable in this
   environment — **zero failures now**, up from 202 passed / 1 failed
   before this fix).
+
+## D11 — a file written right after a sync root is registered is silently never seen (the first seconds after `akasha setup`)
+
+- **Goal** — after `akasha setup <dir>` (or `akasha sync add`, the web UI, the plugin) returns,
+  every edit to any Markdown file under the folder is reconciled, however soon it is made.
+- **Found via** — an end-to-end run of the user's claim ("after one init command, editing a
+  transcluded line changes it in every file"): a script that ran `akasha setup vault` and then
+  immediately copied an anchored line into two other files. Those two files were never adopted;
+  a later edit joined them with stale text, so the hub won and two conflict reviews opened
+  (`base_text: null`). A probe (new file written *d* seconds after `setup` returned) saw it lost
+  at d = 0 in 2 of 2 tries and found at d >= 50 ms. Root cause: `POST /v1/sync/roots` only
+  inserts the row; the watcher's poll loop scheduled the OS watch on its next tick (<= 0.1 s
+  later). A write in that window was neither in the caller's follow-up `POST /v1/sync/rescan`
+  (which had already read the folder) nor raised an event -- lost until the daemon restarted.
+- **Files** — `src/akasha/sync/watcher.py` (`_watch_new_roots` -> public `watch_new_roots`,
+  serialized by a lock, and a root is only recorded as watched if scheduling succeeded),
+  `src/akasha/api/routes/sync_roots.py` (call it before answering), `src/akasha/daemon.py`
+  (`app.state.watcher`), `tests/unit/sync/test_watcher.py`,
+  `tests/integration/test_sync_root_watch_on_register.py` (new).
+- **Steps taken** — Watch first, scan second: the registration route asks the watcher to schedule
+  the new root synchronously, so anything written before is found by the client's rescan and
+  anything after raises an event. The poll loop remains the backstop (a scheduling failure in the
+  route is logged, not raised, and retried by the loop). The method now runs on two threads, so
+  its check-then-schedule is under a lock; a failed schedule no longer leaves the root marked
+  as watched (it used to be recorded first, so a failure was never retried).
+- **Verify** — `uv run pytest tests/unit/sync/test_watcher.py
+  tests/integration/test_sync_root_watch_on_register.py tests/integration/test_watcher_wiring.py -q`
+- **DoD** — a file written the instant registration returns is reconciled; two threads calling
+  `watch_new_roots` schedule a root once; a failed watch is retried; the route's test fails when
+  its call is removed (checked by hand). Not fixed here: the same class of window exists between
+  `reconcile_all` and `watcher.start()` when the daemon restarts (milliseconds; `setup` is not
+  affected because the daemon only answers health after the watcher starts).
+- **Status** — DONE 2026-09-24. Probe at zero delay: 0 of 2 before, 6 of 6 after (installed wheel).
+
+## D12 — two mirrored files edited within one debounce window stay different forever
+
+- **Goal** — editing different mirrored lines in two files at (nearly) the same time leaves every
+  file with both edits (spec §4.7 Mirrors: an edit reaches every other file within one sync cycle).
+- **Found via** — the same end-to-end run as D11 (repro: three files sharing two anchors, a line
+  edited in one file and a different line in another 5 ms later): after 12 s the second edit was in
+  its own file only, no review item, no error, and nothing ever changed it. Root cause:
+  `Reconciler.on_change` runs the source file's cycle, then a three-way cycle on each other owner
+  and *discarded that cycle's result*. When that other file held its own pending edit, the cycle
+  committed it -- and it was never relayed to the remaining owners; the file's own later event was
+  a quiet cycle because the daemon had just rewritten it to match the hub.
+- **Files** — `src/akasha/sync/reconcile.py` (`on_change`, `MAX_PROPAGATION_CYCLES`),
+  `docs/mvp-spec.md` §4.8, `docs/spec-questions.md` (M19-D),
+  `tests/unit/sync/test_reconcile.py`, `tests/integration/test_mirror_live_two_files_at_once.py` (new).
+- **Steps taken** — `on_change` keeps a work queue: a propagated cycle that returns committed node
+  ids has them relayed to those nodes' other owners. A hub-to-file write-back commits nothing, so
+  it is never relayed (still no ping-pong); a cap bounds the fan-out. Same-line edits are untouched
+  (E22 still one conflict). The protected tests and battery cases are unmodified.
+- **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py
+  tests/integration/test_mirror_live_two_files_at_once.py tests/battery -q`
+- **DoD** — the two-file and three-file cases converge with no review item; disabling the relay
+  fails the three new tests (checked by hand); `test_mirror_propagation_does_not_recurse_or_ping_pong`
+  and E21-E24 pass unchanged.
+- **Status** — DONE 2026-09-24.
+
+## D13 — an edit typed into a COPY never reaches the original until the original is edited once ("syncing directionally")
+
+- **Goal** — after `akasha setup`, editing any file that shows a shared line changes every other file that
+  shows it, whichever file is edited first.
+- **Found via** — the user's `sandbox/init` ("if I modify the new version, will the old version change? …
+  syncing directionally… sometimes just breaks?"), then a deterministic repro in a scratch HOME: original `A.md`
+  minted by `setup`, copies `B.md`/`C.md`, glued-anchor edits typed into B, B, C: none reached A within 6 s; an
+  edit in A itself then made everything arrive. The end-to-end run of the earlier turn missed it because its
+  first edit was always made in the original.
+- **Root cause** — `Reconciler.projection` (`ProjectionIndex`, node → owning files) is built once, at
+  construction. The daemon builds its watcher's `Reconciler` at start-up, before any vault exists; `setup`
+  reconciles the vault through `POST /v1/sync/rescan`, which builds a throwaway `Reconciler` whose index is
+  discarded. The watcher's index therefore never learned that `A.md` owns the node, so `on_change(B)` had no
+  other owner to propagate to. The index only learned a file when that file had its own watcher cycle.
+- **Files** — `src/akasha/sync/reconcile.py` (`ProjectionIndex.refresh`, base-hash tracking, refresh at the
+  start of every `_cycle`), `src/akasha/sync/base_store.py` (`put` returns the base hash),
+  `tests/unit/sync/test_reconcile.py`, `tests/integration/test_setup_then_transclusion.py` (first edit is now
+  typed into a copy).
+- **Steps taken** — `refresh` re-syncs the index from `sync_files`: it re-parses only files whose stored
+  `base_hash` differs from the one the index last read (and drops vanished files), so a quiet cycle costs one
+  small query. Own cycles record the hash they wrote, so they never trigger a re-parse of their own file.
+  Refactor R7 (one shared `rescan`) would remove the throwaway instance altogether; this fix is independent of it.
+- **Verify** — `uv run pytest tests/unit/sync/test_reconcile.py tests/integration/test_setup_then_transclusion.py -q`
+- **DoD** — a `Reconciler` built before the files were reconciled still propagates a copy's edit to the original;
+  disabling the refresh fails both tests (checked by hand); E20 (5 000-block file) stays inside its budget.
+- **Status** — DONE 2026-09-24.
+
+## D14 — a glued anchor (`…text^tm-id`) is treated as a lost anchor and pauses the whole file
+
+- **Found via** — the same sandbox: four `pause` reviews on `B.md`. Typing at the end of a line eats the space
+  before the anchor; the grammar required it, so the block lost its anchor and, being > 25 % of a 2-block file,
+  paused it (zero writes).
+- **Fix** — spec ruling M20-F: the space is optional on read (`grammar.py` regexes `\s+` → `\s*`), `render` writes
+  the canonical space back. See `docs/spec-questions.md` M20-F; tests in `test_parser.py` and `test_reconcile.py`.
+- **Status** — DONE 2026-09-24.

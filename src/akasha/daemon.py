@@ -466,6 +466,9 @@ def serve(config: Config) -> None:
                 content_hash_fn=_watcher_content_hash,
                 logger=logger,
             )
+            # D11: `POST /v1/sync/roots` asks this watcher to start on a new root
+            # synchronously, before it answers.
+            app.state.watcher = watcher
             watcher.start()
             try:
                 uvicorn.run(app, host=config.bind, port=config.port, log_level="warning")

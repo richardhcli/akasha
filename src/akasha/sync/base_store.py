@@ -38,7 +38,7 @@ from akasha.kernel import store
 from akasha.kernel.canonical import canonicalize_text
 
 
-def put(conn: sqlite3.Connection, sync_root_id: str, path: str, data: str) -> None:
+def put(conn: sqlite3.Connection, sync_root_id: str, path: str, data: str) -> str:
     """Record ``data``'s canonical form as ``path``'s new last-agreed base snapshot.
 
     ``data`` is canonicalized (spec §4.3) before being persisted — the
@@ -47,10 +47,11 @@ def put(conn: sqlite3.Connection, sync_root_id: str, path: str, data: str) -> No
     ``sync_root_id`` is not a durably registered sync root (T4.10). Content
     is stored content-addressed (``kernel/store.py::write_base_snapshot``),
     so re-``put``ting identical canonical bytes reuses the existing
-    ``objects`` row rather than duplicating it.
+    ``objects`` row rather than duplicating it. Returns that content hash
+    (the file's new ``sync_files.base_hash``).
     """
     canonical_text = canonicalize_text(data)
-    store.write_base_snapshot(conn, sync_root_id, path, canonical_text)
+    return store.write_base_snapshot(conn, sync_root_id, path, canonical_text)
 
 
 def get(conn: sqlite3.Connection, sync_root_id: str, path: str) -> str | None:
