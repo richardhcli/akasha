@@ -47,6 +47,13 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/akasha"]
 
+# T18.1: the repo-root migrations/ directory must ship inside the wheel or an
+# installed akasha cannot create its database. It is mapped in (not moved) so
+# golden fixtures, build-exe.ps1's --add-data and every source-checkout test
+# keep resolving the repo-root path.
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "akasha/migrations"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

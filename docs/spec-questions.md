@@ -154,7 +154,7 @@ entry format above.
 ## M18-E — T18.1 must touch `kernel/store.py` (outside a packaging task's natural Files list)
 - **Where:** `src/akasha/kernel/store.py` (`_migrations_dir`); `pyproject.toml` (`[tool.hatch.build.targets.wheel]`).
 - **Narrowest reading taken:** same mechanical Files-list completion as T12.5. Migrations ship inside the package as `akasha/migrations` via a hatch `force-include` (the repo-root directory is **not** moved — golden fixtures, `build-exe.ps1`'s `--add-data` and every test resolve it), and `_migrations_dir()` gains one branch between the unchanged frozen branch and the unchanged repo-root fallback, so no existing caller's behavior changes. Verified 2026-09-23: the unmodified wheel has 0 `.sql` members.
-- **Resolution:** open — self-resolvable by the worker as a mechanical completion (T12.5 precedent) once the gate is re-run green.
+- **Resolution:** resolved 2026-09-23 — landed in T18.1 as a mechanical completion (T12.5 precedent); the gate is green and `tests/integration/test_wheel_install.py` proves the built wheel migrates a fresh DB.
 
 ---
 

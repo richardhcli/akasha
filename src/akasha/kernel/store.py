@@ -59,6 +59,12 @@ def _migrations_dir() -> Path:
     from before -- `migrations/` lives at the repo root, 3 parents up from
     this file (`kernel/` -> `akasha/` -> `src/` -> repo root).
 
+    Installed wheel (T18.1, `uv tool install`/`pipx`/`pip`): `pyproject.toml`
+    force-includes the directory as package data at `akasha/migrations`, so
+    it sits one parent up from this file. That branch is checked before the
+    repo-root fallback and only matches when the packaged copy exists -- a
+    source checkout has no `src/akasha/migrations`, so it is unaffected.
+
     # SPEC-QUESTION (T12.5): a PyInstaller-frozen build has no repo root at
     # all -- everything lives under `sys._MEIPASS` -- so `parents[3]` would
     # resolve to an arbitrary OS temp-dir ancestor instead of `migrations/`,
@@ -72,6 +78,9 @@ def _migrations_dir() -> Path:
     """
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "migrations"  # type: ignore[attr-defined]
+    packaged = Path(__file__).resolve().parents[1] / "migrations"
+    if packaged.is_dir():
+        return packaged
     return Path(__file__).resolve().parents[3] / "migrations"
 
 
