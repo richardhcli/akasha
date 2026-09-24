@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from akasha.kernel.ids import A, IdError, checksum, contract_anchor, mint, validate
+from akasha.kernel.ids import A, IdError, checksum, contract_anchor, is_valid, mint, validate
 
 # Known checksum vectors, computed independently from the spec formula
 # checksum(core) = A[sum((i+1) * A.index(c) for i, c in enumerate(core)) % 32]
@@ -82,3 +82,18 @@ def test_contract_anchor_of_minted_id() -> None:
     anchor = contract_anchor(id_)
     assert anchor.startswith("^tm-")
     assert anchor[len("^tm-") :] == id_
+
+
+def test_is_valid_agrees_with_validate_and_is_cached() -> None:
+    good = mint()
+    wrong_check = good[:-1] + ("a" if good[-1] != "a" else "b")
+    for candidate in (good, "aaaaaaab", "short", "AAAAAAAA", wrong_check):
+        try:
+            validate(candidate)
+            expected = True
+        except IdError:
+            expected = False
+        assert is_valid(candidate) is expected
+    before = is_valid.cache_info().hits
+    is_valid(good)
+    assert is_valid.cache_info().hits == before + 1

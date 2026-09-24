@@ -595,9 +595,7 @@ def _compute_ops(
         if node_id not in new_anchor_ids:
             continue
         vault_block = blocks_v.blocks[node_id]
-        try:
-            ids.validate(node_id)
-        except ids.IdError:
+        if not ids.is_valid(node_id):
             continue  # a checksum-invalid anchor: E_ID_CHECKSUM's repair gives that line a new node
         stage = _maturity_of(maturity, node_id)
         if stage is None:
@@ -778,60 +776,27 @@ def hub_state_for(
 ) -> BlockSet:
     """Project the hub's CURRENT state onto ``structure``'s skeleton (spec §4.8).
 
-    Copies ``structure`` (an already-parsed :class:`BlockSet` -- the
-    "skeleton": which anchors exist, in what order, at what depth/parent),
-    substituting each block's ``text``/``task_state`` for its node's
-    CURRENT hub head (``store.get_node(id).body``/``.task_state``). A
-    tombstoned node's block is dropped entirely (the hub no longer has
-    anything to project for that anchor -- an S0+ hard/soft delete
-    propagates). A block whose node id the kernel has never heard of at all
-    (``store.NodeNotFoundError``) is KEPT with its skeleton text unchanged
-    (task T5.8-2, human-decided 2026-07-13, fable-designed: the
-    lossless-container invariant requires
-    ``render(hub_state_for(parse(B))) == B`` to be a fixed point for a
-    quiet cycle, which is only possible if a not-yet-known/unresolved
-    anchor id's line survives; that id was already reviewed as
-    ``E_ID_CHECKSUM``/``E_UNKNOWN_ANCHOR`` when it first appeared vault-side
-    -- ``_compute_ops`` never re-reviews a common id, so no duplicate
-    review is enqueued here). ``structure``'s ``raw_lines``
-    ride through ``model_copy`` untouched -- only ``blocks`` is ever
-    substituted. No new node->path table is introduced -- membership
-    derives entirely from ``structure``, which the caller builds by parsing
-    either the base or the final vault text (see ``Reconciler.on_change``).
-
-    # design note (T5.4, fable-reviewed, human-decided 2026-07-12) --
-    # DECIDED gap #3: a hub body with an INTERNAL newline (after stripping
-    # the one mandatory canonical trailing newline, see ``_body_line``) is
-    # unprojectable by the line-oriented contract grammar (§4.7 -- every
-    # block is exactly one line). Rather than corrupt the file with an
-    # embedded newline, such a block is left with its ORIGINAL (skeleton)
-    # text and one violation review item is enqueued so a human can
-    # resolve the mismatch (e.g. by splitting the node or editing it back
-    # to a single line).
-
-    ``read_only`` (task T10.2, ``GET /sync/export``): when ``True``,
-    suppresses the ``store.enqueue_review`` call above -- a read-only HTTP
-    GET must mutate nothing, not even a review-queue insert. The block's
-    original skeleton text is still kept for that entry either way (the
-    render output is byte-identical regardless of ``read_only``; only the
-    DB write is skipped). Defaults to ``False``, preserving every existing
-    caller's exact prior behavior (``Reconciler.on_change``'s two call
-    sites, which must keep enqueuing the review during a real reconcile).
+    ``structure`` says which anchors exist, in what order, at what depth; each block's
+    text/task_state is replaced by its node's head. Raw lines, embeds and refs ride through
+    untouched. Blocks whose node is unknown to the hub keep their skeleton text (the lossless
+    container invariant: ``render(hub_state_for(parse(B))) == B`` on a quiet cycle); a
+    tombstoned node's block is dropped. A whole-line block whose hub body contains a newline
+    cannot be projected (one line per block): it keeps its skeleton text and one
+    ``E_UNPROJECTABLE_BODY`` review is queued (``read_only`` suppresses that write, for
+    ``GET /sync/export``). A span may hold newlines.
     """
-    nodes_by_id = store.get_nodes_bulk(conn, list(structure.blocks.keys()))
+    rows = store.get_projection_bulk(conn, list(structure.blocks))
     new_blocks: dict[str, Block] = {}
     for node_id, block in structure.blocks.items():
-        node = nodes_by_id.get(node_id)
-        if node is None:
+        row = rows.get(node_id)
+        if row is None:
             new_blocks[node_id] = block
             continue
-        if node.status == "tombstone":
+        status, body, task_state = row
+        if status == "tombstone":
             continue
-        line = _body_line(node.body)
-        if block.kind == "span":
-            new_blocks[node_id] = block.model_copy(update={"text": line})  # newlines are fine
-            continue
-        if "\n" in line:
+        text = _body_line(body)
+        if "\n" in text and block.kind != "span":
             if not read_only:
                 store.enqueue_review(
                     conn,
@@ -850,11 +815,13 @@ def hub_state_for(
                     ).decode(),
                 )
             new_blocks[node_id] = block
-            continue
-        update: dict[str, Any] = {"text": line}
-        if block.kind == "task":
-            update["task_state"] = node.task_state
-        new_blocks[node_id] = block.model_copy(update=update)
+        elif block.text == text and (block.kind != "task" or block.task_state == task_state):
+            new_blocks[node_id] = block  # unchanged: no copy
+        else:
+            update: dict[str, Any] = {"text": text}
+            if block.kind == "task":
+                update["task_state"] = task_state
+            new_blocks[node_id] = block.model_copy(update=update)
     return structure.model_copy(update={"blocks": new_blocks})
 
 
@@ -1425,18 +1392,15 @@ class Reconciler:
         blocks_v = blocks_b if vault_text == base_text else parse(vault_text)
         if not (blocks_b.has_constructs() or blocks_v.has_constructs()):
             return set()  # prose only (M20-C): never written, never tracked
-        hub_blockset = hub_state_for(self.conn, blocks_b, path=path)
-        hub_text = render(hub_blockset)
 
         if vault_text == base_text:
+            # the file is as last agreed: only a hub-side change can need writing
+            hub_blockset = hub_state_for(self.conn, blocks_b, path=path)
+            hub_text = render(hub_blockset)
             if hub_text != base_text:
-                # hub-only change: project the hub onto the base skeleton.
                 self._record_agreement(path, sync_root_id, hub_text, hub_blockset)
-            return set()  # else quiet
+            return set()
 
-        # blocks_b/blocks_v (above) each parse their text once -- parse() is
-        # pure/deterministic, so re-parsing is redundant work. It matters at scale:
-        # E20's 5,000-block perf case profiled ~1.6s of a ~2.5s cycle inside parse().
         anchor_elsewhere = self._make_anchor_elsewhere(root["root_path"], path)
         outcome = diff_blocks(
             blocks_b,
@@ -1463,7 +1427,8 @@ class Reconciler:
         changed_at = None if conservative else self._file_changed_at(path)
         committed, vault_lines = self._apply_ops(path, ops, repaired_text, changed_at)
 
-        final_blocks = parse(canonicalize_text("\n".join(vault_lines)))
+        final_text = canonicalize_text("\n".join(vault_lines))
+        final_blocks = blocks_v if final_text == vault_text else parse(final_text)
         hub2_blockset = hub_state_for(self.conn, final_blocks, path=path)
         self._record_agreement(path, sync_root_id, render(hub2_blockset), hub2_blockset)
         return committed

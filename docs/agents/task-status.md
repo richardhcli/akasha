@@ -302,3 +302,5 @@ Milestone DoD: `docs/build-plan.md` M20. Rulings: `docs/spec-questions.md` M20-A
 | T21.5 | `cli/main.py` → package | TODO | |
 | T21.6 | `kernel/store.py` → package | TODO | |
 | T21.7 | Break import cycles | TODO | After T21.6. |
+| T21.8 | Efficiency | DONE | 2026-09-24. Measured with `cProfile` on a 5,000-block file: one-line edit cycle 273 → 102 ms, quiet cycle 87 → 45 ms (500 blocks: 24 → 9.5 ms and 17 → 4 ms); `akasha` import 162 → 47 ms (httpx, store and API models are now lazy; `--help` 0.25 → 0.18 s). Changes: no base projection on an edit cycle, final parse reused when nothing was minted, `hub_state_for` copies only changed blocks and reads through `store.get_projection_bulk` (one JOIN, body decoded in SQLite), cached `ids.is_valid`, `"^tm-"`/`"[["` prefilters in the parser, cached EOL-anchor extraction. Minting costs 0.25 ms/block on disk, so batching transactions was not worth it. Tests: equivalence of the light read, `is_valid` vs `validate`, import weight. |
+| T21.9 | Verbosity | TODO | |

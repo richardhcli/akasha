@@ -12,6 +12,7 @@ Minting here is pure (no DB access) — collision-retry against
 from __future__ import annotations
 
 import secrets
+from functools import lru_cache
 
 # RFC 4648 base32 alphabet, lowercase, index 0-31 (spec §4.1, verbatim).
 A = "abcdefghijklmnopqrstuvwxyz234567"
@@ -49,20 +50,31 @@ def mint() -> str:
     return core + checksum(core)
 
 
+@lru_cache(maxsize=1 << 16)
+def is_valid(id_: str) -> bool:
+    """True iff ``id_`` is 8 alphabet chars with a matching checksum (cached: the same ids are
+    checked by the parser, the linter and the reconciler on every cycle)."""
+    return (
+        len(id_) == ID_LEN
+        and all(c in A for c in id_)
+        and id_[CORE_LEN] == checksum(id_[:CORE_LEN])
+    )
+
+
 def validate(id_: str) -> None:
     """Validate an id: length 8, alphabet membership, checksum match.
 
     Raises ``IdError`` (code ``E_ID_CHECKSUM``) on any violation — never
     guesses or silently repairs (spec §4.1).
     """
+    if is_valid(id_):
+        return
     if len(id_) != ID_LEN:
         raise IdError(f"id {id_!r} must be {ID_LEN} chars, got {len(id_)}")
     if any(c not in A for c in id_):
         raise IdError(f"id {id_!r} contains chars outside alphabet {A!r}")
-    core, check = id_[:CORE_LEN], id_[CORE_LEN]
-    expected = checksum(core)
-    if check != expected:
-        raise IdError(f"id {id_!r} checksum mismatch: expected {expected!r}, got {check!r}")
+    expected = checksum(id_[:CORE_LEN])
+    raise IdError(f"id {id_!r} checksum mismatch: expected {expected!r}, got {id_[CORE_LEN]!r}")
 
 
 def contract_anchor(id_: str) -> str:

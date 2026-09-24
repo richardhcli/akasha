@@ -798,3 +798,5 @@ Measured hotspots: `store.py` 2 597 lines, `reconcile.py` 1 781, `cli/main.py` 1
 | T21.5 | `cli/main.py` → package (`app`, `client`, `output.emit` replacing 16 `if state.json_mode:` forks, `verbs/*`, `onboarding`) | — |
 | T21.6 | `kernel/store.py` → `kernel/store/` package behind the same façade (rule 4 unchanged); split `commit_node` | — |
 | T21.7 | Break the import cycles behind the 17 local imports (injected hooks) | T21.6 |
+| T21.8 | **Efficiency** (measured, no behaviour change): skip the wasted projection and re-parse in an edit cycle, cache id checksums, project files with one light read, prefilter prose lines in the parser, lazy heavy CLI imports | — |
+| T21.9 | **Verbosity**: condense internal docstrings/comments that narrate task history (AST-verified: the code, docstrings aside, must be identical); dedupe repeated review-queue and repair boilerplate | — |

@@ -90,13 +90,11 @@ import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
-import httpx
 import typer
 
 from akasha import daemon as daemon_module
-from akasha.api import auth
 from akasha.config import (
     DEFAULT_BIND,
     DEFAULT_PORT,
@@ -109,8 +107,9 @@ from akasha.config import (
     write_token,
 )
 from akasha.contract import grammar
-from akasha.kernel import ids, store
-from akasha.sync.watcher import detect_cloud_path
+
+if TYPE_CHECKING:
+    import httpx
 
 # Windows consoles default `sys.stdout`/`sys.stderr` to the legacy locale
 # codepage (e.g. cp1252), not UTF-8 -- confirmed live on a real Windows 11
@@ -374,6 +373,8 @@ def _request(
     json_body: dict[str, Any] | None = None,
     missing_ok: bool = False,
 ) -> Any:
+    import httpx  # lazy: ~70 ms, and most verbs never need it before their first request
+
     headers = {"Authorization": f"Bearer {state.token}"} if state.token else {}
 
     def send() -> httpx.Response:
@@ -439,6 +440,8 @@ def _parse_facets(state: CliState, raw: list[str]) -> list[dict[str, Any]]:
     client-side (``kernel.ids.mint()`` — pure, no DB, see module
     docstring) and ``version`` starts at 1, matching a brand-new facet.
     """
+    from akasha.kernel import ids
+
     facets: list[dict[str, Any]] = []
     for item in raw:
         if "=" not in item:
@@ -580,6 +583,8 @@ def _open_migrated_db(cfg: Config) -> sqlite3.Connection:
     Shared by ``init`` and ``setup`` (build-plan T18.5): one bootstrap path, no
     second way to reach a fresh DB.
     """
+    from akasha.kernel import store
+
     db_path = cfg.db_path if cfg.db_path is not None else default_db_path()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = store.connect(db_path, check_same_thread=False)
@@ -603,6 +608,9 @@ def _save_token(cfg: Config, bearer: str) -> tuple[Path, bool]:
 
 def _mint_human_token(conn: sqlite3.Connection, name: str) -> str:
     """Mint one human-class token and return its bearer string (shown once by callers)."""
+    from akasha.api import auth
+    from akasha.kernel import store
+
     raw_secret = auth.mint_secret()
     token = store.create_token(conn, name, "human", auth.hash_secret(raw_secret))
     return auth.format_bearer_token(token["id"], raw_secret)
@@ -646,6 +654,8 @@ def init(
     """
     cfg = load_config(config)
     conn = _open_migrated_db(cfg)
+
+    from akasha.kernel import store
 
     if store.list_tokens(conn):
         typer.echo(
@@ -719,6 +729,8 @@ def setup(
     minted: str | None = None
     token_path = default_token_path()
     token_saved = False
+    from akasha.kernel import store
+
     if store.list_tokens(conn):
         bearer = state.token
         if not bearer:
@@ -750,6 +762,8 @@ def setup(
         assert root_name is not None
         api = CliState(base_url=url, token=bearer, json_mode=state.json_mode, dry_run=False)
         summary = _register_vault(api, root, root_name)
+        from akasha.sync.watcher import detect_cloud_path
+
         provider = detect_cloud_path(str(root))
         if provider is not None:
             warning = (
@@ -1319,6 +1333,8 @@ def plugin_install(
     if with_token:
         # The plugin's setting is `apiToken` (plugin-obsidian/src/settings.ts).
         settings["apiToken"] = state.token
+        from akasha.sync.watcher import detect_cloud_path
+
         provider = detect_cloud_path(str(vault_dir))
         if provider is not None or (vault_dir / ".git").exists():
             where = f"under {provider}" if provider else "a git repository"

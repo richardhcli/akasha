@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from difflib import SequenceMatcher
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import BaseModel
@@ -165,6 +166,7 @@ def _iter_non_fence_lines(text: str) -> list[tuple[int, str]]:
     return out
 
 
+@lru_cache(maxsize=1 << 15)
 def _eol_anchor_id(line: str) -> str | None:
     """Return the id8 of a real EOL anchor on ``line``, or None."""
     m = grammar.ANCHOR_EOL_RE.search(line)
@@ -194,9 +196,7 @@ def _detect_id_checksum(
         id_ = _eol_anchor_id(line)
         if id_ is None:
             continue
-        try:
-            ids.validate(id_)
-        except ids.IdError:
+        if not ids.is_valid(id_):
             key = (id_, line_no)
             if key in seen:
                 continue
@@ -243,9 +243,7 @@ def _detect_dup_id(
             continue
         # Skip structurally-shaped but checksum-invalid ids — those are
         # already reported as E_ID_CHECKSUM; dup semantics assume a real id.
-        try:
-            ids.validate(id_)
-        except ids.IdError:
+        if not ids.is_valid(id_):
             continue
         by_id.setdefault(id_, []).append((line_no, line))
 
@@ -380,9 +378,7 @@ def _detect_lost_and_deleted(
         if eol_id is None:
             candidates.append((line_no, line, line.rstrip("\r"), False))
             continue
-        try:
-            ids.validate(eol_id)
-        except ids.IdError:
+        if not ids.is_valid(eol_id):
             body = grammar.ANCHOR_EOL_RE.sub("", line.rstrip("\r"))
             candidates.append((line_no, line, body, True))
 

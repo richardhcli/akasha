@@ -240,11 +240,8 @@ def _finish_span(
     tail: re.Match[str],
 ) -> _FoundSpan | None:
     id_ = tail.group("id")
-    if id_ != "new":
-        try:
-            ids.validate(id_)
-        except ids.IdError:
-            return None  # a checksum-invalid id names nothing: the braces are just prose
+    if id_ != "new" and not ids.is_valid(id_):
+        return None  # a checksum-invalid id names nothing: the braces are just prose
     open_len = len(grammar.SPAN_OPEN)
     if start_line == end_line:
         inner = lines[start_line - 1][start_col + open_len : close_col]
@@ -356,7 +353,7 @@ def parse(text: str) -> BlockSet:
         line = lines[i]
         line_no = i + 1
 
-        if grammar.FENCE_RE.match(line):
+        if "```" in line and grammar.FENCE_RE.match(line):
             in_fence = not in_fence
             raw_lines[line_no] = line
             continue
@@ -364,9 +361,11 @@ def parse(text: str) -> BlockSet:
             raw_lines[line_no] = line
             continue
 
-        task_m = grammar.TASK_LINE_RE.match(line)
-        par_m = None if task_m else grammar.MANAGED_PAR_RE.match(line)
-        new_m = None if (task_m or par_m) else grammar.NEW_LINE_RE.match(line)
+        # every block/request form ends in "^tm-...": prose lines skip all three patterns
+        has_marker = "^tm-" in line
+        task_m = grammar.TASK_LINE_RE.match(line) if has_marker else None
+        par_m = grammar.MANAGED_PAR_RE.match(line) if has_marker and not task_m else None
+        new_m = grammar.NEW_LINE_RE.match(line) if has_marker and not (task_m or par_m) else None
 
         matched_structural = True
         if task_m:
@@ -428,8 +427,8 @@ def parse(text: str) -> BlockSet:
             # becomes that Embed/Ref only -- not a raw line -- so render()'s
             # existing block-free standalone-embed/ref reconstruction (and
             # Direction-2 round-trip equality) is preserved verbatim.
-            embed_full = grammar.EMBED_RE.fullmatch(line)
-            ref_full = grammar.REF_RE.fullmatch(line)
+            embed_full = grammar.EMBED_RE.fullmatch(line) if "[[" in line else None
+            ref_full = grammar.REF_RE.fullmatch(line) if "[[" in line else None
             if embed_full:
                 embeds.append(
                     Embed(path=embed_full.group("path"), id=embed_full.group("id"), line_no=line_no)
@@ -447,10 +446,11 @@ def parse(text: str) -> BlockSet:
             raw_lines[line_no] = line
             prose_lines.add(line_no)
 
-        for em in grammar.EMBED_RE.finditer(line):
-            embeds.append(Embed(path=em.group("path"), id=em.group("id"), line_no=line_no))
-        for rf in grammar.REF_RE.finditer(line):
-            refs.append(Ref(path=rf.group("path"), id=rf.group("id"), line_no=line_no))
+        if "[[" in line:
+            for em in grammar.EMBED_RE.finditer(line):
+                embeds.append(Embed(path=em.group("path"), id=em.group("id"), line_no=line_no))
+            for rf in grammar.REF_RE.finditer(line):
+                refs.append(Ref(path=rf.group("path"), id=rf.group("id"), line_no=line_no))
 
     duplicate_spans: list[DuplicateSpan] = []
     if prose_lines:
