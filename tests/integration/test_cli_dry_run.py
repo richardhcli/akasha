@@ -207,6 +207,20 @@ DRY_RUN_CASES: list[DryRunCase] = [
         body_check=_assert_body_is_none,
     ),
     DryRunCase(
+        id="split",
+        argv=["split", "dummynode1", "--part", "claim=first half", "--part", "claim=second half"],
+        method="POST",
+        path="/v1/nodes/dummynode1/split",
+        body_check=_assert_body_has("parts"),
+    ),
+    DryRunCase(
+        id="merge",
+        argv=["merge", "dummynode1", "dummynode2", "dummynode3"],
+        method="POST",
+        path="/v1/nodes/dummynode1/merge",
+        body_check=_assert_body_has("ids"),
+    ),
+    DryRunCase(
         id="vet",
         argv=["vet", "dummynode1"],
         method="POST",

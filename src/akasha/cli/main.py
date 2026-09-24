@@ -84,7 +84,7 @@ import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 import httpx
 import typer
@@ -609,6 +609,105 @@ def vet(ctx: typer.Context, node_id: str) -> None:
     else:
         maturity = result.get("maturity", "?")
         typer.echo(f"{node_id}: vetted by you (maturity: {maturity})")
+
+
+# --- split / merge -----------------------------------------------------------
+
+
+def _count_reassignment_reviews(state: CliState, old_id: str) -> int:
+    """Open ``reassignment`` review items that a split of ``old_id`` queued (read-only)."""
+    body: dict[str, Any] = _request(state, "GET", "/v1/review", params={"status": "open"})
+    reviews: list[dict[str, Any]] = body.get("reviews", [])
+    count = 0
+    for item in reviews:
+        if item.get("cause_kind") != "reassignment":
+            continue
+        try:
+            ref: Any = json_lib.loads(item.get("cause_ref") or "{}")
+        except ValueError:
+            continue
+        if isinstance(ref, dict) and cast("dict[str, Any]", ref).get("old_id") == old_id:
+            count += 1
+    return count
+
+
+def _echo_refactor_proposed(result: dict[str, Any], verb: str) -> None:
+    review: dict[str, Any] = result.get("review") or {}
+    typer.echo(
+        f"{verb} proposed for human review (review {review.get('id', '?')}); "
+        "nothing changed yet. Approve it with `akasha review resolve`."
+    )
+
+
+@app.command()
+def split(
+    ctx: typer.Context,
+    node_id: str,
+    part: list[str] = typer.Option(
+        [], "--part", help="TYPE=BODY, repeatable (one new node per part, in order)"
+    ),
+) -> None:
+    """POST /v1/nodes/{id}/split -- replace one node by several (build-plan T14.4).
+
+    Every ``--part`` becomes a brand-new node; the original id is tombstoned
+    with a redirect to them, and every live inbound edge is moved to the FIRST
+    successor so nothing dangles. One ``reassignment`` review item is opened per
+    inbound edge so you can decide which successor each edge really belongs to
+    (``akasha review list``; resolve with ``akasha review resolve <id> still_holds``).
+    """
+    state = _state(ctx)
+    parts: list[dict[str, Any]] = []
+    for item in part:
+        node_type, sep, body = item.partition("=")
+        if not sep or not node_type or not body:
+            _usage_error(state, f"--part must be TYPE=BODY, got {item!r}")
+        parts.append({"node_type": node_type, "body": body})
+    if not parts:
+        _usage_error(state, "split needs at least one --part TYPE=BODY")
+    result = _mutate(state, "POST", f"/v1/nodes/{node_id}/split", {"parts": parts})
+    if state.json_mode:
+        _echo_ok(state, result)
+        return
+    if result.get("proposed"):
+        _echo_refactor_proposed(result, "split")
+        return
+    successors: list[str] = result.get("redirect", {}).get(node_id, [])
+    queued = _count_reassignment_reviews(state, node_id)
+    typer.echo(f"split {node_id} into {', '.join(successors)}")
+    typer.echo(f"redirect: {node_id} -> {', '.join(successors)} (no id is left dangling)")
+    typer.echo(
+        f"{queued} reassignment review item(s) opened for inbound edges "
+        f"(they were moved to {successors[0] if successors else '?'}); "
+        "see `akasha review list`"
+    )
+
+
+@app.command()
+def merge(
+    ctx: typer.Context,
+    node_id: str,
+    other_ids: list[str] = typer.Argument(..., help="node ids to merge INTO node_id"),
+) -> None:
+    """POST /v1/nodes/{id}/merge -- fold other nodes into ``node_id`` (build-plan T14.4).
+
+    ``node_id`` (the path id) survives; each other id is tombstoned with a
+    redirect to it and every live inbound edge is moved to the survivor, so
+    nothing dangles. Unlike ``split`` a merge has one unambiguous survivor, so
+    it opens no reassignment review items.
+    """
+    state = _state(ctx)
+    result = _mutate(state, "POST", f"/v1/nodes/{node_id}/merge", {"ids": list(other_ids)})
+    if state.json_mode:
+        _echo_ok(state, result)
+        return
+    if result.get("proposed"):
+        _echo_refactor_proposed(result, "merge")
+        return
+    redirect: dict[str, list[str]] = result.get("redirect", {})
+    typer.echo(f"merged {', '.join(redirect)} into {node_id} (the survivor)")
+    for old_id in redirect:
+        typer.echo(f"redirect: {old_id} -> {node_id} (no id is left dangling)")
+    typer.echo("no reassignment review items: a merge has a single survivor")
 
 
 # --- edge ------------------------------------------------------------------
