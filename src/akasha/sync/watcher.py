@@ -101,15 +101,17 @@ filesystem.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import TYPE_CHECKING, Any, Protocol
 
 from akasha.kernel import store
+from akasha.sync.ignore import is_ignored, parse_patterns
 
 if TYPE_CHECKING:
     import sqlite3
@@ -266,6 +268,61 @@ def retry_with_backoff[T](
     raise AssertionError("unreachable: retry_with_backoff always returns or raises")
 
 
+# --- `.tmignore` deny-list (build-plan T18.10b, ruling M18-B) -----------------
+
+# Neutral `tm` name (rule 6). The matcher itself is pure (`sync/ignore.py`);
+# the file I/O lives here, the lower layer `sync.reconcile` already imports.
+TMIGNORE_NAME = ".tmignore"
+
+
+def load_tmignore(root_path: str, logger: logging.Logger | None = None) -> list[str]:
+    """Read ``<root_path>/.tmignore`` into usable pattern lines.
+
+    A missing or unreadable file means "defaults only" (an empty list), never an
+    error: a vault without one must behave exactly as the built-in deny-list says.
+    An unsupported line is skipped and logged as a warning, never guessed at.
+    """
+    try:
+        text = (Path(root_path) / TMIGNORE_NAME).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    patterns, warnings = parse_patterns(text)
+    for warning in warnings:
+        (logger or logging.getLogger("akasha")).warning("%s: %s", root_path, warning)
+    return patterns
+
+
+def path_is_ignored(path: str, root_path: str, patterns: list[str]) -> bool:
+    """True when ``path`` lies under ``root_path`` and the deny-list excludes it.
+
+    A path outside the root is not this matcher's business (False), so callers
+    keep their existing "no such sync root" handling.
+    """
+    try:
+        rel = PurePath(path).relative_to(PurePath(root_path))
+    except ValueError:
+        return False
+    return is_ignored(rel.as_posix(), patterns)
+
+
+def iter_tracked_markdown(root_path: str, patterns: list[str]) -> list[str]:
+    """Every non-ignored ``.md`` file under ``root_path``, ignored directories pruned unread."""
+    found: list[str] = []
+    root = str(root_path)
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = PurePath(dirpath).relative_to(PurePath(root)).as_posix()
+        prefix = "" if rel_dir == "." else rel_dir + "/"
+        dirnames[:] = sorted(
+            d for d in dirnames if not is_ignored(prefix + d, patterns, is_dir=True)
+        )
+        for name in sorted(filenames):
+            if not _is_managed_candidate(name):
+                continue
+            if not is_ignored(prefix + name, patterns):
+                found.append(os.path.join(dirpath, name))
+    return found
+
+
 @dataclass
 class WatchedRoot:
     """One durable sync root (T4.10 ``sync_roots`` row) plus watcher-local state.
@@ -282,6 +339,8 @@ class WatchedRoot:
     root_path: str
     conservative: bool = False
     cloud_provider: str | None = None
+    # `.tmignore` lines (T18.10b); reloaded live when that file changes.
+    ignore_patterns: list[str] = field(default_factory=lambda: list[str]())
 
 
 class _Scheduler(Protocol):
@@ -493,19 +552,21 @@ class _WatchdogEventHandler:
         if getattr(event, "event_type", None) in _NON_CONTENT_EVENT_TYPES:
             return
         src_path = str(PurePath(str(event.src_path)))
-        if (
-            not _RECONCILE_TEMP_FILE_RE.match(PurePath(src_path).name)
-            and _is_managed_candidate(src_path)
-        ):
-            self._watcher.notify_event(src_path)
         raw_dest = str(getattr(event, "dest_path", "") or "")
         dest_path = str(PurePath(raw_dest)) if raw_dest else ""
-        if (
-            dest_path
-            and not _RECONCILE_TEMP_FILE_RE.match(PurePath(dest_path).name)
-            and _is_managed_candidate(dest_path)
-        ):
-            self._watcher.notify_event(dest_path)
+        for candidate in (src_path, dest_path):
+            if not candidate:
+                continue
+            name = PurePath(candidate).name
+            if name == TMIGNORE_NAME:
+                # T18.10b: reload the deny-list and rescan; never itself reconciled.
+                self._watcher.on_tmignore_event(candidate)
+            elif (
+                not _RECONCILE_TEMP_FILE_RE.match(name)
+                and _is_managed_candidate(candidate)
+                and self._watcher.is_tracked_path(candidate)
+            ):
+                self._watcher.notify_event(candidate)
 
 
 def _default_observer_factory() -> _Scheduler:
@@ -632,6 +693,7 @@ class Watcher:
             root_path=root_path,
             conservative=conservative,
             cloud_provider=provider,
+            ignore_patterns=load_tmignore(root_path, self.logger),
         )
 
     def load_roots(self) -> list[WatchedRoot]:
@@ -727,6 +789,40 @@ class Watcher:
                 self.logger.exception("watcher poll cycle failed")
             if self._poll_stop_event.wait(self.poll_interval_seconds):
                 return
+
+    def _root_of(self, path: str) -> WatchedRoot | None:
+        """The loaded root whose ``root_path`` is the longest prefix of ``path``."""
+        best: WatchedRoot | None = None
+        # Snapshot: this runs on watchdog's dispatch thread while the poll thread's
+        # `_watch_new_roots` may insert a freshly registered root into the dict.
+        for root in list(self._roots.values()):
+            try:
+                PurePath(path).relative_to(PurePath(root.root_path))
+            except ValueError:
+                continue
+            if best is None or len(root.root_path) > len(best.root_path):
+                best = root
+        return best
+
+    def is_tracked_path(self, path: str) -> bool:
+        """False for a path the root's `.tmignore` deny-list excludes (T18.10b)."""
+        root = self._root_of(path)
+        return root is None or not path_is_ignored(path, root.root_path, root.ignore_patterns)
+
+    def on_tmignore_event(self, path: str) -> None:
+        """A root's `.tmignore` changed: reload its patterns, then rescan that root.
+
+        The rescan is expressed through the existing seam: every non-ignored
+        Markdown file under the root is fed to the debouncer, so a file the edit
+        just un-ignored is adopted and one it ignored is left alone. Reconcile
+        is idempotent, so a redundant cycle is a zero-diff no-op.
+        """
+        for root in list(self._roots.values()):
+            if PurePath(path) != PurePath(root.root_path) / TMIGNORE_NAME:
+                continue
+            root.ignore_patterns = load_tmignore(root.root_path, self.logger)
+            for candidate in iter_tracked_markdown(root.root_path, root.ignore_patterns):
+                self.notify_event(str(PurePath(candidate)))
 
     def notify_event(self, path: str, *, at: float | None = None) -> None:
         """Feed one raw filesystem-change ``path`` into the debounce pipeline.

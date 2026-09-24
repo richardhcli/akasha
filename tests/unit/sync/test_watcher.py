@@ -400,3 +400,85 @@ def test_watchdog_event_handler_ignores_non_content_events():
 def test_watched_root_dataclass_defaults():
     r = WatchedRoot(id="x", name="n", root_path="/p")
     assert r.conservative is False and r.cloud_provider is None
+
+
+# --- `.tmignore` deny-list (build-plan T18.10b, ruling M18-B) ---------------
+
+
+class _IgnEvt:
+    def __init__(self, src, dest=""):
+        self.src_path = src
+        self.dest_path = dest
+        self.is_directory = False
+
+
+def _ignore_watcher(tmp_path):
+    conn = _conn()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    store.register_sync_root(conn, "v", str(vault))
+    seen: list[str] = []
+    w = Watcher(conn, lambda _p: None)
+    w.notify_event = lambda path, *, at=None: seen.append(path)  # type: ignore[method-assign]
+    w.load_roots()
+    return w, vault, seen, watcher_mod._WatchdogEventHandler(w)
+
+
+def test_ignored_paths_never_reach_the_debouncer(tmp_path):
+    w, vault, seen, handler = _ignore_watcher(tmp_path)
+    (vault / ".tmignore").write_text("drafts/\nprivate-*.md\n", encoding="utf-8")
+    w.on_tmignore_event(str(vault / ".tmignore"))
+    seen.clear()
+
+    handler.on_any_event(_IgnEvt(str(vault / "drafts" / "x.md")))
+    handler.on_any_event(_IgnEvt(str(vault / "sub" / "private-1.md")))
+    handler.on_any_event(_IgnEvt(str(vault / "keep.md")))
+    handler.on_any_event(_IgnEvt(str(vault / "keep.md"), dest=str(vault / "drafts" / "y.md")))
+
+    assert seen == [str(vault / "keep.md"), str(vault / "keep.md")]
+
+
+def test_tmignore_edit_reloads_patterns_and_rescans_the_root(tmp_path):
+    w, vault, seen, handler = _ignore_watcher(tmp_path)
+    (vault / "a.md").write_text("a\n", encoding="utf-8")
+    (vault / "drafts").mkdir()
+    (vault / "drafts" / "b.md").write_text("b\n", encoding="utf-8")
+    (vault / ".obsidian").mkdir()
+    (vault / ".obsidian" / "c.md").write_text("c\n", encoding="utf-8")
+
+    (vault / ".tmignore").write_text("drafts/\n", encoding="utf-8")
+    handler.on_any_event(_IgnEvt(str(vault / ".tmignore")))
+    assert seen == [str(vault / "a.md")]  # rescan: drafts/ and .obsidian/ stay inert
+
+    seen.clear()
+    (vault / ".tmignore").write_text("# nothing ignored beyond the defaults\n", encoding="utf-8")
+    handler.on_any_event(_IgnEvt(str(vault / ".tmignore")))
+    assert seen == [str(vault / "a.md"), str(vault / "drafts" / "b.md")]
+    # a `.tmignore` event is never itself forwarded as a file to reconcile
+    assert str(vault / ".tmignore") not in seen
+
+
+def test_deleted_tmignore_falls_back_to_defaults(tmp_path):
+    w, vault, seen, handler = _ignore_watcher(tmp_path)
+    (vault / ".tmignore").write_text("*.md\n", encoding="utf-8")
+    w.on_tmignore_event(str(vault / ".tmignore"))
+    assert w.roots[next(iter(w.roots))].ignore_patterns == ["*.md"]
+    (vault / ".tmignore").unlink()
+    w.on_tmignore_event(str(vault / ".tmignore"))
+    assert w.roots[next(iter(w.roots))].ignore_patterns == []
+
+
+def test_discover_untracked_files_skips_ignored_paths(tmp_path):
+    from akasha.sync.reconcile import discover_untracked_files
+
+    conn = _conn()
+    vault = tmp_path / "vault"
+    (vault / "drafts").mkdir(parents=True)
+    (vault / ".obsidian").mkdir()
+    (vault / "node_modules" / "p").mkdir(parents=True)
+    for rel in ("a.md", "drafts/b.md", ".obsidian/c.md", "node_modules/p/d.md", "e.txt"):
+        (vault / rel).write_text("x\n", encoding="utf-8")
+    (vault / ".tmignore").write_text("drafts/\n", encoding="utf-8")
+    store.register_sync_root(conn, "v", str(vault))
+
+    assert discover_untracked_files(conn) == [str(vault / "a.md")]

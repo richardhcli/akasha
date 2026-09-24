@@ -233,7 +233,7 @@ Deletion: S0 → hard delete; S1+ → require `redirect_to` successors or explic
 
 ### 4.7 Contract grammar v1 (Obsidian sublanguage)
 
-File-level: front-matter key `tm: 1` marks a managed file (added by the daemon on first projection; files without it are never parsed for management, but `^tm-` anchors found in unmanaged files raise advisory lint `W_UNMANAGED_ANCHOR`).
+File-level: front-matter key `tm: 1` marks a managed file (added by the daemon on first projection). *Adoption by default (M18-B, T18.10c):* the daemon does not wait for the key — every Markdown file under a sync root that a `.tmignore` deny-list (T18.10a) does not exclude is reconciled as if it carried it, by parsing an in-memory copy with `tm: 1` injected (as a key inside an existing front-matter block, or as a new block only when there is none — never a second block). A file with no contract construct (no anchored block, `^tm-new`, embed or ref) is never written; the real front matter is written by the first cycle that has something to project. The *parser* is unchanged: text without the key still parses as unmanaged, and `^tm-` anchors seen by an unmanaged parse still raise advisory lint `W_UNMANAGED_ANCHOR`. A file with a `tm:` key of another value, or an unterminated `---` opener, is not adopted.
 
 Block grammar (line-oriented; EBNF):
 

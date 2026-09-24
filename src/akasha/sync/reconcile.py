@@ -54,6 +54,7 @@ from __future__ import annotations
 import bisect
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -74,7 +75,13 @@ from akasha.kernel.canonical import canonical_json, canonicalize_text, object_ha
 from akasha.kernel.ids import contract_anchor
 from akasha.kernel.model import Maturity
 from akasha.sync import base_store
-from akasha.sync.watcher import detect_cloud_path, retry_with_backoff
+from akasha.sync.watcher import (
+    detect_cloud_path,
+    iter_tracked_markdown,
+    load_tmignore,
+    path_is_ignored,
+    retry_with_backoff,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1236,6 +1243,12 @@ class Reconciler:
             logger.warning("on_change: %r matches no registered sync root; ignoring", path)
             return set()
         sync_root_id = root["id"]
+        # build-plan T18.10b (ruling M18-B): a path the root's `.tmignore`
+        # deny-list excludes is inert -- never read, parsed or written, whoever
+        # asked (watcher, startup reconcile, rescan, hub-side reprojection, a
+        # mirror fan-out). Its `sync_files` row and base snapshot stay in place.
+        if path_is_ignored(path, root["root_path"], load_tmignore(root["root_path"], logger)):
+            return set()
         conservative = detect_cloud_path(root["root_path"]) is not None
         assert self.projection is not None
 
@@ -1260,6 +1273,15 @@ class Reconciler:
             # reconcile.py/watcher.py split.
             raw = retry_with_backoff(lambda: Path(path).read_text(encoding="utf-8"))
             vault_text = canonicalize_text(raw)
+            # build-plan T18.10c (ruling M18-B): a non-ignored file without
+            # `tm: 1` is reconciled as its in-memory ADOPTED copy; a prose-only
+            # file (nothing to project) returns here untouched -- no write, no
+            # base snapshot. The write-back below then lays down the real
+            # front matter (spec §4.7: "added on first projection").
+            adopted = adopt_unmanaged(vault_text)
+            if adopted is None:
+                return set()
+            vault_text = adopted
             base_text = base_store.get(self.conn, sync_root_id, path)
 
             blocks_b_skeleton = parse(base_text or "")
@@ -1487,6 +1509,48 @@ class Reconciler:
             metrics.record_sync_cycle_ms((time.monotonic() - cycle_start) * 1000.0)
 
 
+# --- default adoption of unmanaged Markdown (build-plan T18.10c, ruling M18-B) ---
+
+_ANY_TM_KEY_RE = re.compile(r"^tm\s*:")
+
+
+def adopt_unmanaged(vault_text: str) -> str | None:
+    """The in-memory ADOPTED copy of an unmanaged file, or ``None`` if nothing to adopt.
+
+    Ruling M18-B: every non-ignored Markdown file under a sync root is tracked by
+    default, so a file with no ``tm: 1`` front matter is parsed as if it had it.
+    Nothing is written to the file here or by the caller unless the adopted copy
+    holds at least one contract construct (an anchored block, a ``^tm-new``, an
+    embed or a ref); a prose-only file (foreign ``^abc123`` block ids included)
+    yields ``None`` and stays byte-identical on disk. The real front matter is
+    written by the first cycle that has something to project (spec §4.7).
+
+    An existing front-matter block that lacks a ``tm:`` key gets ``tm: 1``
+    INJECTED as a key inside it (Obsidian keeps ``title:``/``tags:`` there; a
+    second block would corrupt them). A file that already has any ``tm:`` key
+    (say a future ``tm: 2``) or an unterminated ``---`` opener is never adopted:
+    the parser's narrowest reading of those stands. Returns ``vault_text``
+    unchanged for an already-managed file.
+    """
+    if parse(vault_text).managed:
+        return vault_text
+    lines = vault_text.split("\n")
+    if lines and lines[0].strip() == "---":
+        close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if close is None:
+            return None  # unterminated opener: not a well-formed front-matter block
+        if any(_ANY_TM_KEY_RE.match(line) for line in lines[1:close]):
+            return None  # a `tm:` key with another value: never overridden
+        adopted_lines = [*lines[:close], f"tm: {grammar.CONTRACT_VERSION}", *lines[close:]]
+    else:
+        adopted_lines = ["---", f"tm: {grammar.CONTRACT_VERSION}", "---", *lines]
+    adopted = "\n".join(adopted_lines)
+    blocks = parse(adopted)
+    if not (blocks.blocks or blocks.new_requests or blocks.embeds or blocks.refs):
+        return None
+    return adopted
+
+
 # --- filesystem discovery for newly registered sync roots (task T11.3) -------
 
 
@@ -1504,10 +1568,9 @@ def discover_untracked_files(conn: sqlite3.Connection) -> list[str]:
     prose is to also walk each registered root's directory for files it
     has never seen.
 
-    Walks ``Path(root["root_path"]).rglob("*.md")`` for every
-    ``store.list_sync_roots`` row -- the same idiom
-    ``Reconciler._make_anchor_elsewhere`` already uses internally for its
-    own cross-file anchor scan -- and returns every absolute path not
+    Walks every ``store.list_sync_roots`` row's directory for ``*.md`` files
+    (skipping what the root's ``.tmignore`` deny-list excludes, T18.10b --
+    ``watcher.iter_tracked_markdown``) and returns every absolute path not
     already present in ``{f["path"] for f in store.list_sync_files(conn)}``.
     A root directory that doesn't (yet) exist on disk is skipped rather
     than raising (registering a root ahead of creating its directory is
@@ -1520,8 +1583,9 @@ def discover_untracked_files(conn: sqlite3.Connection) -> list[str]:
         root_dir = Path(root["root_path"])
         if not root_dir.exists():
             continue
-        for candidate in root_dir.rglob("*.md"):
-            candidate_str = str(candidate)
+        for candidate_str in iter_tracked_markdown(
+            str(root_dir), load_tmignore(str(root_dir), logger)
+        ):
             if candidate_str in known:
                 continue
             known.add(candidate_str)

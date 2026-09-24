@@ -1088,6 +1088,39 @@ def test_e24_reparent_in_a_mirror_adds_a_second_composes_parent(tmp_path):
     assert store.find_open_reviews(conn) == []
 
 
+def test_e25_plain_markdown_is_adopted_by_default_only_when_it_has_something_to_project(
+    tmp_path,
+):
+    """M18-B: no `tm: 1` needed. A prose-only file is never touched; a file with a
+    `^tm-new` is minted, gains the front matter, and keeps its own front matter."""
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    reconciler = Reconciler(conn, OriginTracker())
+
+    prose = tmp_path / "prose.md"
+    prose_text = "# Notes\n\nJust words with a foreign anchor. ^abc123\n"
+    prose.write_text(prose_text, encoding="utf-8")
+    mtime = prose.stat().st_mtime_ns
+    reconciler.on_change(str(prose))
+    assert prose.read_bytes().decode() == prose_text and prose.stat().st_mtime_ns == mtime
+    assert store.list_sync_files(conn) == []
+
+    plain = tmp_path / "plain.md"
+    plain.write_text("- [ ] first ^tm-new\n", encoding="utf-8")
+    reconciler.on_change(str(plain))
+    text = plain.read_bytes().decode()
+    assert text.startswith("---\ntm: 1\n---\n- [ ] first ^tm-")
+    assert "^tm-new" not in text
+    assert len(store.list_sync_files(conn)) == 1
+
+    props = tmp_path / "props.md"
+    props.write_text("---\ntitle: Kept\ntags: [a]\n---\nA claim. ^tm-new\n", encoding="utf-8")
+    reconciler.on_change(str(props))
+    out = props.read_bytes().decode()
+    assert out.count("---\n") == 2  # exactly one front-matter block
+    assert out.startswith("---\ntitle: Kept\ntags: [a]\ntm: 1\n---\nA claim. ^tm-")
+
+
 # =================================================================================
 # Silent-guess counter: the DoD crux. Reruns every "review/pause/ignore, not
 # apply" case's own check function and asserts the total violation count is 0.

@@ -1714,3 +1714,90 @@ def test_project_node_change_rewrites_every_mirror(tmp_path):
     assert sorted(Path(p).name for p in paths) == ["a.md", "b.md"]
     assert "Changed on the hub" in _read(a)
     assert "Changed on the hub" in _read(b)
+
+
+# --- `.tmignore` deny-list at the reconcile choke point (T18.10b, ruling M18-B) ---
+
+
+def test_on_change_is_inert_for_a_tmignored_path(tmp_path):
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    (tmp_path / ".tmignore").write_text("drafts/\n", encoding="utf-8")
+    (tmp_path / "drafts").mkdir()
+    ignored = tmp_path / "drafts" / "x.md"
+    text = _managed("- [ ] mint me ^tm-new\n")
+    ignored.write_text(text, encoding="utf-8")
+    mtime = ignored.stat().st_mtime_ns
+
+    Reconciler(conn, OriginTracker()).on_change(str(ignored))
+
+    assert ignored.read_text(encoding="utf-8") == text  # never rewritten
+    assert ignored.stat().st_mtime_ns == mtime
+    assert store.list_sync_files(conn) == []  # never tracked
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 0  # nothing minted
+
+    # the same content outside the ignored directory does mint
+    normal = tmp_path / "n.md"
+    normal.write_text(text, encoding="utf-8")
+    Reconciler(conn, OriginTracker()).on_change(str(normal))
+    assert "^tm-new" not in normal.read_text(encoding="utf-8")
+
+
+# --- default adoption of plain Markdown (T18.10c, ruling M18-B) ------------------
+
+
+def test_adopt_unmanaged_prepends_front_matter_when_there_is_none():
+    assert reconcile.adopt_unmanaged("- [ ] x ^tm-new\n") == "---\ntm: 1\n---\n- [ ] x ^tm-new\n"
+
+
+def test_adopt_unmanaged_injects_into_existing_front_matter_never_a_second_block():
+    src = "---\ntitle: T\ntags: [a, b]\n---\nBody. ^tm-new\n"
+    adopted = reconcile.adopt_unmanaged(src)
+    assert adopted == "---\ntitle: T\ntags: [a, b]\ntm: 1\n---\nBody. ^tm-new\n"
+    assert adopted.count("\n---\n") == 1
+
+
+def test_adopt_unmanaged_leaves_prose_and_foreign_anchors_alone():
+    assert reconcile.adopt_unmanaged("Just prose.\n\nAnother. ^abc123\n") is None
+    assert reconcile.adopt_unmanaged("") is None
+
+
+def test_adopt_unmanaged_counts_embeds_and_refs_as_constructs():
+    assert reconcile.adopt_unmanaged("![[other.md#^tm-4cgfdxpi]]\n") is not None
+    assert reconcile.adopt_unmanaged("see [[other.md#^tm-4cgfdxpi]] here\n") is not None
+
+
+def test_adopt_unmanaged_never_overrides_a_tm_key_or_adopts_a_broken_opener():
+    assert reconcile.adopt_unmanaged("---\ntm: 2\n---\nx ^tm-new\n") is None
+    assert reconcile.adopt_unmanaged("---\ntitle: never closed\nx ^tm-new\n") is None
+
+
+def test_adopt_unmanaged_passes_a_managed_file_through_unchanged():
+    text = "---\ntm: 1\n---\nx ^tm-new\n"
+    assert reconcile.adopt_unmanaged(text) == text
+
+
+def test_prose_only_file_is_byte_identical_and_untracked_after_reconcile(tmp_path):
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    prose = tmp_path / "p.md"
+    prose.write_bytes(b"# Title\r\nprose with a foreign id ^abc123\r\n")  # CRLF too
+    before = prose.read_bytes()
+    Reconciler(conn, OriginTracker()).on_change(str(prose))
+    assert prose.read_bytes() == before
+    assert store.list_sync_files(conn) == []
+
+
+def test_ignored_file_with_a_mint_request_mints_nothing_but_a_normal_one_does(tmp_path):
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    (tmp_path / ".tmignore").write_text("skip.md\n", encoding="utf-8")
+    skip = tmp_path / "skip.md"
+    keep = tmp_path / "keep.md"
+    for f in (skip, keep):
+        f.write_text("- [ ] x ^tm-new\n", encoding="utf-8")
+    r = Reconciler(conn, OriginTracker())
+    r.on_change(str(skip))
+    r.on_change(str(keep))
+    assert skip.read_text(encoding="utf-8") == "- [ ] x ^tm-new\n"
+    assert keep.read_text(encoding="utf-8").startswith("---\ntm: 1\n---\n- [ ] x ^tm-")

@@ -88,3 +88,48 @@ def test_live_edit_is_reconciled_with_no_manual_rescan(tmp_path: Path) -> None:
 
 def _all_claim_ids(conn) -> list[str]:
     return [row[0] for row in conn.execute("SELECT id FROM nodes WHERE status='live'")]
+
+
+def test_live_watcher_ignores_tmignored_paths_and_applies_edits_live(tmp_path: Path) -> None:
+    """T18.10b: a REAL watcher -- an ignored file's edit produces no cycle, a normal
+    file's still does, and editing `.tmignore` un-ignores and picks the file up."""
+    conn = store.connect(str(tmp_path / "store.db"), check_same_thread=False)
+    store.run_migrations(conn)
+    vault = tmp_path / "vault"
+    (vault / "drafts").mkdir(parents=True)
+    (vault / ".tmignore").write_text("drafts/\n", encoding="utf-8")
+    store.register_sync_root(conn, "v", str(vault))
+
+    cycles: list[str] = []
+    origin = OriginTracker()
+    reconciler = Reconciler(conn, origin)
+
+    def on_cycle(path: str) -> None:
+        cycles.append(path)
+        reconciler.on_change(path)
+
+    watcher = Watcher(
+        conn,
+        on_cycle,
+        debounce_seconds=0.1,
+        poll_interval_seconds=0.05,
+        origin_tracker=origin,
+        content_hash_fn=_watcher_content_hash,
+    )
+    watcher.start()
+    try:
+        secret = vault / "drafts" / "secret.md"
+        secret.write_text("---\ntm: 1\n---\n\nsecret line ^tm-new\n", encoding="utf-8")
+        normal = vault / "normal.md"
+        normal.write_text("---\ntm: 1\n---\n\nnormal line ^tm-new\n", encoding="utf-8")
+
+        assert _wait_until(lambda: str(normal) in cycles), "normal file never reconciled"
+        time.sleep(0.5)  # ample time for a wrongly-forwarded ignored event to fire
+        assert str(secret) not in cycles
+        assert "^tm-new" in secret.read_text(encoding="utf-8"), "ignored file was touched"
+
+        (vault / ".tmignore").write_text("# drafts/ no longer ignored\n", encoding="utf-8")
+        assert _wait_until(lambda: str(secret) in cycles), "un-ignore did not rescan the root"
+        assert _wait_until(lambda: "^tm-new" not in secret.read_text(encoding="utf-8"))
+    finally:
+        watcher.stop()
