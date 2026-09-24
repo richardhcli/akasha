@@ -20,6 +20,17 @@ make demo-transclusion-check  # same, non-interactive: proves mirroring end to e
 
 `make` itself may not be installed in every sandbox; each target is a thin wrapper around the `uv run ...` command shown in [`../../Makefile`](../../Makefile) — run that directly if `make` is unavailable.
 
+## Running from a checkout
+
+```bash
+uv run akasha daemon      # foreground; Ctrl-C stops it (what `make run` does)
+uv run akasha setup <dir> # or the two-command flow from docs/user/quickstart.md
+uv build --wheel          # a wheel ships the migrations (tests/integration/test_wheel_install.py)
+uv tool install .         # what an end user runs; needs no checkout afterwards
+```
+
+To keep a scratch daemon away from your real one, give it its own `config.toml` (`port`, `db_path`) and pass `--config` to `daemon`/`up`/`down`/`setup`, or point `HOME` (`APPDATA` on Windows) at a temp directory — the config, database, lock, `daemon.log` and `tm-token` all live in one directory.
+
 ## Obsidian plugin toolchain
 
 ```bash

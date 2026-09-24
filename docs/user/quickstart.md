@@ -1,55 +1,70 @@
 # Quickstart
 
-Run from a source checkout via [`uv`](https://docs.astral.sh/uv/), or on Windows use one of the options below — including a real (unsigned) Windows installer.
-
-**Windows, one command:** `powershell -ExecutionPolicy Bypass -File scripts\windows\setup.ps1` from a checkout does steps 1-3 below for you (uv sync, mint the first token, start the daemon, open the web UI) — see the script's own `-?`/comment header for what it does and does not touch. `scripts\windows\build-exe.ps1` (task T12.5) goes one step further and packages a standalone `akasha.exe` (every CLI verb below plus `akasha.exe tray`, a system-tray-hosted daemon) via PyInstaller, for testing/distributing without a Python/`uv` install on the target machine — vision.md §7.9's "packaged single executable... tray presence". `scripts\windows\akasha.iss` compiles (via Inno Setup) into a zero-elevation installer that places `akasha.exe`, registers Start Menu shortcuts, and offers an autostart option backed by a crash-recovering supervisor loop (see [`ops/autostart.md`](ops/autostart.md)) — it is not code-signed, so Windows SmartScreen may warn on first run. Building either of these yourself from source is covered in [`../dev/windows-packaging.md`](../dev/windows-packaging.md), not here.
+From nothing to a live, syncing vault in two commands: install, then `akasha setup <folder-of-notes>`.
 
 ## 1. Install
 
+You need [`uv`](https://docs.astral.sh/uv/) and Python 3.12+ (uv fetches Python if you have none).
+
 ```bash
 git clone <this-repo> akasha && cd akasha
-uv sync
+uv tool install .        # puts `akasha` on your PATH (run `uv tool update-shell` once if it isn't)
 ```
 
-## 2. Mint your first token
+**Windows without Python/`uv`:** an unsigned Inno Setup installer packages a standalone `akasha.exe` (every verb below, plus `akasha.exe tray`, a system-tray-hosted daemon) with an optional autostart backed by a crash-recovering supervisor loop — see [`ops/autostart.md`](ops/autostart.md). Windows SmartScreen may warn on first run because it is not code-signed. Building it yourself is covered in [`../dev/windows-packaging.md`](../dev/windows-packaging.md). If `akasha` is not on your `PATH` after installing, run `akasha.exe` from its install folder.
 
-`POST /v1/tokens` is human-only and itself requires an existing bearer token, so a brand-new database has no way to authenticate the call that would mint its first token. `akasha init` closes that gap: it talks to the store directly (the same "not a pure HTTP client" exception `daemon` already has, see `cli.md`) rather than a new HTTP endpoint, and mints exactly one `human`-class token.
-
-If you have Git Bash/WSL, `scripts/dogfood/init.sh <name>` does this step plus starting the daemon and registering a sync root, all in one command — see `docs/dogfood/README.md`.
+## 2. Set up
 
 ```bash
-uv run akasha init --name me
+akasha setup ~/notes        # any folder of Markdown files
 ```
 
-Save the printed `<token_id>.<secret>` string — it is shown once and not recoverable. Running `akasha init` again once a token already exists is a clean, documented no-op-with-error (exit code 4) — it will not overwrite or add a second token; use `token create` (below, once the daemon is running) for additional tokens.
+That one command:
+
+1. creates the database and your first **human token** (on a fresh install),
+2. starts the daemon in the background and waits until it is healthy,
+3. registers the folder as a sync root and reconciles it once.
+
+It then prints, once, your token, the `export AKASHA_TOKEN=...` line and a web-UI link (`http://127.0.0.1:7433/?token=...`). **The link and the token are secrets** — a token cannot be recovered afterwards. `setup` is safe to re-run.
 
 ```bash
-export AKASHA_TOKEN='<paste the bearer value here>'
+akasha status               # one screen: is it running, is my token good, what is tracked, what is wrong
 ```
 
-## 3. Start the daemon
+`status` names the classic first-run failures with a one-line fix each (no credential, no vault registered, a vault with nothing to sync yet).
+
+## 3. Use it
+
+**Every Markdown file in the folder is tracked** — there is no front matter to hand-add. A note becomes part of the system when it holds something to sync: write a task or a claim and ask for an id with `^tm-new`:
+
+```markdown
+- [ ] write the quickstart ^tm-new
+```
+
+Within a moment the daemon rewrites that line with a real id (`^tm-…`) and adds a `tm: 1` front-matter key to the note (inside your existing front matter if you have one; your other keys are untouched). Prose-only notes are never modified.
+
+**Same id in two notes = one thing.** Copy an anchored line into another file and edit either copy: the other changes to match within about a second (transclusion). `akasha render notes/B.md` prints a file with its `![[note#^tm-id]]` embeds replaced by the target's current text, without touching any file.
+
+**Leave things out** with a `.tmignore` file at the folder's root (gitignore-style: `# comments`, `*`, `?`, `**`, a trailing `/` for a folder, `!` to re-include). `.obsidian/`, `.git/`, `.trash/`, `node_modules/` and non-Markdown files are always skipped.
 
 ```bash
-uv run akasha daemon
+akasha new claim "caffeine impairs sleep"     # nodes can also be made directly
+akasha search caffeine
 ```
 
-Serves `http://127.0.0.1:7433` (config/db at `~/.config/tm-daemon/` on Linux/macOS, `%APPDATA%\tm-daemon\` on Windows — see [`../mvp-spec.md`](../mvp-spec.md) §3). Leave this running; open a second terminal for the next steps. To keep it running across reboots, see [`ops/autostart.md`](ops/autostart.md).
-
-## 4. Create and read a node
+## 4. Obsidian (optional)
 
 ```bash
-uv run akasha --token "$AKASHA_TOKEN" new claim "caffeine impairs sleep"
-uv run akasha --token "$AKASHA_TOKEN" search caffeine
-uv run akasha --token "$AKASHA_TOKEN" get <id-from-above>
+akasha plugin install ~/notes --from <path-to-a-built-plugin-obsidian>
 ```
 
-## 5. Register a vault to sync
+`--from` is a `plugin-obsidian/` directory built with `npm ci && npm run build` (run from a source checkout with `uv run`, the checkout's own is used when you omit it). Obsidian's own consent step cannot be automated, so **you** still do three things once: turn off Restricted mode (Settings > Community plugins), enable "TM Hub", and paste your token in its settings (or pass `--with-token` to have it written for you — a secret in a file inside the vault, so it is opt-in). Details: [`obsidian.md`](obsidian.md).
 
-```bash
-uv run akasha --token "$AKASHA_TOKEN" sync add <path-to-your-notes>
-```
+## What to know
 
-`--name` defaults to the path's basename; see [`cli.md`](cli.md) for the full `sync add` reference.
+- **Your token is saved.** `setup` (and `init`) write your human token to `~/.config/tm-daemon/tm-token` (`%APPDATA%\tm-daemon\tm-token` on Windows), readable only by you, so `akasha` needs no flag afterwards. That means **anything that runs `akasha` as you — a script, an AI agent in your terminal — acts as you.** Delete the file to stop. Details in [`cli.md`](cli.md).
+- **The daemon starts when needed.** A verb that finds no daemon starts one (and says so on stderr); `akasha up` / `akasha down` do it explicitly. There is no login-time autostart on Linux/macOS yet; on Windows the installer offers one ([`ops/autostart.md`](ops/autostart.md)).
+- **Where things live:** config, database, `daemon.log` and the token file are in `~/.config/tm-daemon/` (Linux/macOS) or `%APPDATA%\tm-daemon\` (Windows).
 
 ## Next steps
 
@@ -57,12 +72,6 @@ uv run akasha --token "$AKASHA_TOKEN" sync add <path-to-your-notes>
 - Browser UI at `http://127.0.0.1:7433/`: [`web-ui.md`](web-ui.md)
 - Sync an Obsidian vault: [`obsidian.md`](obsidian.md)
 
-**Status of the original onboarding-friction list** (full audit:
-[`../onboarding-ux-report.md`](../onboarding-ux-report.md)): minting the first token used to
-require a raw Python one-liner — fixed by `akasha init` (T12.1). Registering a sync root used to
-require a hand-built `curl`/`Invoke-RestMethod` call — fixed by `akasha sync add` (T12.2, step 5
-above). The web UI used to need a devtools console command to authenticate — fixed by the in-page
-auth bar plus a `?token=` bootstrap link (T12.3, see [`web-ui.md`](web-ui.md)). A packaged,
-autostart-capable installer now exists too (T12.5, see [`ops/autostart.md`](ops/autostart.md)) — it
-isn't code-signed, and the onboarding docs still describe the from-source path as the default
-rather than the installer-first framing T12.6 calls for.
+## Developer appendix: from a source checkout
+
+Running the daemon in the foreground under `uv run`, a scratch database, the test gates and the transclusion playground (`make demo-transclusion`) are covered in [`../dev/setup.md`](../dev/setup.md), not here. The manual sequence the commands above replace is `akasha init` → `akasha daemon` → `akasha sync add <folder>` → pass `--token` on every call; those verbs still exist and are documented in [`cli.md`](cli.md).

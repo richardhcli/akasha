@@ -5,6 +5,8 @@ Windows: daemon + CLI via `uv run`, Obsidian plugin via a vault junction.
 Nothing is installed system-wide; teardown is deleting a folder (and
 optionally removing the plugin junction).
 
+**Looking for the normal way in?** For a real install use [`quickstart.md`](quickstart.md) (`akasha setup <folder>`); this page is the *temporary*, no-install stack, kept for dogfooding a checkout.
+
 **Current readiness:** M0–M10 are done or code-complete against a live
 daemon (see [`../agents/task-status.md`](../agents/task-status.md)) — daemon,
 HTTP API, CLI, file sync, the TMS review loop, the web UI, and the Obsidian
@@ -173,13 +175,12 @@ Confirm:
 Invoke-RestMethod http://127.0.0.1:7433/v1/sync/status -Headers $headers
 ```
 
-Create at least one **managed** note under `$Vault` (Obsidian or any
-editor). Front-matter `tm: 1` opts the file into the contract:
+Create at least one note under `$Vault` (Obsidian or any editor). Every
+Markdown file there is tracked by default — no front matter needed (a `tm: 1`
+key is added for you the first time there is something to sync; a `.tmignore`
+file at the vault root opts paths out):
 
 ```markdown
----
-tm: 1
----
 First captured claim for dogfood
 ```
 
@@ -305,7 +306,7 @@ slate.
 | `another akasha daemon instance is already running` | Lock held | Find the other process, or delete stale `$Dogfood\tm-daemon.lock` only if you are sure nothing is listening on `:7433` |
 | `401` / auth errors from CLI or plugin | Missing/wrong `--token` / settings | Re-check bearer; mint a new human token (§3) if lost (old secret cannot be recovered) |
 | Status bar stuck `offline` | Daemon down, wrong URL, firewall | `Invoke-RestMethod http://127.0.0.1:7433/health`; confirm plugin URL |
-| Edits never mint / never sync | Vault not registered, or note lacks `tm: 1` | Re-run §5; confirm front-matter |
+| Edits never mint / never sync | Vault not registered, or the note/folder is excluded by a `.tmignore` | Re-run §5; check `.tmignore` |
 | Cloud-path warning / sluggish sync | Vault under OneDrive/Dropbox | Move demo vault to a local non-cloud path |
 | Plugin missing after rebuild | Junction broken or Safe mode on | Re-create junction (§7); reload Obsidian |
 
