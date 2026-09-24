@@ -14,7 +14,7 @@ Daemon-served, no build step (static HTML shells + vanilla JS calling `/v1` — 
 | `/node?id=<id>` | body, facets, 1-hop neighborhood, history, stale badge |
 | `/review` | open review queue; resolve with `still_holds`/`retracted`, or (for a `violation`-caused item) `dismissed`; or revise via an inline textarea + change-class selector and **submit revised**; daily-cap banner |
 | `/search` | full-text search over node bodies — `/search?q=<term>` also works as a bookmarkable/shareable deep link: it hydrates the input and runs the query on load, not just on manual submit |
-| `/sync` | per-sync-root status, violations, pause-and-diff inspector |
+| `/sync` | per-sync-root status, violations, conflicts (a file is never paused) |
 | `/dashboard` | facet coverage, review inflow vs. resolution + variance, violation rate, crossing rate — sourced live from `GET /v1/metrics` |
 
 Any node id shown in a search result or a review-queue item (including a sync-root violation/pause/conflict entry) is a real link to that node's `/node?id=<id>` view — no manual URL editing required. Note the nav links from `/` to the other five views but not back the other way to `/` — you won't need it once you're authenticated, since every other view reads the same saved token.

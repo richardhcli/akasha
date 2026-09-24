@@ -1,5 +1,7 @@
 # Plan: transclusion spans, marker-less files, join rule, and code refinement
 
+> **Superseded 2026-09-24** by `docs/build-plan.md` M20/M21 and `docs/spec-questions.md` M20-A…G, which carry the final rulings (padding is per file and never part of the body; no pause at all, per the M20-G table). Kept as the evidence and reasoning behind them.
+
 Status: **plan with the user's rulings of 2026-09-24 applied.** Only item F1 (glued anchor) is implemented;
 everything else below is scheduled work. Per `CLAUDE.md` rule 2 this becomes build-plan tasks (M20, M21) once
 task T20.1 lands the spec amendments; M20-F (glued anchor) is already logged in `docs/spec-questions.md`; M20-A…E are logged by T20.1.

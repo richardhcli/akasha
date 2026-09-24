@@ -18,7 +18,7 @@ hosted `windows-latest`/`ubuntu-latest` CI runners have been genuinely green
 since run `30183257449` (2026-07-26). **Do not re-open, re-litigate, or
 re-verify any pre-mvp task**; build forward from that state.
 
-**Purpose of this plan (M13–M19).** The MVP is code-complete and
+**Purpose of this plan (M13–M21).** The MVP is code-complete and
 acceptance-green, but a spec-vs-shipped-code audit performed 2026-08-05 (the
 method `docs/agents/overnight-goals.md` §"When the list is empty" prescribes,
 the same one that found T10.2c, T9.2c, T9.3b and T9.6) found that the two
@@ -182,6 +182,11 @@ green result is never read as "the vault is now usable."
   M19 (live transclusion): T19.1 (spec) → T19.2 → T19.3 → T19.4 → T19.5 / T19.6 → T19.7
                        T19.2–T19.4 share sync/reconcile.py → strictly sequential
                      T18.11 ── BLOCKED (real host)
+  M20 (spans, marker-less files, no pause, join rule):
+                     T20.1 (docs) → T20.2 (stage _cycle) → T20.3 (no tm: 1) → T20.4 (no pause)
+                       → T20.5 (spans) → T20.6 (multi-line) → T20.7 (join rule) → T20.8 (e2e, docs)
+                     all of T20.2–T20.7 edit sync/reconcile.py → strictly sequential
+  M21 (refactor, behaviour-preserving): T21.1 … T21.7, after T20.7 where they share files
 ```
 
 M13 and M14 both depend on nothing (their real prerequisite, M0–M12, is
@@ -701,3 +706,95 @@ These are constraints on the tasks above, not tasks themselves (spec §8):
 **Explicit MVP non-goals — do not build even if easy:** LLM calls,
 embeddings, MCP server, mobile, multi-user, task scheduling/recurrence,
 prose management.
+
+---
+
+## M20 — Spans, marker-less files, no pause, and the revised join rule (Depends on: M19)
+
+**Origin.** User rulings of 2026-09-24 on the `sandbox/init` run, logged as `docs/spec-questions.md` **M20-A … M20-G** (M20-F, the glued anchor, and debug-plan D11–D14 are already done). Design and evidence: `docs/proposals/2026-09-24-refactor-spans-marker.md`.
+
+Milestone DoD: a note is transcluded either as a whole line (`text ^tm-id`) or as a span (`{text}{tm-id}`, possibly multi-line) and an edit in any copy reaches every copy within one sync cycle; **no note ever gains front matter** and the daemon never reads or writes front matter; **no file is ever paused** (each violation is repaired or the line gets a new node; only a deleted S1+ node is reviewed); a join with a stale paste is silent and a join with a newer change wins; a real-CLI end-to-end test proves all of it after one `akasha setup`; `make check` + `make battery` green.
+
+> **Eligibility note for the overnight/fleet scanner:** T20.1 is doc-only and first. **T20.2–T20.7 all edit `src/akasha/sync/reconcile.py` and are one strictly sequential chain.** T20.3 and T20.4 **deliberately edit protected tests** — each names them under "Authorized changes"; nothing else in `tests/golden` or `tests/battery` may change, and T20.2 must pass **every** existing test unmodified (if one needs a change, the refactor is wrong).
+
+### T20.1 — Rulings, spec, PRD and plan (doc-only)
+- **Goal** — Land every M20 ruling in the normative documents before any code changes, so the code tasks implement a settled spec.
+- **Depends on** — nothing.
+- **Files** — `docs/mvp-spec.md` (§4.7, §4.8, §6.2 E13, §4.11 row), `docs/vision.md` (R11 superseded note), `docs/spec-questions.md` (M19-A/C/D resolved; M20-A…G), `docs/build-plan.md`, `docs/agents/task-status.md`, `docs/proposals/2026-09-24-refactor-spans-marker.md`.
+- **Verify** — `grep -c "M20-" docs/spec-questions.md` ≥ 7; `grep -n "pause_and_diff" docs/mvp-spec.md` empty; `git diff --stat` touches only the files above.
+- **DoD** — the spec states: no file marker, spans, balanced-brace scan, per-file padding, the violation-resolution table, the join order, and the relay (M19-D).
+
+### T20.2 — Stage the reconcile cycle (pure refactor)
+- **Goal** — Split `Reconciler._cycle` (283 lines, 41 branches) into named stages so T20.3–T20.7 each touch one stage.
+- **Depends on** — T20.1.
+- **Files** — `src/akasha/sync/reconcile.py` only.
+- **Steps** — stages `read → (adopt) → parse+lint → repair → diff → apply → write-back → snapshot`, each a private method returning an outcome (`Quiet | HubOnly | Applied`) so early exits are returns, not nesting; keep the metrics `try/finally` in one wrapper and the ignore/`refresh` guards at the top.
+- **Verify** — `uv run pytest tests/unit tests/property tests/integration tests/battery tests/golden` with **zero test modifications** (`git diff --stat tests` empty).
+- **DoD** — no behaviour change; `_cycle` under ~60 lines; `make check` + `make battery` green.
+
+### T20.3 — Remove the `tm: 1` marker and every front-matter edit
+- **Goal** — The daemon never reads, writes or interprets front matter (M20-C).
+- **Depends on** — T20.2.
+- **Files** — `src/akasha/contract/{parser,render,linter,grammar}.py`, `src/akasha/sync/reconcile.py` (delete `adopt_unmanaged`), `src/akasha/kernel/store.py`, `migrations/003_drop_sync_files_contract_version.sql`, `src/akasha/api/routes/sync.py`, `docs/user/*` wording, the tests below.
+- **Steps** — (1) `BlockSet` loses `managed`, `contract_version`, `front_matter`; `parse` skips an initial `---…---` block as raw lines and never looks for `tm:`. (2) `render` emits raw lines plus blocks, no header. (3) Delete `adopt_unmanaged`; a file with no construct is untouched and untracked as before. (4) Remove `W_UNMANAGED_ANCHOR` and the `not managed` early return. (5) Drop `sync_files.contract_version` (migration 003, store, route). (6) Real-CLI test: a note gains **no** front matter through `setup`, a mint, an edit and a mirror.
+- **Authorized changes to protected tests (the only ones) — as landed:** **no golden fixture was edited**: a `tm: 1` line inside a fixture is now an ordinary YAML key that passes through verbatim, so every existing golden round-trips unchanged. Changed: golden case `contract_w_unmanaged_anchor` (directory deleted) and its entries in `tests/golden/test_serialization.py`; the `.managed` assertion there; the unit tests of retired behaviour (`W_UNMANAGED_ANCHOR` in `test_linter.py`, the `adopt_unmanaged` tests in `test_reconcile.py`, the "unmanaged" tests in `test_parser.py`, the header tests in `test_render.py`, `FRONT_MATTER_TM_RE` in `test_grammar.py`); tests that constructed `BlockSet(managed=…, contract_version=…, front_matter=…)` or the `sync_files.contract_version` column (`test_pause_and_diff.py`, `test_schema.py`, `test_gc.py`, `test_api.py`, the property generators); battery E25 (redefined: no header ever, front matter kept byte for byte) and `test_cli_setup.py` (no header after setup).
+- **Verify** — `make check`, `make battery`; `grep -rn "tm: " src` finds no writer.
+- **DoD** — no code path writes `tm:`; a tracked file's bytes outside its constructs never change.
+
+### T20.4 — Never pause a file: repair, else give the line a new id (M20-G)
+- **Goal** — Remove pause & diff; every violation is resolved per the M20-G table.
+- **Depends on** — T20.3.
+- **Files** — `src/akasha/contract/linter.py`, `src/akasha/sync/reconcile.py`, `src/akasha/api/routes/sync.py` (`pauses` always `[]`), `src/akasha/cli/main.py` (status), `src/akasha/kernel/store.py` (dismiss helper), tests below.
+- **Steps** — delete `pause_threshold`/`pause_and_diff` and the `_cycle` branch; implement the table (checksum / unknown anchor / no-identical duplicate / fuzzy lost anchor ⇒ the line gets a new node via the existing `^tm-new` mint path, the old node untouched except by the ordinary delete rules); dismiss a path's open pause reviews on its next cycle; conservative roots unchanged.
+- **Authorized changes to protected tests (by name) — as landed:** battery **E13** (redefined as a real formatter storm: an exact lost anchor, a reworded line, a bad checksum, a duplicate and a deleted S1 node in one file; asserts nothing is lost, the S1 node stays and is the only review, no pause, and the file keeps syncing) and **E15** (a malformed checksum gets a new node; nothing else changes), both kept in the silent-guess aggregate; golden fixture `e13-pause-storm` replaced by the additive `e13-formatter-storm`; `tests/golden/test_serialization.py` (checksum and pause cases; the `contract_pause_and_diff` fixture is kept and now asserts a > 25 % storm is resolved with repairs only); `tests/unit/contract/test_pause_and_diff.py` deleted; the review-path tests in `test_linter.py` (checksum, ambiguous duplicate, fuzzy lost anchor); `test_reconcile.py` (`test_e_id_checksum_*`, `test_unknown_anchor_*`, `test_pause_makes_zero_writes`); `test_cli_status.py::test_violations_are_grouped_by_code`. **Not** in the list because unaffected: E04/E05/E07 and every mirror case.
+- **Design decision recorded (M20-G):** an unknown, checksum-valid anchor is **adopted under its own id** (`store.create_node(node_id=…)`), not re-minted — re-minting would split every mirror after a hub reset and make two hubs re-id each other's files forever.
+- **Verify** — `make check`, `make battery`; a real-watcher test of a formatter storm: the file keeps syncing and no text is lost.
+- **DoD** — no code path can pause a file; existing pause reviews are dismissed.
+
+### T20.5 — Span grammar (single line)
+- **Goal** — `{text}{tm-id}` shares only the text between the braces (M20-A, M20-E).
+- **Depends on** — T20.4.
+- **Files** — `src/akasha/contract/{grammar,parser,render}.py`, `src/akasha/sync/reconcile.py`, tests (new goldens are additive).
+- **Steps** — constants; balanced-brace scan (cap 200 lines / 64 KiB); `Block(kind="span")` with `prefix`, `suffix`, per-file `lead`/`trail` padding; `hub_state_for` substitutes trimmed text into the span keeping each file's padding; `{text}{tm-new}` minting; a damaged terminator ⇒ prose.
+- **Verify** — property test `parse(render(G)) == G` extended with spans; battery E26–E28.
+- **DoD** — whole-line behaviour byte-identical; padding never touched by the daemon.
+
+### T20.6 — Multi-line spans
+- **Goal** — a span may cross lines (M20-B).
+- **Depends on** — T20.5.
+- **Files** — as T20.5 plus `Block.end_line_no`.
+- **Steps** — parser state machine within the cap; `raw_lines` excludes the range; render emits the range as one unit; diff/base comparison on the joined text; the newline guard applies to whole-line blocks only.
+- **Verify** — battery E29–E31 (edit either copy; blank lines inside; inner braces); property test.
+- **DoD** — a multi-paragraph section edited in any file changes in every file.
+
+### T20.7 — Join rule (M20-D)
+- **Goal** — a stale paste is silent; a newer change wins.
+- **Depends on** — T20.6.
+- **Files** — `src/akasha/sync/reconcile.py`, `src/akasha/kernel/store.py` (`node_versions` read helper), tests.
+- **Steps** — replace the `op.mirror` branch by `classify_join`: equal ⇒ quiet; equals an earlier version ⇒ hub wins, no review; new text and file mtime after the hub head `ts` ⇒ commit as a sync edit and propagate; else (older, future mtime, conservative root) ⇒ today's conflict path.
+- **Authorized changes to protected tests (by name):** `tests/unit/sync/test_reconcile.py::test_mirror_join_with_differing_text_hub_wins_and_is_reviewed` (split into the four cases) and the demo self-test line for a differing copy; E05/E21–E24 unchanged.
+- **Verify** — unit tests per case; real-watcher test "paste then edit within one window".
+- **DoD** — the sandbox case ("modify the new version, will the old change?") passes.
+
+### T20.8 — End to end, docs, plugin
+- **Goal** — prove the milestone through the real CLI and document it.
+- **Depends on** — T20.7.
+- **Files** — `tests/integration/test_setup_then_transclusion.py` (extend), `docs/user/{quickstart,cli}.md`, optional `plugin-obsidian` decoration.
+- **Verify** — the extended test plus the sandbox replay; `make check` + `make battery`.
+- **DoD** — after one `akasha setup`, whole-line and span (single and multi-line) transclusion, glued typing and formatter damage all converge with no front matter, no pause, no review item.
+
+---
+
+## M21 — Behaviour-preserving refactor (Depends on: T20.7 for tasks sharing `reconcile.py`)
+
+Measured hotspots: `store.py` 2 597 lines, `reconcile.py` 1 781, `cli/main.py` 1 618; `commit_node` 203 lines, `setup` 125, `plugin_install` 116; 17 function-local `akasha` imports. Every task is a pure move/extract: **zero test modifications**, `make check` + `make battery` green, goldens untouched.
+
+| Task | Change | Depends on |
+|---|---|---|
+| T21.1 | Extract `MirrorPropagator` (owner lookup, work list, cap, failure isolation) from `Reconciler.on_change` | T20.7 |
+| T21.2 | Split `_compute_ops` by concern; `kernel_apply` if-chain → op-kind dispatch table | T20.7 |
+| T21.3 | Watcher: extract `RootRegistry` (roots, `.tmignore` patterns, lock, `root_of`) taking rows, never a connection | — |
+| T21.4 | One shared `rescan` for the route, `reconcile_all` and startup (removes the throwaway `Reconciler`) | T21.1 |
+| T21.5 | `cli/main.py` → package (`app`, `client`, `output.emit` replacing 16 `if state.json_mode:` forks, `verbs/*`, `onboarding`) | — |
+| T21.6 | `kernel/store.py` → `kernel/store/` package behind the same façade (rule 4 unchanged); split `commit_node` | — |
+| T21.7 | Break the import cycles behind the 17 local imports (injected hooks) | T21.6 |

@@ -1,7 +1,7 @@
 # Task status
 
-Machine-checkable status for every task in `docs/build-plan.md` (M13–M19, 40
-tasks total: 6 + 6 + 2 + 2 + 3 + 14 + 7). This file is the single source of truth for "what's done" — an
+Machine-checkable status for every task in `docs/build-plan.md` (M13–M21, 55
+tasks total: 6 + 6 + 2 + 2 + 3 + 14 + 7 + 8 + 7). This file is the single source of truth for "what's done" — an
 autonomous agent picking up work should read this file first, find the next
 `TODO` task whose `Depends on` tasks are all `DONE` **and** whose milestone's
 `Depends on:` milestones are all closed, and work it per the rules in
@@ -273,3 +273,32 @@ re-ruled explicitly and E04/E04b/single-file `E_DUP_ID` pass **unmodified**;
 | T19.5 | Battery: mirror cases E21–E24 | DONE | New cases/fixtures only; existing E01–E20 untouched. E24 records the multi-parent `composes` choice (M19-B). Depends on T19.4. **Landing evidence:** New cases E21 (edit A→B, settles), E22 (concurrent same-line edit ⇒ one conflict, B's version kept, hub wins the file, settled), E23 (remove one mirror ⇒ node live, other file byte-identical, then last S0 mirror ⇒ deleted), E24 (re-indent in B ⇒ second `composes` parent, A untouched, M19-B); E21–E23 join the aggregate silent-guess counter (0). New fixture dirs only; the only deleted battery lines are the authorized E05 ones. `make battery`: 51 passed. |
 | T19.6 | Live proof: a real watcher, file to file | DONE | Real `Watcher` thread modelled on the D10 wiring test; A→B within 3 s, checkbox, no echo loop (cycle count asserted), hub `PATCH` rewrites both. Depends on T19.4. **Landing evidence:** Real `watchdog` observer + persistent `OriginTracker`/`Reconciler`/`Watcher` + real `create_app`: A→B in **0.122–0.124 s** (debounce 0.1 s; expect ≈0.5 s at the production 500 ms), B→A, checkbox, non-`.md` ignored (D10), hub `PATCH` rewrites both files in-request, and **each mirror is written exactly once** (no ping-pong). **Real finding while stabilizing it:** an initial version asserted zero forwarded reconcile cycles for the daemon's own writes and failed ~1/40 — the origin tracker's echo record is single-use, so a second filesystem event for the same write reaches the reconciler as a *quiet* cycle (no write, no propagation). Harmless and pre-existing; the test now asserts on *writes*. Post-fix: 60/60 runs green (a 2.5% flake would still pass 60 runs ~22% of the time, so this is reassurance, not proof). Also verified by hand with a real `akasha daemon` process across three files (edit either side, checkbox, `akasha set`): all propagated, zero review items. |
 | T19.7 | User guide: transclusion | TODO | New `docs/user/transclusion.md`; states the limits (one-line blocks, per-file indentation, conflict behavior). Every example executed against a scratch daemon. Depends on T19.6 and T17.3 (shared `docs/user/README.md`). |
+
+---
+
+## M20 — Spans, marker-less files, no pause, and the revised join rule (Depends on: M19)
+
+Milestone DoD: `docs/build-plan.md` M20. Rulings: `docs/spec-questions.md` M20-A…G. **T20.2–T20.7 share `src/akasha/sync/reconcile.py`: strictly sequential.** Done before this milestone (not tasks): M20-F glued anchor (debug-plan D14), D11 (watch before scan), D12/M19-D (relay), D13 (stale ownership index).
+
+| Task | Title | Status | Notes |
+|---|---|---|---|
+| T20.1 | Rulings, spec, PRD and plan (doc-only) | DONE | 2026-09-24. Spec §4.7/§4.8/§6.2/§4.11 amended; PRD R11 superseded note; M19-A/C/D resolved; M20-A…G logged. |
+| T20.2 | Stage the reconcile cycle (pure refactor) | DONE | 2026-09-24. `_cycle` 283 → 35 lines (stages: `_cycle_root`, `_read_vault_text`, `_run_cycle`, `_pause_on_storm`, `_resolve_repairs`, `_enqueue_findings`, `_apply_ops`/`_apply_created`/`_apply_existing`, `_record_agreement`); largest stage 58 lines. **Zero test modifications**: the full suite (936 tests) passed unchanged. |
+| T20.3 | Remove the `tm: 1` marker and every front-matter edit | DONE | 2026-09-24. No file marker; front matter is raw lines, never read or written (an initial `---…---` block holding no construct). `adopt_unmanaged`, `W_UNMANAGED_ANCHOR`, `BlockSet.managed/contract_version/front_matter`, `sync_files.contract_version` (migration 003, checked on a populated real DB) removed. **No golden fixture edited** (only `contract_w_unmanaged_anchor` retired); see build-plan for the exact test list. Verified through a fresh wheel: setup + mint + 5 edits + mirrors add no header. |
+| T20.4 | Never pause a file: repair, else give the line a new id | DONE | 2026-09-24. Pause & diff removed; exact lost anchor ⇒ re-insert; bad checksum (unless the line is byte-identical to a base block: id restored) / non-identical duplicate / fuzzy lost anchor ⇒ the line gets `^tm-new` (a new node; the old node follows the delete rules, S1+ ⇒ `E_DELETED_S1` review); a well-formed unknown anchor is **adopted under its own id** (`create_node(node_id=…)`). Stale pause reviews dismissed on the file's next cycle; `pauses` kept as an empty list. E13 is now a real storm, E15 a silent new node; exact protected-test list in build-plan. Conservative (cloud) roots still route repairs to review (unchanged). |
+| T20.5 | Span grammar (single line) | TODO | Per-file padding (M20-E). |
+| T20.6 | Multi-line spans | TODO | |
+| T20.7 | Join rule | TODO | Edits one protected unit test by name. |
+| T20.8 | End to end, docs, plugin | TODO | |
+
+## M21 — Behaviour-preserving refactor
+
+| Task | Title | Status | Notes |
+|---|---|---|---|
+| T21.1 | Extract `MirrorPropagator` | TODO | After T20.7. |
+| T21.2 | Split `_compute_ops`; op-kind dispatch | TODO | After T20.7. |
+| T21.3 | Watcher `RootRegistry` | TODO | |
+| T21.4 | One shared `rescan` | TODO | After T21.1. |
+| T21.5 | `cli/main.py` → package | TODO | |
+| T21.6 | `kernel/store.py` → package | TODO | |
+| T21.7 | Break import cycles | TODO | After T21.6. |

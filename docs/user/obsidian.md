@@ -22,7 +22,7 @@ Copy `manifest.json` + the built `main.js` into `<vault>/.obsidian/plugins/tm-hu
 
 ## Contract you write in
 
-A file only participates once its YAML front matter contains `tm: 1` — add that by hand the first time (`docs/mvp-spec.md` §4.7); anchors and commands in a file without it are silently ignored, not an error. Once managed, a file is a lossless container: only anchored lines (`^tm-<id8>`, task checkboxes, `^tm-new` requests, embeds/refs) are parsed; everything else round-trips verbatim. Grammar is fully specified in [`../mvp-spec.md`](../mvp-spec.md) §4.7 — don't relearn it here.
+Every Markdown file in the vault participates (a `.tmignore` file opts paths out); there is no per-file marker and the daemon never reads or edits front matter. A file is a lossless container: only anchored lines (`^tm-<id8>`, task checkboxes, `^tm-new` requests, embeds/refs) are parsed; everything else round-trips verbatim. Grammar is fully specified in [`../mvp-spec.md`](../mvp-spec.md) §4.7 — don't relearn it here.
 
 ## Full manual test script
 

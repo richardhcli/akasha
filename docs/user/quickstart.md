@@ -41,7 +41,7 @@ akasha status               # one screen: is it running, is my token good, what 
 - [ ] write the quickstart ^tm-new
 ```
 
-Within a moment the daemon rewrites that line with a real id (`^tm-…`) and adds a `tm: 1` front-matter key to the note (inside your existing front matter if you have one; your other keys are untouched). Prose-only notes are never modified.
+Within a moment the daemon rewrites that line with a real id (`^tm-…`) and changes nothing else: the daemon never adds, edits or reads front matter, so a note gains no header. Prose-only notes are never modified.
 
 **Leave things out** with a `.tmignore` file at the folder's root (gitignore-style: `# comments`, `*`, `?`, `**`, a trailing `/` for a folder, `!` to re-include). `.obsidian/`, `.git/`, `.trash/`, `node_modules/` and non-Markdown files are always skipped.
 
@@ -61,6 +61,8 @@ akasha search caffeine
 Each note keeps its own indentation, and the rest of each note is never touched. If two notes change the *same* line in the same instant, one version wins and the other is kept as a review item (`akasha review list`) — nothing is lost.
 
 **What is shared is one line** — a task line or a one-line paragraph. A multi-line section cannot be shared yet (only its anchored last line would be); that needs a grammar decision (`docs/spec-questions.md` M19-A).
+
+**Damaged ids repair themselves.** Typing at the end of a line (which eats the space before its id) is fine. If a formatter or a typo breaks an id, the daemon never stops syncing the file: an exactly-restorable id comes back (a line that still reads exactly as before gets its id back even if the id itself was corrupted), otherwise the line simply gets a new node (an id it has never seen is adopted as it is, so a second machine or a reset database keeps your transclusions linked). The only thing that asks you anything is deleting a line whose node other things depend on (`akasha review list`).
 
 `akasha render notes/B.md` prints a file with its `![[note#^tm-id]]` embeds replaced by the target's current text, without touching any file.
 

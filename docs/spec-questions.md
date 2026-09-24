@@ -182,7 +182,7 @@ entry format above.
 ## M19-A — The grammar is one line per block; what about multi-line "sections"?
 - **Where:** `docs/mvp-spec.md` §4.7 (every block is exactly one line); `src/akasha/sync/reconcile.py` (`_body_line`, `E_UNPROJECTABLE_BODY`).
 - **Narrowest reading taken:** mirrors work on **one-line blocks** (a task line or a one-line paragraph) — exactly the units the contract already round-trips. A multi-line section (several paragraphs, a heading with its body) cannot be a mirror: a hub body containing a newline is already unprojectable and is left as-is with one review item. Mirroring ranges would need a block-range grammar extension (start/end anchors) — a §4.7 change not proposed here.
-- **Resolution:** open — the user said "section"; if multi-line blocks are wanted, that is a separate grammar ruling and milestone.
+- **Resolution:** resolved 2026-09-24 -- superseded by **M20-A/M20-B** (spans; multi-line spans are in scope).
 
 ## M19-B — Indentation and `composes` edges when a task is mirrored into a file with different nesting
 - **Where:** `src/akasha/sync/reconcile.py` (`_compute_ops` `reparented`, `kernel_apply` `reparented`); §4.7 (indent ⇒ `composes`).
@@ -192,14 +192,59 @@ entry format above.
 ## M19-C — When a file joins a mirror with text that differs from the hub, which side wins?
 - **Where:** `src/akasha/sync/reconcile.py` (`kernel_apply` adopt path today commits the vault's text when it differs — correct for a *move*, unsafe for a *join*).
 - **Narrowest reading taken:** on a **join** (another file already owns the anchor) **the hub wins**: the mirror is rewritten to the hub head and the file's differing version is preserved as a conflict branch with exactly one review item, reusing the existing `conflict_handler` — nothing is lost and nothing is silently guessed. Reason: the common divergence is a stale paste (the source was edited between copy and paste), and letting it overwrite the hub would regress the source file with no signal. Cost: a user who pastes and immediately edits the pasted line in the same save sees it rewritten plus a review item (this includes a cut-and-edit in one save when the destination reconciles before the source); their next ordinary edit propagates normally. A **move** (no other owner) keeps today's adopt behavior unchanged. This is the one behavior most likely to be reversed by the user; flipping it is a one-branch change in T19.4.
-- **Resolution:** open.
+- **Resolution:** resolved 2026-09-24 -- revised by **M20-D** (stale paste: hub wins silently; new text with a newer file time: the new change wins).
 
 ## M19-D — A propagated cycle commits the other file's own edit: is it relayed onward?
 - **Where:** `docs/mvp-spec.md` §4.8 ("the propagated cycle does not itself propagate further"); `src/akasha/sync/reconcile.py` (`Reconciler.on_change`); debug-plan D12.
 - **Narrowest reading taken:** the sentence exists to stop ping-pong (A→B→A…). It was written for a propagated cycle that only writes the hub's text into the mirror. A propagated cycle can also **commit** something: if that file held its own unsaved-to-hub edit to a *different* mirrored line (two files edited within one debounce window), the three-way cycle commits it, and under the literal sentence it was then never relayed -- the two files stayed different forever, silently (found by an end-to-end run after a one-command `akasha setup`; two files edited 5 ms apart). Now `on_change` relays each node a propagated cycle **commits** to that node's other owners, and only those: a hub-to-file write-back commits nothing, so it is never relayed and the ping-pong the sentence guards against still cannot occur (`test_mirror_propagation_does_not_recurse_or_ping_pong` unchanged and green). A per-`on_change` cycle cap (`MAX_PROPAGATION_CYCLES`) is a runaway guard. Same-line concurrent edits are unchanged (M19-C/E22: one commit, one conflict, nothing lost). §4.8's sentence is amended to match.
-- **Resolution:** open -- implemented under the narrowest reading; the user may prefer to keep the literal "no relay" and accept stranded edits (not recommended: it violates the §4.7 promise that an edit reaches every file within one sync cycle).
+- **Resolution:** resolved 2026-09-24 -- user ruling ("accept"): relay what a propagated cycle commits; §4.8 is amended accordingly.
 
 ## M20-F — Is an anchor glued to the text (no space before `^tm-id`) a lost anchor?
 - **Where:** `docs/mvp-spec.md` §4.7 (`managed_par := text SP anchor EOL`); `src/akasha/contract/grammar.py` (`ANCHOR_EOL_RE`, `MANAGED_PAR_RE`, `TASK_LINE_RE`, `NEW_LINE_RE`, `NEW_MARKER_EOL_RE`); the `sandbox/init` run of 2026-09-24.
 - **Narrowest reading taken:** the EBNF's mandatory `SP` was read literally, so typing at the end of a line (cursor before the anchor eats its space: `…text^tm-id`) made the block lose its anchor -- `E_LOST_ANCHOR`, then a pause of the whole file when that is more than 25 % of its blocks (four pauses in the sandbox). The space is now optional on read; `render` always emits the canonical single space, so the line is re-spaced by the next write-back: a silent repair with no violation, pause or review item. Applies equally to `^tm-new`.
 - **Resolution:** resolved 2026-09-24 -- user ruling ("make the glued anchor a silent repair generally"). Tests: `tests/unit/contract/test_parser.py`, `tests/unit/sync/test_reconcile.py`. M20-A…E (spans, marker removal, join rule) are logged by task T20.1 of `docs/proposals/2026-09-24-refactor-spans-marker.md`.
+
+<!-- M20 (2026-09-24): user rulings on transclusion spans, marker-less files, the join rule and
+     pause removal. Plan: docs/proposals/2026-09-24-refactor-spans-marker.md; tasks: build-plan M20. -->
+
+## M20-A — How is only part of a line, or several lines, transcluded? What is the id syntax?
+- **Where:** `docs/mvp-spec.md` §4.7; `src/akasha/contract/grammar.py`.
+- **Narrowest reading taken:** with no tokens the entire single line is shared (`text ^tm-id`, unchanged). Otherwise a **span**: `{TEXT}{tm-<id8>}`. The start/end tokens are named constants in `grammar.py` (`SPAN_OPEN`, `SPAN_CLOSE`, id wrapper), currently `{` and `}`; the id inside the braces is byte-identical to the `^` form (`tm-` + id8, checksummed), so `kernel.ids` is unchanged. Scan rule: balanced braces, closing at the first depth-0 `}` immediately followed by `{tm-<valid id8>}`; otherwise the `{` is literal. Spans do not nest. Obsidian shows the braces and id in reading view (an optional plugin decoration can dim them).
+- **Resolution:** resolved 2026-09-24 -- user ruling ("braces are acceptable; id should be `{tm-...}`, the same format as `^tm-...`").
+
+## M20-B — Are multi-line spans in scope for the first spans milestone?
+- **Where:** `docs/mvp-spec.md` §4.7 (was: every block is one line); supersedes M19-A.
+- **Narrowest reading taken:** yes. The open token may be on an earlier line than `}{tm-…}`; the hub body then contains newlines, which `E_UNPROJECTABLE_BODY` no longer rejects for spans. Scan is capped (200 lines / 64 KiB) so a stray `{` cannot make parsing quadratic. A damaged terminator makes the text prose again (ordinary delete rules).
+- **Resolution:** resolved 2026-09-24 -- user ruling ("multi-line spans are in scope for the first spans milestone").
+
+## M20-C — Is the `tm: 1` front-matter marker kept?
+- **Where:** `docs/mvp-spec.md` §4.7 file-level rule; `contract/{parser,render,linter}.py`; `sync/reconcile.py::adopt_unmanaged`; `sync_files.contract_version`.
+- **Narrowest reading taken:** removed entirely, no backward compatibility. The daemon never reads, writes or interprets front matter (an initial `---…---` block is skipped as raw lines). It served two purposes: a consent gate (redundant since M18-B: every non-ignored Markdown file is tracked and `.tmignore` opts out) and a grammar version stamp (now hub-owned). Protected tests and goldens that pin the marker are changed by T20.3 **by name** (see build-plan T20.3); nothing else. Risks accepted: a note that documents akasha and ends a line with ` ^tm-xxxxxxxx` is adopted (already true under M18-B; mitigated by fences and `.tmignore`); no per-file version means a future token change needs a hub-driven rewrite.
+- **Resolution:** resolved 2026-09-24 -- user ruling ("remove `tm:1` and frontmatter edits entirely; push back only if critical" -- no critical objection found).
+
+## M20-D — Which side wins when a file joins a mirror with differing text?
+- **Where:** `docs/mvp-spec.md` §4.7 Mirrors rule (4); `sync/reconcile.py` (`_cycle`, `op.mirror`); revises M19-C.
+- **Narrowest reading taken:** decided in this order: equal to the hub head ⇒ quiet; equal to an **earlier version in the node's history** ⇒ stale paste, hub wins, file rewritten, no review (timestamps cannot detect this: yesterday's text saved today has a fresh mtime); **new** text and the file was changed after the hub head's commit `ts` ⇒ the new change wins and propagates; new text but the hub head is newer, or the file time is unreliable (future mtime, conservative/cloud root) ⇒ the old M19-C behaviour (hub wins + conflict branch + one review).
+- **Resolution:** resolved 2026-09-24 -- user ruling ("if a new paste has new changes, based on timestamps in the database, the new change should win") with the accepted history guard.
+
+## M20-E — Is the whitespace inside a span's braces part of the shared text?
+- **Where:** `docs/mvp-spec.md` §4.7 Spans; `contract/parser.py`, `contract/render.py`.
+- **Narrowest reading taken:** no. The node body is the span text **trimmed** (`canonicalize_text` strips trailing whitespace per line, so storing padding would make render never equal the file). The whitespace just inside the braces is **per file**, like indentation: never added, removed or normalized by the daemon; a mirror keeps its own; a new `{text}{tm-new}` span gets none. Padding is typed by the user.
+- **Resolution:** resolved 2026-09-24 -- user ruling ("no padding needed; padding must be manually added by the user"), with the per-file storage reading.
+
+## M20-G — What replaces "pause & diff"? What does "resolve, else change the ID" mean per violation?
+- **Where:** `docs/mvp-spec.md` §4.7 Violations, §4.8 pseudocode; PRD R11 (which adopted pause & diff) and F13 (no heuristic re-anchoring); `contract/linter.py` (`pause_and_diff`), `sync/reconcile.py`, battery E13.
+- **Narrowest reading taken:** a file is never paused. F13 forbids re-attaching a damaged line to its old node by similarity, so "resolve" means the certain repairs; wherever a line's identity is ambiguous, "change the ID" = the line gets a **new node**:
+
+  | Path | Handling |
+  |---|---|
+  | pause (> 25 % of blocks) | removed; per-block handling always applies |
+  | `E_ID_CHECKSUM` | line byte-identical to a base block ⇒ that block's id is restored (certain, like an exact lost anchor; found by replaying the sandbox: a corrupted id on an unchanged mirror line must not detach it); otherwise a new node for the line, silently |
+  | `E_UNKNOWN_ANCHOR` (well-formed, hub has never seen it) | **adopted under its own id** -- the assistant's reading of "resolve, else change the ID": re-minting would give each file's copy a different id after a hub reset or on a second machine, silently splitting every mirror and making two hubs re-id each other's files forever |
+  | `E_DUP_ID`, no identical copy | copy identical to base keeps the id; the others get new nodes |
+  | `E_LOST_ANCHOR`, exact | re-insert the anchor (certain repair, unchanged) |
+  | `E_LOST_ANCHOR`, fuzzy | the line becomes a new node; the old node follows the ordinary delete rules (S0 deleted, S1+ reviewed) |
+  | `E_DELETED_S1` | unchanged: a review, nothing deleted |
+
+  Existing pause reviews are dismissed on the file's next cycle; `/sync/status` keeps `pauses` as an always-empty list. Conservative (cloud) roots keep routing repairs to review (unchanged; not covered by the ruling). **Design invariant 3 (machine never creates tracked truth):** the new node's text is the human's own line, already tracked under the old id; the daemon only assigns it an identity, exactly as it does for a human-typed `^tm-new`. **Consequence to be aware of:** a formatter storm that strips anchors *and* rewrites text hard-deletes that file's unmirrored S0 nodes (text survives as prose and in the new nodes; hub history for those nodes goes). Protected changes, by name, in T20.4: battery E13 (redefined, kept inside the silent-guess aggregate), golden `e13-pause-storm`, `tests/unit/contract/test_pause_and_diff.py`, the pause cases in `tests/golden/test_serialization.py`.
+- **Resolution:** resolved 2026-09-24 -- user ruling ("do not pause a file: always seek to resolve as fast as possible, else change the ID"); the per-violation table is the assistant's reading of it, shown to the user.

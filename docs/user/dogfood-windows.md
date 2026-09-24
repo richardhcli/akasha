@@ -176,9 +176,8 @@ Invoke-RestMethod http://127.0.0.1:7433/v1/sync/status -Headers $headers
 ```
 
 Create at least one note under `$Vault` (Obsidian or any editor). Every
-Markdown file there is tracked by default — no front matter needed (a `tm: 1`
-key is added for you the first time there is something to sync; a `.tmignore`
-file at the vault root opts paths out):
+Markdown file there is tracked by default — no front matter, ever (the daemon
+never adds or edits it); a `.tmignore` file at the vault root opts paths out:
 
 ```markdown
 First captured claim for dogfood
