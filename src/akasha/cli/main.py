@@ -43,7 +43,9 @@ Global flags: ``--json`` (versioned ``cli/v1`` output, additive-only),
 without sending it), ``--token`` (bearer). ``--base-url`` is this client's
 documented wiring override for pointing at a non-default daemon; it also
 supports live integration tests and defaults to the spec's
-``127.0.0.1:7433``.
+``127.0.0.1:7433``. ``--token`` and ``--base-url`` also read the
+``AKASHA_TOKEN`` / ``AKASHA_BASE_URL`` environment variables (build-plan
+T18.2; flag > environment > default; ``daemon``/``init``/``tray`` ignore both).
 
 Exit codes (spec §4.12): 0 ok · 1 error · 2 usage · 3 not found · 4
 conflict/violation/needs-redirect. Click/typer already exits 2 on its own
@@ -78,8 +80,12 @@ string.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json as json_lib
+import os
+import re
+import sqlite3
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -91,8 +97,20 @@ import typer
 
 from akasha import daemon as daemon_module
 from akasha.api import auth
-from akasha.config import DEFAULT_BIND, DEFAULT_PORT, default_db_path, load_config
+from akasha.config import (
+    DEFAULT_BIND,
+    DEFAULT_PORT,
+    Config,
+    default_config_dir,
+    default_db_path,
+    default_token_path,
+    load_config,
+    read_token,
+    write_token,
+)
+from akasha.contract import grammar
 from akasha.kernel import ids, store
+from akasha.sync.watcher import detect_cloud_path
 
 # Windows consoles default `sys.stdout`/`sys.stderr` to the legacy locale
 # codepage (e.g. cp1252), not UTF-8 -- confirmed live on a real Windows 11
@@ -117,10 +135,12 @@ review_app = typer.Typer(add_completion=False, no_args_is_help=True)
 token_app = typer.Typer(add_completion=False, no_args_is_help=True)
 sync_app = typer.Typer(add_completion=False, no_args_is_help=True)
 edge_app = typer.Typer(add_completion=False, no_args_is_help=True)
+plugin_app = typer.Typer(add_completion=False, no_args_is_help=True)
 app.add_typer(review_app, name="review")
 app.add_typer(token_app, name="token")
 app.add_typer(sync_app, name="sync")
 app.add_typer(edge_app, name="edge")
+app.add_typer(plugin_app, name="plugin")
 
 
 class ChangeClass(str, Enum):
@@ -135,6 +155,11 @@ class CliState:
     token: str | None
     json_mode: bool
     dry_run: bool
+    # build-plan T18.4: True only when NEITHER --base-url NOR AKASHA_BASE_URL was
+    # supplied, i.e. the request targets the default local endpoint.
+    default_endpoint: bool = False
+    # build-plan T18.9: where the credential came from -- "flag", "env", "file" or "none".
+    token_source: str = "none"
 
 
 def _state(ctx: typer.Context) -> CliState:
@@ -146,9 +171,14 @@ def _state(ctx: typer.Context) -> CliState:
 def main(
     ctx: typer.Context,
     base_url: str = typer.Option(
-        DEFAULT_BASE_URL, "--base-url", help="daemon base URL (default: spec §3 127.0.0.1:7433)"
+        DEFAULT_BASE_URL,
+        "--base-url",
+        envvar="AKASHA_BASE_URL",
+        help="daemon base URL (default: spec §3 127.0.0.1:7433)",
     ),
-    token: str | None = typer.Option(None, "--token", help="bearer token"),
+    token: str | None = typer.Option(
+        None, "--token", envvar="AKASHA_TOKEN", help="bearer token (or set AKASHA_TOKEN)"
+    ),
     as_json: bool = typer.Option(
         False, "--json", help="emit versioned cli/v1 JSON instead of a plain body dump"
     ),
@@ -158,8 +188,37 @@ def main(
         help="mutating verbs print the would-be request and exit 0 without sending it",
     ),
 ) -> None:
+    # build-plan T18.2: precedence is explicit flag > environment > default (typer's
+    # own). An exported-but-empty AKASHA_TOKEN / AKASHA_BASE_URL must behave as unset:
+    # an empty bearer would only ever produce a confusing 401.
+    source = ctx.get_parameter_source("base_url")
+    # typer vendors its own click, so compare the source by name, not by enum identity.
+    default_endpoint = not base_url or source is None or source.name == "DEFAULT"
+    if default_endpoint:
+        # The default endpoint is the address the default config's daemon serves on
+        # (equal to DEFAULT_BASE_URL absent a config), so a config with another port
+        # is honoured without a flag -- build-plan T18.9 step 4, pulled forward
+        # because on-demand start (T18.4) is only testable/correct with it.
+        base_url = daemon_module.health_url(load_config(None))
+    resolved_token = token or None
+    token_source = "none"
+    if resolved_token is not None:
+        token_param_source = ctx.get_parameter_source("token")
+        is_flag = token_param_source is not None and token_param_source.name == "COMMANDLINE"
+        token_source = "flag" if is_flag else "env"
+    elif default_endpoint:
+        # T18.9 (ruling M18-A): flag > env > the saved token file. Only ever for the
+        # default local endpoint -- the saved secret is never sent to an address the
+        # user named explicitly (pass --token for those).
+        resolved_token = read_token(default_token_path())
+        token_source = "file" if resolved_token else "none"
     ctx.obj = CliState(
-        base_url=base_url.rstrip("/"), token=token, json_mode=as_json, dry_run=dry_run
+        base_url=base_url.rstrip("/"),
+        token=resolved_token,
+        json_mode=as_json,
+        dry_run=dry_run,
+        default_endpoint=default_endpoint,
+        token_source=token_source,
     )
 
 
@@ -288,6 +347,24 @@ def _usage_error(state: CliState, message: str) -> NoReturn:
     raise typer.Exit(2)
 
 
+def _autostart_daemon(state: CliState) -> bool:
+    """Start the default local daemon on demand after a refused connection (T18.4).
+
+    Only for the default endpoint (never an explicit --base-url / AKASHA_BASE_URL:
+    test daemons and remote hosts are not ours to spawn), never with
+    ``AKASHA_NO_AUTOSTART`` set. Never silent: one line on stderr. Safe because startup
+    reconcile is idempotent (spec §4.8), so anything edited while the daemon was
+    down is picked up on start. Returns True iff a daemon was started.
+    """
+    if not state.default_endpoint or os.environ.get("AKASHA_NO_AUTOSTART"):
+        return False
+    result = daemon_module.up(load_config(None))
+    if result.status != "started":
+        return False
+    typer.echo(f"started daemon (log: {result.log_path})", err=True)
+    return True
+
+
 def _request(
     state: CliState,
     method: str,
@@ -295,10 +372,12 @@ def _request(
     *,
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
+    missing_ok: bool = False,
 ) -> Any:
     headers = {"Authorization": f"Bearer {state.token}"} if state.token else {}
-    try:
-        resp = httpx.request(
+
+    def send() -> httpx.Response:
+        return httpx.request(
             method,
             f"{state.base_url}{path}",
             params=params,
@@ -306,10 +385,36 @@ def _request(
             headers=headers,
             timeout=10.0,
         )
+
+    try:
+        try:
+            resp = send()
+        except httpx.ConnectError:
+            if not _autostart_daemon(state):
+                raise
+            resp = send()  # retried exactly once, and only after we started the daemon
     except httpx.HTTPError as exc:
         _fail(state, 0, "E_CONNECTION", f"could not reach daemon at {state.base_url}: {exc}", {})
+    if missing_ok and resp.status_code == 404:
+        return None  # the caller reports it (e.g. `render`'s unresolved marker)
     if resp.status_code >= 400:
         code, message, detail = _parse_error_body(resp)
+        hint: str | None = None
+        if resp.status_code == 401 and not state.token:
+            hint = (
+                "no credential was supplied: run `akasha setup` to create one, then "
+                "`export AKASHA_TOKEN=...` (or pass --token)"
+            )
+        elif resp.status_code == 401 and state.token_source == "file":
+            hint = (
+                f"the saved token ({default_token_path()}) was rejected -- it may have been "
+                "revoked, or the database was reset; pass --token/AKASHA_TOKEN with a valid one"
+            )
+        if hint is not None:
+            if state.json_mode:
+                detail = {**detail, "hint": hint}
+            else:
+                message = f"{message}\nhint: {hint}"
         _fail(state, resp.status_code, code, message, detail)
     if not resp.content:
         return {}
@@ -469,6 +574,40 @@ def tray(
         raise typer.Exit(4) from exc
 
 
+def _open_migrated_db(cfg: Config) -> sqlite3.Connection:
+    """Open (creating the directory if needed) and migrate the config's database.
+
+    Shared by ``init`` and ``setup`` (build-plan T18.5): one bootstrap path, no
+    second way to reach a fresh DB.
+    """
+    db_path = cfg.db_path if cfg.db_path is not None else default_db_path()
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = store.connect(db_path, check_same_thread=False)
+    store.run_migrations(conn)
+    return conn
+
+
+def _save_token(cfg: Config, bearer: str) -> tuple[Path, bool]:
+    """Save the freshly minted human token beside the config (0600); never overwrite.
+
+    Returns ``(path, saved)``: ``saved`` is False when a token file already existed
+    and was left untouched (ruling M18-A: an existing file is never clobbered).
+    """
+    config_dir = Path(cfg.path).parent if cfg.path is not None else default_config_dir()
+    path = default_token_path(config_dir)
+    if path.exists():
+        return path, False
+    write_token(path, bearer)
+    return path, True
+
+
+def _mint_human_token(conn: sqlite3.Connection, name: str) -> str:
+    """Mint one human-class token and return its bearer string (shown once by callers)."""
+    raw_secret = auth.mint_secret()
+    token = store.create_token(conn, name, "human", auth.hash_secret(raw_secret))
+    return auth.format_bearer_token(token["id"], raw_secret)
+
+
 @app.command()
 def init(
     config: str | None = typer.Option(
@@ -506,10 +645,7 @@ def init(
     docstring).
     """
     cfg = load_config(config)
-    db_path = cfg.db_path if cfg.db_path is not None else default_db_path()
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = store.connect(db_path, check_same_thread=False)
-    store.run_migrations(conn)
+    conn = _open_migrated_db(cfg)
 
     if store.list_tokens(conn):
         typer.echo(
@@ -519,11 +655,320 @@ def init(
         )
         raise typer.Exit(4)
 
-    raw_secret = auth.mint_secret()
-    token = store.create_token(conn, name, "human", auth.hash_secret(raw_secret))
-    bearer = auth.format_bearer_token(token["id"], raw_secret)
+    bearer = _mint_human_token(conn, name)
     typer.echo(bearer)
     typer.echo("This token is shown once and cannot be recovered -- store it now.")
+    path, saved = _save_token(cfg, bearer)
+    typer.echo(
+        f"saved to {path} (readable only by you)" if saved else f"left {path} untouched",
+        err=True,
+    )
+
+
+def _register_vault(state: CliState, vault: Path, name: str) -> dict[str, Any]:
+    """Register ``vault`` as a sync root and reconcile it once (both human-only)."""
+    _mutate(state, "POST", "/v1/sync/roots", {"name": name, "root_path": str(vault)})
+    summary: dict[str, Any] = _mutate(state, "POST", "/v1/sync/rescan", None)
+    return summary
+
+
+@app.command()
+def setup(
+    ctx: typer.Context,
+    vault: str | None = typer.Argument(None, help="a folder of Markdown notes to sync (optional)"),
+    config: str | None = typer.Option(
+        None, "--config", help="path to config.toml (default: per-OS default location)"
+    ),
+    name: str | None = typer.Option(None, "--name", help="sync root name (default: folder name)"),
+) -> None:
+    """Nothing to a live, syncing vault in one command (build-plan T18.5).
+
+    Creates the database and your first human token on a fresh install (or, if a
+    token already exists, needs it via ``--token``/``AKASHA_TOKEN`` -- a token
+    cannot be recovered), starts the daemon in the background, and -- given a
+    VAULT folder -- registers it and reconciles it once. Every Markdown file under
+    the vault is tracked by default; a ``.tmignore`` file at its root opts paths
+    out. Safe to re-run. Like ``init``/``up`` this is a process verb: it ignores
+    ``--base-url`` and talks to the address in the config. ``--dry-run`` prints the
+    plan and changes nothing (no token, no daemon, no registration).
+    """
+    state = _state(ctx)
+    cfg = load_config(config)
+    root = Path(vault).expanduser().resolve() if vault is not None else None
+    root_name = name if name is not None else (root.name if root is not None else None)
+    url = daemon_module.health_url(cfg)
+
+    if state.dry_run:
+        plan = ["ensure the database and a human token", f"start the daemon at {url}"]
+        if root is not None:
+            plan += [f"register {root} as {root_name!r}", "reconcile it once"]
+        if state.json_mode:
+            envelope = {"schema": CLI_SCHEMA, "ok": True, "dry_run": True, "plan": plan}
+            typer.echo(json_lib.dumps(envelope))
+        else:
+            typer.echo("dry run -- nothing was changed. Would:")
+            for step in plan:
+                typer.echo(f"  - {step}")
+        raise typer.Exit(0)
+
+    if root is not None and not root.is_dir():
+        typer.echo(f"error: {root} is not a folder", err=True)
+        raise typer.Exit(3)
+
+    conn = _open_migrated_db(cfg)
+    minted: str | None = None
+    token_path = default_token_path()
+    token_saved = False
+    if store.list_tokens(conn):
+        bearer = state.token
+        if not bearer:
+            typer.echo(
+                "error: a token already exists and none was supplied. A token cannot be "
+                "recovered: pass --token or set AKASHA_TOKEN to it, or (with a running "
+                "daemon) mint another with `akasha token create`.",
+                err=True,
+            )
+            raise typer.Exit(4)
+    else:
+        minted = bearer = _mint_human_token(conn, "bootstrap")
+        token_path, token_saved = _save_token(cfg, minted)
+    conn.close()
+
+    up_result = daemon_module.up(cfg)
+    if up_result.status == "conflict":
+        typer.echo(f"error: the daemon lock is held but nothing answers at {url}", err=True)
+        raise typer.Exit(4)
+    if up_result.status == "failed":
+        typer.echo(
+            f"error: daemon did not become healthy at {url}; see {up_result.log_path}", err=True
+        )
+        raise typer.Exit(1)
+
+    summary: dict[str, Any] | None = None
+    warning: str | None = None
+    if root is not None:
+        assert root_name is not None
+        api = CliState(base_url=url, token=bearer, json_mode=state.json_mode, dry_run=False)
+        summary = _register_vault(api, root, root_name)
+        provider = detect_cloud_path(str(root))
+        if provider is not None:
+            warning = (
+                f"this folder is under {provider}: sync clients can rewrite files "
+                "behind akasha's back, so it runs in its cautious profile"
+            )
+
+    if state.json_mode:
+        data: dict[str, Any] = {
+            "daemon": {"url": url, "status": up_result.status, "log": str(up_result.log_path)},
+            "vault": None if root is None else {"path": str(root), "name": root_name},
+            "rescan": summary,
+            "token": minted,
+        }
+        typer.echo(json_lib.dumps({"schema": CLI_SCHEMA, "ok": True, "data": data}))
+        return
+
+    typer.echo(f"daemon: {url} ({up_result.status}; log: {up_result.log_path})")
+    if root is not None:
+        files = (summary or {}).get("files_reconciled", 0)
+        typer.echo(f"vault:  {root} registered as {root_name!r}; {files} file(s) reconciled")
+        typer.echo(
+            "        every Markdown file in it is tracked by default; add a .tmignore file "
+            "at its root to opt paths out"
+        )
+        if warning:
+            typer.echo(f"warning: {warning}")
+    if minted is not None:
+        typer.echo("")
+        if token_saved:
+            typer.echo(f"saved your token to {token_path} (readable only by you)")
+        else:
+            typer.echo(f"note: left the existing token file {token_path} untouched")
+        typer.echo(f"your token (shown once, it cannot be recovered):\n  {minted}")
+        typer.echo(f"  export AKASHA_TOKEN={minted}")
+        typer.echo(f"web UI: {url}/?token={minted}")
+        typer.echo(
+            "warning: that link and token are secrets -- anyone who has them can act as you; "
+            "keep them out of shared terminals and browser history you sync"
+        )
+    elif root is None:
+        typer.echo("already set up. Give a folder to sync it: `akasha setup <vault>`")
+
+
+def _group_reviews(items: list[dict[str, Any]]) -> dict[str, int]:
+    """Count review items by violation code (a pause has no code: it is grouped as "pause")."""
+    counts: dict[str, int] = {}
+    for item in items:
+        code = "pause"
+        try:
+            ref: Any = json_lib.loads(item.get("cause_ref") or "{}")
+        except ValueError:
+            ref = {}
+        if isinstance(ref, dict):
+            detail = cast("dict[str, Any]", ref)
+            code = "pause" if detail.get("pause") else str(detail.get("code", "violation"))
+        counts[code] = counts.get(code, 0) + 1
+    return counts
+
+
+@app.command()
+def status(ctx: typer.Context) -> None:
+    """One screen: why is (or isn't) my vault syncing? (build-plan T18.6). Read-only.
+
+    Reports whether the daemon answers (version), whether your credential is
+    accepted, each sync root with how many files have something tracked, open
+    violations/pauses by code and the open-review count -- and names the three
+    classic first-run failures with a one-line fix each: no credential, no vault
+    registered, and a registered vault with nothing tracked. Issues only GETs and
+    never starts a daemon (a diagnosis should not change what it diagnoses). Exit 0
+    when healthy; an unreachable daemon or rejected credential uses the shared
+    error mapping.
+    """
+    state = dataclasses.replace(_state(ctx), default_endpoint=False)  # never autostart here
+    health: dict[str, Any] = _request(state, "GET", "/health")
+    hints: list[str] = []
+    data: dict[str, Any] = {
+        "daemon": {
+            "url": state.base_url,
+            "version": health.get("version"),
+            "contract_version": health.get("contract_version"),
+        },
+        "token": "none" if not state.token else "accepted",
+    }
+    if not state.token:
+        hints.append(
+            "no credential was supplied: run `akasha setup` if this is a fresh install, "
+            "then `export AKASHA_TOKEN=...` (or pass --token)"
+        )
+        data["hints"] = hints
+        _print_status(state, data)
+        raise typer.Exit(1)
+    sync: dict[str, Any] = _request(state, "GET", "/v1/sync/status")
+    reviews: dict[str, Any] = _request(state, "GET", "/v1/review", params={"status": "open"})
+    roots: list[dict[str, Any]] = sync.get("sync_roots", [])
+    data["sync_roots"] = [
+        {
+            "name": r["name"],
+            "path": r["root_path"],
+            "files_tracked": len(r["files"]),
+            "violations": _group_reviews(r["violations"]),
+            "pauses": len(r["pauses"]),
+            "conflicts": len(r["conflicts"]),
+        }
+        for r in roots
+    ]
+    data["open_reviews"] = len(reviews.get("reviews", []))
+    if not roots:
+        hints.append("no vault is registered: run `akasha setup <folder-of-notes>`")
+    for r in data["sync_roots"]:
+        if r["files_tracked"] == 0:
+            hints.append(
+                f"{r['path']} is registered but nothing in it is tracked yet: notes only "
+                "sync once they hold a task or block to project (add `- [ ] something "
+                "^tm-new`); also check the path and any .tmignore"
+            )
+    data["hints"] = hints
+    _print_status(state, data)
+
+
+def _print_status(state: CliState, data: dict[str, Any]) -> None:
+    if state.json_mode:
+        _echo_ok(state, data)
+        return
+    d = data["daemon"]
+    typer.echo(
+        f"daemon:  ok  {d['url']}  (version {d['version']}, contract {d['contract_version']})"
+    )
+    typer.echo(f"token:   {'not supplied' if data['token'] == 'none' else 'accepted'}")
+    if "sync_roots" in data:
+        typer.echo(f"sync roots: {len(data['sync_roots'])}")
+        for r in data["sync_roots"]:
+            typer.echo(f"  {r['path']}  [{r['name']}]")
+            typer.echo(
+                f"    files tracked: {r['files_tracked']}  pauses: {r['pauses']}  "
+                f"conflicts: {r['conflicts']}"
+            )
+            for code, n in sorted(r["violations"].items()):
+                typer.echo(f"    violation {code}: {n}")
+        typer.echo(f"open reviews: {data['open_reviews']}  (akasha review list)")
+    for hint in data["hints"]:
+        typer.echo(f"hint: {hint}")
+
+
+def _resolve_embed(
+    state: CliState, node_id: str, cache: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Look one embed target up (read-only); cached per call. Never raises for a missing node."""
+    if node_id not in cache:
+        node: dict[str, Any] | None = _request(
+            state, "GET", f"/v1/nodes/{node_id}", missing_ok=True
+        )
+        if node is None:
+            cache[node_id] = {"id": node_id, "status": "missing", "body": None}
+        else:
+            cache[node_id] = {
+                "id": node_id,
+                "status": node.get("status", "live"),
+                "body": (node.get("body") or "").rstrip("\n"),  # bodies end in a newline
+                "task_state": node.get("task_state"),
+            }
+    return cache[node_id]
+
+
+def _embed_text(target: dict[str, Any]) -> str:
+    if target["status"] != "live" or target["body"] is None:
+        return f"[unresolved: ^tm-{target['id']} ({target['status']})]"
+    mark = {"open": "[ ] ", "done": "[x] "}.get(target.get("task_state") or "", "")
+    return f"{mark}{target['body']}"
+
+
+@app.command(name="render")
+def render_file(ctx: typer.Context, file: str) -> None:
+    """Show a file with each embed replaced by its target's CURRENT text (build-plan T18.7).
+
+    A viewer, not propagation: this does not modify files. On disk an embed is a
+    link (`![[path#^tm-id]]`) and stays one; this prints what Obsidian would show.
+    A standalone embed line becomes a quoted block labelled with its id and source
+    path; an inline embed is replaced by the quoted text. A tombstoned or missing
+    target prints `[unresolved: ...]` rather than vanishing. `--json` lists every
+    embed with its resolved body and state.
+    """
+    state = _state(ctx)
+    path = Path(file)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"error: cannot read {file}: {exc}", err=True)
+        raise typer.Exit(3) from exc
+    cache: dict[str, dict[str, Any]] = {}
+    out_lines: list[str] = []
+    embeds: list[dict[str, Any]] = []
+    in_fence = False
+    for line_no, line in enumerate(text.split("\n"), start=1):
+        if grammar.FENCE_RE.match(line):
+            in_fence = not in_fence
+        if in_fence or "![[" not in line:
+            out_lines.append(line)
+            continue
+        standalone = grammar.EMBED_RE.fullmatch(line)
+
+        def _sub(m: re.Match[str], line_no: int = line_no) -> str:
+            target = _resolve_embed(state, m.group("id"), cache)
+            embeds.append({"line": line_no, "path": m.group("path"), **target})
+            body = _embed_text(target)
+            return body if standalone else f'"{body}" (^tm-{m.group("id")})'
+
+        rendered = grammar.EMBED_RE.sub(_sub, line)
+        if standalone:
+            m = standalone
+            label = f"(^tm-{m.group('id')}, from {m.group('path')})"
+            out_lines.append(f"> {rendered.replace(chr(10), chr(10) + '> ')} {label}")
+        else:
+            out_lines.append(rendered)
+    rendered_text = "\n".join(out_lines)
+    if state.json_mode:
+        _echo_ok(state, {"file": str(path), "embeds": embeds, "text": rendered_text})
+    else:
+        typer.echo(rendered_text, nl=not rendered_text.endswith("\n"))
 
 
 # --- new/get/set/rm/search ---------------------------------------------------
@@ -765,6 +1210,147 @@ def merge(
     for old_id in redirect:
         typer.echo(f"redirect: {old_id} -> {node_id} (no id is left dangling)")
     typer.echo("no reassignment review items: a merge has a single survivor")
+
+
+# --- plugin ------------------------------------------------------------------
+
+PLUGIN_ID = "tm-hub"  # plugin-obsidian/manifest.json "id"
+
+
+def _default_plugin_dir() -> Path | None:
+    """The built ``plugin-obsidian/`` of a source checkout (an installed wheel has none)."""
+    candidate = Path(__file__).resolve().parents[3] / "plugin-obsidian"
+    return candidate if (candidate / "manifest.json").is_file() else None
+
+
+def _write_if_changed(path: Path, data: bytes, ops: list[str], *, dry_run: bool) -> None:
+    existing = path.read_bytes() if path.is_file() else None
+    if existing == data:
+        ops.append(f"unchanged  {path}")
+        return
+    ops.append(f"{'would write' if dry_run else 'wrote'}  {path}")
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
+@plugin_app.command("install")
+def plugin_install(
+    ctx: typer.Context,
+    vault: str,
+    from_dir: str | None = typer.Option(
+        None, "--from", help="a BUILT plugin-obsidian/ directory (default: this checkout's)"
+    ),
+    config: str | None = typer.Option(
+        None, "--config", help="path to config.toml, to learn the daemon address"
+    ),
+    with_token: bool = typer.Option(
+        False,
+        "--with-token",
+        help="also write your token into the plugin's settings (opt in; see the warning)",
+    ),
+) -> None:
+    """Install the Obsidian plugin into VAULT/.obsidian/plugins/tm-hub (build-plan T18.8).
+
+    Copies ``manifest.json`` and the built ``main.js``, records the daemon address
+    in the plugin's ``data.json`` (only when absent) and lists the plugin in
+    ``community-plugins.json``. The token is written ONLY with ``--with-token`` --
+    it then sits in a file inside the vault, so a warning is printed when the vault
+    is under OneDrive/Dropbox or is a git repository. Idempotent, and ``--dry-run``
+    prints the file operations without writing. Obsidian's own consent step cannot
+    be automated: turn off Restricted mode once, enable the plugin (and paste your
+    token in its settings unless you used ``--with-token``) -- the command prints
+    exactly that.
+    """
+    state = _state(ctx)
+    if with_token and not state.token:
+        typer.echo(
+            "error: --with-token needs a token: run `akasha setup`, or pass --token/AKASHA_TOKEN",
+            err=True,
+        )
+        raise typer.Exit(4)
+    vault_dir = Path(vault).expanduser().resolve()
+    if not vault_dir.is_dir():
+        typer.echo(f"error: {vault_dir} is not a folder", err=True)
+        raise typer.Exit(3)
+    src = Path(from_dir).expanduser().resolve() if from_dir else _default_plugin_dir()
+    if src is None:
+        typer.echo(
+            "error: pass --from DIR, a built plugin-obsidian/ "
+            "(run `npm ci && npm run build` in plugin-obsidian/ first)",
+            err=True,
+        )
+        raise typer.Exit(3)
+    if not (src / "manifest.json").is_file() or not (src / "main.js").is_file():
+        typer.echo(
+            f"error: {src} has no built plugin (manifest.json + main.js): "
+            "run `npm ci && npm run build` in plugin-obsidian/ first",
+            err=True,
+        )
+        raise typer.Exit(3)
+
+    plugin_dir = vault_dir / ".obsidian" / "plugins" / PLUGIN_ID
+    ops: list[str] = []
+    dry = state.dry_run
+    _write_if_changed(plugin_dir / "manifest.json", (src / "manifest.json").read_bytes(), ops,
+                      dry_run=dry)  # fmt: skip
+    _write_if_changed(plugin_dir / "main.js", (src / "main.js").read_bytes(), ops, dry_run=dry)
+
+    data_path = plugin_dir / "data.json"
+    settings: dict[str, Any] = {}
+    if data_path.is_file():
+        try:
+            loaded: Any = json_lib.loads(data_path.read_text(encoding="utf-8"))
+        except ValueError:
+            typer.echo(f"error: {data_path} is not valid JSON; not touching it", err=True)
+            raise typer.Exit(1) from None
+        if not isinstance(loaded, dict):
+            typer.echo(f"error: {data_path} is not a JSON object; not touching it", err=True)
+            raise typer.Exit(1)
+        settings = cast("dict[str, Any]", loaded)
+    settings.setdefault("daemonUrl", daemon_module.health_url(load_config(config)))
+    if with_token:
+        # The plugin's setting is `apiToken` (plugin-obsidian/src/settings.ts).
+        settings["apiToken"] = state.token
+        provider = detect_cloud_path(str(vault_dir))
+        if provider is not None or (vault_dir / ".git").exists():
+            where = f"under {provider}" if provider else "a git repository"
+            typer.echo(
+                f"warning: this vault is {where}; the token in {data_path} will be synced or "
+                "committed with it -- keep it out of anything shared",
+                err=True,
+            )
+    _write_if_changed(data_path, (json_lib.dumps(settings, indent=2) + "\n").encode(), ops,
+                      dry_run=dry)  # fmt: skip
+
+    listing_path = vault_dir / ".obsidian" / "community-plugins.json"
+    enabled: list[Any] = []
+    if listing_path.is_file():
+        try:
+            parsed: Any = json_lib.loads(listing_path.read_text(encoding="utf-8"))
+        except ValueError:
+            typer.echo(f"error: {listing_path} is not valid JSON; not touching it", err=True)
+            raise typer.Exit(1) from None
+        enabled = cast("list[Any]", parsed) if isinstance(parsed, list) else []
+    if PLUGIN_ID not in enabled:
+        enabled.append(PLUGIN_ID)
+    _write_if_changed(listing_path, (json_lib.dumps(enabled, indent=2) + "\n").encode(), ops,
+                      dry_run=dry)  # fmt: skip
+
+    if state.json_mode:
+        _echo_ok(state, {"dry_run": dry, "operations": ops})
+        return
+    for op in ops:
+        typer.echo(op)
+    if dry:
+        typer.echo("dry run -- nothing was written")
+        return
+    typer.echo("")
+    typer.echo("Left for you in Obsidian (its consent step cannot be automated):")
+    typer.echo("  1. Settings > Community plugins > turn off Restricted mode (once)")
+    typer.echo("  2. enable 'TM Hub'")
+    if not with_token:
+        typer.echo("  3. Settings > TM Hub > API token: paste your token")
 
 
 # --- edge ------------------------------------------------------------------

@@ -156,6 +156,18 @@ entry format above.
 - **Narrowest reading taken:** same mechanical Files-list completion as T12.5. Migrations ship inside the package as `akasha/migrations` via a hatch `force-include` (the repo-root directory is **not** moved — golden fixtures, `build-exe.ps1`'s `--add-data` and every test resolve it), and `_migrations_dir()` gains one branch between the unchanged frozen branch and the unchanged repo-root fallback, so no existing caller's behavior changes. Verified 2026-09-23: the unmodified wheel has 0 `.sql` members.
 - **Resolution:** resolved 2026-09-23 — landed in T18.1 as a mechanical completion (T12.5 precedent); the gate is green and `tests/integration/test_wheel_install.py` proves the built wheel migrates a fresh DB.
 
+## M18-F — `W_UNMANAGED_ANCHOR` no longer reaches `GET /sync/status` (finding from T18.6)
+- **Where:** `src/akasha/contract/linter.py` (`W_UNMANAGED_ANCHOR`), `src/akasha/sync/reconcile.py` (`_cycle`, `adopt_unmanaged`), `src/akasha/api/routes/sync.py` (`/sync/status`), `akasha status`.
+- **Finding (checked empirically, 2026-09-23):** the advisory lint fires only when the pipeline parses an *unmanaged* file. Since T18.10c a non-ignored file with any `^tm-` anchor is adopted (parsed as managed), and an ignored file is not reconciled at all (T18.10b), so no path enqueues it any more — it cannot appear in `/sync/status`. The parser/linter still implement it and their unit tests still pin it (unmodified).
+- **Narrowest reading taken:** `akasha status` says nothing about it, per T18.6 step 3; `sync/` untouched.
+- **Resolution:** open — if a "you have anchors in an ignored file" notice is wanted, it is a new (small) task.
+
+## M18-G — Two deviations from the T18.4/T18.9 wording taken while implementing them
+- **Where:** `src/akasha/cli/main.py` (`main` callback, `_request`), `src/akasha/config.py`.
+- **(1) T18.9 step 4 pulled into T18.4.** The default endpoint is the address in the *default config* (`http://bind:port`, equal to `DEFAULT_BASE_URL` when there is none), not the literal 7433. On-demand start (T18.4) is only correct — and only testable without colliding with a real daemon on 7433 — with it; it changes nothing for a user with no config.
+- **(2) The saved token is used only for the default endpoint (narrowing of T18.9 step 3).** An explicit `--base-url`/`AKASHA_BASE_URL` never receives it: ruling M18-A approved the file as the credential for *the local daemon*, not a secret to be sent to whatever host is named on a command line. Such calls pass `--token`/`AKASHA_TOKEN`.
+- **Resolution:** resolved 2026-09-23 — both are the narrowest readings that satisfy the tasks' own DoDs; revisit (2) only if the user wants the file honoured for named hosts too.
+
 ---
 
 <!-- Entries below logged 2026-09-23 with docs/build-plan.md M19 (live

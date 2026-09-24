@@ -467,3 +467,46 @@ def test_missing_required_args_is_usage_error(daemon):
 def test_missing_token_maps_to_exit_1(daemon):
     result = _run(daemon, "get", "whatever1", token="")
     assert result.exit_code == 1, result.output
+
+
+# --- AKASHA_TOKEN / AKASHA_BASE_URL (build-plan T18.2) ----------------------------
+
+
+
+def test_env_token_and_base_url_authenticate_with_no_flags(daemon, monkeypatch):
+    monkeypatch.setenv("AKASHA_TOKEN", daemon["token"])
+    monkeypatch.setenv("AKASHA_BASE_URL", daemon["base_url"])
+    result = runner.invoke(cli_app, ["new", "claim", "env round trip"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["body"].strip() == "env round trip"
+
+
+def test_explicit_flags_override_the_environment(daemon, monkeypatch):
+    monkeypatch.setenv("AKASHA_TOKEN", "bogus.token")
+    monkeypatch.setenv("AKASHA_BASE_URL", "http://127.0.0.1:9")  # nothing listens here
+    result = _run(daemon, "new", "claim", "flag wins")
+    assert result.exit_code == 0, result.output
+
+
+def test_empty_env_token_is_treated_as_unset(daemon, monkeypatch):
+    monkeypatch.setenv("AKASHA_TOKEN", "")
+    result = runner.invoke(cli_app, ["--base-url", daemon["base_url"], "get", "whatever1"])
+    # no bearer at all -> the daemon's own 401, exactly as with no variable set
+    assert result.exit_code == 1, result.output
+    assert "E_AUTH" in result.output
+
+
+def test_empty_env_base_url_falls_back_to_the_default(daemon, monkeypatch):
+    monkeypatch.setenv("AKASHA_BASE_URL", "")
+    result = runner.invoke(cli_app, ["--dry-run", "--json", "rm", "abcdefgh"])
+    assert result.exit_code == 0, result.output  # dry-run: no network, no crash on ""
+
+
+def test_help_never_prints_a_secret_env_value(daemon, monkeypatch):
+    secret = daemon["token"]
+    monkeypatch.setenv("AKASHA_TOKEN", secret)
+    monkeypatch.setenv("AKASHA_BASE_URL", daemon["base_url"])
+    result = runner.invoke(cli_app, ["--help"])
+    assert result.exit_code == 0
+    assert secret not in result.output
+    assert "AKASHA_TOKEN" in result.output  # naming the variable is fine

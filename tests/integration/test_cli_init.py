@@ -183,3 +183,22 @@ def test_init_twice_json_output_has_no_second_bearer_token(config_path):
     assert second.exit_code == 4, second.output
     assert first_bearer not in second.output
     assert not any(_BEARER_RE.match(line.strip()) for line in second.output.splitlines())
+
+
+# --- (T18.9, ruling M18-A) init saves the token it mints, without touching its stdout contract ---
+
+
+def test_init_saves_the_minted_token_beside_the_config_and_never_overwrites_it(config_path):
+    from akasha.config import read_token
+
+    token_file = config_path.parent / "tm-token"
+    first = runner.invoke(cli_app, ["init", "--config", str(config_path)])
+    assert first.exit_code == 0, first.output
+    lines = [line for line in first.output.splitlines() if line.strip()]
+    assert _BEARER_RE.match(lines[0].strip())
+    assert read_token(token_file) == lines[0].strip()  # exactly the bearer printed on stdout
+    assert "shown once" in lines[1]
+
+    second = runner.invoke(cli_app, ["init", "--config", str(config_path)])
+    assert second.exit_code == 4
+    assert read_token(token_file) == lines[0].strip()  # untouched
