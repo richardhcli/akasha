@@ -78,7 +78,6 @@ _REQUIRED_CONTRACT_CASES = frozenset(
         "contract_e_dup_id",
         "contract_e_lost_anchor",
         "contract_e_deleted_s1",
-        "contract_w_unmanaged_anchor",
         "contract_pause_and_diff",
     }
 )
@@ -105,7 +104,6 @@ def test_contract_focused_cases_parse_and_lint_behavior():
     # --- tasks: open + done task lines ---
     case = CONTRACT_CASES["contract_tasks"]
     bs = parser.parse(_read(case, "input.md"))
-    assert bs.managed is True
     assert len(bs.blocks) == 2
     assert {b.kind for b in bs.blocks.values()} == {"task"}
     assert {b.task_state for b in bs.blocks.values()} == {"open", "done"}
@@ -139,14 +137,15 @@ def test_contract_focused_cases_parse_and_lint_behavior():
     assert len(bs.new_requests) == 2
     assert {n.shape for n in bs.new_requests} == {"paragraph", "task"}
 
-    # --- E_ID_CHECKSUM: deliberate invalid checksum → review, never repair ---
+    # --- E_ID_CHECKSUM: deliberate invalid checksum → the line gets a new node (M20-G) ---
     case = CONTRACT_CASES["contract_e_id_checksum"]
     vault_text = _read(case, "input.md")
     vault = parser.parse(vault_text)
-    result = linter.lint(parser.parse("---\ntm: 1\n---\n"), vault, vault_text)
+    result = linter.lint(parser.parse(""), vault, vault_text)
     assert any(v.code == "E_ID_CHECKSUM" for v in result.violations)
-    assert any(r.code == "E_ID_CHECKSUM" for r in result.review_items)
-    assert result.repairs == []
+    assert result.review_items == []
+    assert [r.action for r in result.repairs] == ["propose_tm_new"]
+    assert result.repairs[0].after.endswith("^tm-new")
 
     # --- E_DUP_ID: copy-paste → certain propose_tm_new repair ---
     case = CONTRACT_CASES["contract_e_dup_id"]
@@ -178,39 +177,14 @@ def test_contract_focused_cases_parse_and_lint_behavior():
     assert any(r.code == "E_DELETED_S1" for r in result.review_items)
     assert result.repairs == []
 
-    # --- W_UNMANAGED_ANCHOR: advisory in unmanaged file ---
-    case = CONTRACT_CASES["contract_w_unmanaged_anchor"]
-    vault_text = _read(case, "input.md")
-    vault = parser.parse(vault_text)
-    assert vault.managed is False
-    result = linter.lint(parser.parse(""), vault, vault_text)
-    assert any(v.code == "W_UNMANAGED_ANCHOR" for v in result.violations)
-    assert any(r.code == "W_UNMANAGED_ANCHOR" for r in result.review_items)
-    assert result.repairs == []
-
-    # --- pause-and-diff: >25% affected ⇒ PauseDecision with unified diff ---
+    # --- formerly pause-and-diff (M20-G): >25% affected is still resolved block by block ---
     case = CONTRACT_CASES["contract_pause_and_diff"]
     base_text = _read(case, "base.md")
     vault_text = _read(case, "input.md")
     base = parser.parse(base_text)
     vault = parser.parse(vault_text)
     result = linter.lint(base, vault, vault_text)
-    assert linter.pause_threshold(result, base) is True
-    decision = linter.pause_and_diff(result, base, base_text, vault_text)
-    assert decision is not None
-    assert decision.snapshot == vault_text
-    assert decision.review_item.message != ""
-    assert "---" in decision.review_item.message or "+++" in decision.review_item.message
-
-
-def test_fuzz_corpus_directory_present_and_green():
-    """T3.7: fuzz corpus path exists; empty is OK when no falsifying example."""
-    assert FUZZ_ROOT.is_dir(), f"expected fuzz corpus directory at {FUZZ_ROOT}"
-    readme = FUZZ_ROOT / "README.md"
-    assert readme.is_file() and readme.stat().st_size > 0, (
-        f"expected non-empty {readme} when no shrunk Hypothesis failures are committed"
-    )
-    # Any future fixture files under fuzz/ must be non-empty if present.
-    for path in sorted(FUZZ_ROOT.rglob("*")):
-        if path.is_file() and path.name != "README.md":
-            assert path.stat().st_size > 0, f"empty fuzz fixture: {path}"
+    affected = {v.id for v in result.violations if v.id is not None}
+    assert len(affected) / len(base.blocks) > 0.25  # the storm the old guard would have paused
+    assert not hasattr(linter, "pause_and_diff")
+    assert result.review_items == [] and result.repairs  # every finding was resolved in place

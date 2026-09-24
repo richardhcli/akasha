@@ -52,9 +52,9 @@ needs to construct a ``Reconciler`` and pass its bound ``on_change`` method.
 from __future__ import annotations
 
 import bisect
+import json
 import logging
 import os
-import re
 import secrets
 import sqlite3
 import time
@@ -71,7 +71,7 @@ from akasha.contract import grammar, linter
 from akasha.contract.linter import LintResult, MaturityLookup, Repair
 from akasha.contract.parser import Block, BlockSet, NewRequest, parse
 from akasha.contract.render import render
-from akasha.kernel import commits, store
+from akasha.kernel import commits, ids, store
 from akasha.kernel.canonical import canonical_json, canonicalize_text, object_hash
 from akasha.kernel.ids import contract_anchor
 from akasha.kernel.model import Maturity
@@ -161,6 +161,7 @@ class Op(BaseModel):
     new_request: NewRequest | None = None
     parent_id: str | None = None
     mirror: bool = False
+    adopt_unknown: bool = False
 
 
 class ReconcileReviewItem(BaseModel):
@@ -496,14 +497,16 @@ def _compute_ops(
     ops: list[Op] = []
     extra_review: list[ReconcileReviewItem] = []
 
+    # Only a certain repair (anchor re-inserted) keeps the block alive. A fuzzy lost anchor was
+    # resolved as "change the ID" (M20-G): the line becomes a new node and the old id follows
+    # the ordinary delete rules, so it is NOT withheld.
     withheld_lost_anchor = {
-        item.id for item in lint_result.review_items if item.code == "E_LOST_ANCHOR" and item.id
-    } | {r.id for r in lint_result.repairs if r.code == "E_LOST_ANCHOR"}
+        r.id
+        for r in lint_result.repairs
+        if r.code == "E_LOST_ANCHOR" and r.action == "reinsert_anchor"
+    }
     withheld_deleted_s1 = {
         item.id for item in lint_result.review_items if item.code == "E_DELETED_S1" and item.id
-    }
-    withheld_checksum = {
-        item.id for item in lint_result.review_items if item.code == "E_ID_CHECKSUM" and item.id
     }
 
     b_ids = set(blocks_b.blocks)
@@ -586,21 +589,22 @@ def _compute_ops(
     for node_id in blocks_v.blocks:
         if node_id not in new_anchor_ids:
             continue
-        if node_id in withheld_checksum:
-            # Already surfaced as E_ID_CHECKSUM by linter.lint(); no
-            # duplicate reconcile-level finding.
-            continue
         vault_block = blocks_v.blocks[node_id]
+        try:
+            ids.validate(node_id)
+        except ids.IdError:
+            continue  # a checksum-invalid anchor: E_ID_CHECKSUM's repair gives that line a new node
         stage = _maturity_of(maturity, node_id)
         if stage is None:
-            extra_review.append(
-                ReconcileReviewItem(
-                    id=node_id,
-                    code="E_UNKNOWN_ANCHOR",
-                    message=(
-                        f"anchor ^tm-{node_id} does not correspond to any known node"
-                    ),
-                    line_nos=[vault_block.line_no],
+            # M20-G: a well-formed anchor the hub has never seen is ADOPTED under its own id
+            # (never re-minted, which would split every mirror after a hub reset).
+            ops.append(
+                Op(
+                    kind="created",
+                    node_id=node_id,
+                    vault_block=vault_block,
+                    parent_id=vault_block.parent_id,
+                    adopt_unknown=True,
                 )
             )
             continue
@@ -784,7 +788,7 @@ def hub_state_for(
     anchor id's line survives; that id was already reviewed as
     ``E_ID_CHECKSUM``/``E_UNKNOWN_ANCHOR`` when it first appeared vault-side
     -- ``_compute_ops`` never re-reviews a common id, so no duplicate
-    review is enqueued here). ``structure``'s ``raw_lines``/``front_matter``
+    review is enqueued here). ``structure``'s ``raw_lines``
     ride through ``model_copy`` untouched -- only ``blocks`` is ever
     substituted. No new node->path table is introduced -- membership
     derives entirely from ``structure``, which the caller builds by parsing
@@ -888,6 +892,27 @@ def kernel_apply(conn: sqlite3.Connection, op: Op, *, author: str = SYNC_AUTHOR)
     ``kernel/store.py`` function.
     """
     if op.kind == "created":
+        if op.adopt_unknown:
+            assert op.node_id is not None and op.vault_block is not None
+            vb = op.vault_block
+            node = store.create_node(
+                conn,
+                node_type="task" if vb.kind == "task" else PARAGRAPH_NODE_TYPE,
+                body=vb.text,
+                task_state=vb.task_state if vb.kind == "task" else None,
+                author=author,
+                node_id=op.node_id,
+            )
+            if vb.kind == "task" and op.parent_id is not None:
+                store.create_edge(
+                    conn,
+                    src=op.parent_id,
+                    dst=node.id,
+                    edge_type="composes",
+                    facet_binding=None,
+                    provenance="human",
+                )
+            return None
         if op.new_request is not None:
             nr = op.new_request
             node_type = "task" if nr.shape == "task" else PARAGRAPH_NODE_TYPE
@@ -1088,6 +1113,7 @@ class Reconciler:
         if self.projection is None:
             self.projection = ProjectionIndex.build(self.conn)
         self._roots_cache: list[dict[str, Any]] | None = None
+        self._pauses_checked: set[str] = set()
 
     # -- sync-root resolution ---------------------------------------------
 
@@ -1295,18 +1321,9 @@ class Reconciler:
         that were conflicted or already convergent) -- the set
         :meth:`on_change` fans out to the node's other owning files.
         """
-        root = self.resolve_sync_root(path)
+        root = self._cycle_root(path)
         if root is None:
-            logger.warning("on_change: %r matches no registered sync root; ignoring", path)
             return set()
-        sync_root_id = root["id"]
-        # build-plan T18.10b (ruling M18-B): a path the root's `.tmignore`
-        # deny-list excludes is inert -- never read, parsed or written, whoever
-        # asked (watcher, startup reconcile, rescan, hub-side reprojection, a
-        # mirror fan-out). Its `sync_files` row and base snapshot stay in place.
-        if path_is_ignored(path, root["root_path"], load_tmignore(root["root_path"], logger)):
-            return set()
-        conservative = detect_cloud_path(root["root_path"]) is not None
         assert self.projection is not None
         self.projection.refresh(self.conn)  # D13: learn files another Reconciler reconciled
 
@@ -1322,295 +1339,305 @@ class Reconciler:
         # still a real attempted cycle and must count.
         cycle_start = time.monotonic()
         try:
-            # build-plan T9.1: the vault file may be transiently locked by
-            # another process (AV scanner, editor autosave) right as its
-            # watcher event fires -- retry with backoff rather than
-            # surfacing a raw OSError for what is, on Windows, a routine
-            # sharing violation. See ``sync.watcher``'s module docstring
-            # ("Windows locking-retry / AV-noise tolerance") for the
-            # reconcile.py/watcher.py split.
-            raw = retry_with_backoff(lambda: Path(path).read_text(encoding="utf-8"))
-            vault_text = canonicalize_text(raw)
-            # build-plan T18.10c (ruling M18-B): a non-ignored file without
-            # `tm: 1` is reconciled as its in-memory ADOPTED copy; a prose-only
-            # file (nothing to project) returns here untouched -- no write, no
-            # base snapshot. The write-back below then lays down the real
-            # front matter (spec §4.7: "added on first projection").
-            adopted = adopt_unmanaged(vault_text)
-            if adopted is None:
-                return set()
-            vault_text = adopted
-            base_text = base_store.get(self.conn, sync_root_id, path)
-
-            blocks_b_skeleton = parse(base_text or "")
-            hub_blockset = hub_state_for(self.conn, blocks_b_skeleton, path=path)
-            hub_text = render(hub_blockset)
-
-            if vault_text == base_text and hub_text == base_text:
-                return set()  # quiet
-
-            if vault_text == base_text:
-                # hub-only change: project the hub onto the base skeleton.
-                self.write_if_diff(path, hub_text)
-                base_hash = base_store.put(self.conn, sync_root_id, path, hub_text)
-                self.projection.update(
-                    path, set(hub_blockset.blocks.keys()), base_hash=base_hash
-                )
-                return set()
-
-            # blocks_b_skeleton (above) already parsed this exact base_text --
-            # parse() is pure/deterministic (no DB/filesystem I/O), so a
-            # second parse of the same string is redundant work, not a
-            # different result. Reusing it matters at scale: E20's 5,000-block
-            # perf case profiled ~1.6s of a ~2.5s cycle inside parse() alone,
-            # much of it this literal duplicate call.
-            blocks_b = blocks_b_skeleton
-            blocks_v = parse(vault_text)
-
-            def maturity_lookup(node_id: str) -> Maturity | None:
-                try:
-                    return cast("Maturity", store.get_maturity(self.conn, node_id))
-                except store.NodeNotFoundError:
-                    return None
-
-            anchor_elsewhere = self._make_anchor_elsewhere(root["root_path"], path)
-
-            outcome = diff_blocks(
-                blocks_b,
-                blocks_v,
-                base_text=base_text or "",
-                vault_text=vault_text,
-                maturity=maturity_lookup,
-                projection=self.projection,
-                current_path=path,
-                anchor_elsewhere=anchor_elsewhere,
-            )
-
-            decision = linter.pause_and_diff(outcome.lint, blocks_b, base_text or "", vault_text)
-            if decision is not None:
-                store.enqueue_review(
-                    self.conn,
-                    None,
-                    "violation",
-                    cause_ref=canonical_json(
-                        {
-                            "path": path,
-                            "pause": True,
-                            "diff": decision.review_item.message,
-                            "snapshot": decision.snapshot,
-                        }
-                    ).decode(),
-                )
-                return set()  # zero writes, zero base_store.put
-
-            if conservative and outcome.lint.repairs:
-                # design note (T5.4, fable-reviewed, human-decided 2026-07-12):
-                # a conservative sync root (cloud-synced path, T5.3) never
-                # applies certain-repairs silently -- route them to review
-                # instead, one documented boolean branch. Ops are recomputed
-                # against the RAW (unrepaired) vault blocks.
-                #
-                # design note (T9.2c): these repairs were routed to review,
-                # not applied -- metrics.record_auto_repair must NOT fire
-                # here, only in the else branch below where a repair was
-                # actually, silently applied.
-                for repair in outcome.lint.repairs:
-                    store.enqueue_review(
-                        self.conn,
-                        repair.id,
-                        "violation",
-                        cause_ref=canonical_json(
-                            {
-                                "path": path,
-                                "code": repair.code,
-                                "action": repair.action,
-                                "line_no": repair.line_no,
-                                "before": repair.before,
-                                "after": repair.after,
-                            }
-                        ).decode(),
-                    )
-                ops, extra_review = _compute_ops(
-                    blocks_b,
-                    blocks_v,
-                    maturity=maturity_lookup,
-                    projection=self.projection,
-                    current_path=path,
-                    lint_result=outcome.lint,
-                    anchor_elsewhere=anchor_elsewhere,
-                )
-                repaired_text = vault_text
-            else:
-                ops = outcome.ops
-                extra_review = outcome.extra_review_items
-                repaired_text = outcome.repaired_text
-                # design note (T9.2c): ``repaired_text`` above is
-                # ``outcome.repaired_text`` == ``apply_repairs(vault_text,
-                # outcome.lint.repairs)`` (see ``diff_blocks``) -- every
-                # item in ``outcome.lint.repairs`` was just silently
-                # applied to the vault text that will be written back this
-                # cycle, so each one is exactly one real §4.7 certain-repair
-                # application. Empty when there is nothing to repair (or
-                # under a conservative root, since that case takes the
-                # ``if`` branch above instead) -- never double-counted.
-                for repair in outcome.lint.repairs:
-                    metrics.record_auto_repair(repair.code)
-
-            for item in outcome.lint.review_items:
-                store.enqueue_review(
-                    self.conn,
-                    item.id,
-                    "violation",
-                    cause_ref=canonical_json(
-                        {
-                            "path": path,
-                            "code": item.code,
-                            "line_nos": item.line_nos,
-                            "message": item.message,
-                        }
-                    ).decode(),
-                )
-            for extra in extra_review:
-                store.enqueue_review(
-                    self.conn,
-                    extra.id,
-                    "violation",
-                    cause_ref=canonical_json(
-                        {
-                            "path": path,
-                            "code": extra.code,
-                            "line_nos": extra.line_nos,
-                            "message": extra.message,
-                        }
-                    ).decode(),
-                )
-
-            # Precompute hub_changed_since ONCE per node id, using the store
-            # state as it stood BEFORE this cycle applies anything -- reused
-            # by every op targeting that id (e.g. a co-occurring modified +
-            # reparented pair) so an earlier op's own write within this same
-            # loop never contaminates a later op's conflict verdict.
-            hub_changed_map: dict[str, bool | None] = {}
-            for op in ops:
-                if op.kind == "created" or op.node_id is None or op.base_block is None:
-                    continue
-                if op.node_id in hub_changed_map:
-                    continue
-                try:
-                    hub_changed_map[op.node_id] = hub_changed_since(
-                        self.conn, op.base_block, op.node_id
-                    )
-                except store.NodeNotFoundError:
-                    hub_changed_map[op.node_id] = None
-
-            committed: set[str] = set()
-            vault_lines = repaired_text.split("\n")
-            for op in ops:
-                if op.kind == "created":
-                    if op.mirror:
-                        # T19.4 / M19-C: this file JOINS a node another file
-                        # already shows. The hub wins -- never commit the
-                        # joining text. Identical text is a quiet no-op;
-                        # differing text is preserved as a conflict branch
-                        # + one review (nothing lost, nothing guessed), and
-                        # the write-back below rewrites this line to the
-                        # hub's text.
-                        assert op.node_id is not None and op.vault_block is not None
-                        try:
-                            joins_cleanly = _vault_matches_hub(
-                                self.conn, op.node_id, op.vault_block
-                            )
-                        except store.NodeNotFoundError:
-                            continue
-                        if not joins_cleanly:
-                            self.conflict_handler(self.conn, op, path)
-                        continue
-                    new_id = kernel_apply(self.conn, op, author=SYNC_AUTHOR)
-                    if op.new_request is not None and new_id is not None:
-                        idx = op.new_request.line_no - 1
-                        if 0 <= idx < len(vault_lines):
-                            vault_lines[idx] = _render_new_line(op.new_request, new_id)
-                    elif op.node_id is not None:
-                        # cross-file adopt (a move): may have committed the
-                        # vault's text/state to the hub head.
-                        committed.add(op.node_id)
-                    continue
-
-                assert op.node_id is not None
-                changed = hub_changed_map.get(op.node_id)
-                if changed is None:
-                    # Node vanished from the hub entirely before we got to
-                    # it this cycle -- nothing left to reconcile against.
-                    continue
-                if not changed:
-                    kernel_apply(self.conn, op, author=SYNC_AUTHOR)
-                    if op.kind in ("modified", "checkbox_toggled"):
-                        committed.add(op.node_id)
-                    continue
-                vault_matches = op.vault_block is not None and _vault_matches_hub(
-                    self.conn, op.node_id, op.vault_block
-                )
-                if vault_matches:
-                    continue  # convergent no-op: both sides already agree
-                self.conflict_handler(self.conn, op, path)
-
-            vault_final_text = canonicalize_text("\n".join(vault_lines))
-            final_blocks = parse(vault_final_text)
-            hub2_blockset = hub_state_for(self.conn, final_blocks, path=path)
-            hub2_text = render(hub2_blockset)
-
-            self.write_if_diff(path, hub2_text)
-            # base_store.put unconditionally -- agreement may be new even if
-            # the bytes happen to be unchanged (spec §4.8 point 6).
-            base_hash = base_store.put(self.conn, sync_root_id, path, hub2_text)
-            self.projection.update(
-                path, set(hub2_blockset.blocks.keys()), base_hash=base_hash
-            )
-            return committed
+            return self._run_cycle(path, root)
         finally:
             metrics.record_sync_cycle_ms((time.monotonic() - cycle_start) * 1000.0)
 
+    # -- the cycle's stages (T20.2: named, so each later change touches one) ----------
 
-# --- default adoption of unmanaged Markdown (build-plan T18.10c, ruling M18-B) ---
+    def _cycle_root(self, path: str) -> dict[str, Any] | None:
+        """The sync root ``path`` belongs to, or ``None`` when the cycle must be inert."""
+        root = self.resolve_sync_root(path)
+        if root is None:
+            logger.warning("on_change: %r matches no registered sync root; ignoring", path)
+            return None
+        # build-plan T18.10b (ruling M18-B): a path the root's `.tmignore`
+        # deny-list excludes is inert -- never read, parsed or written, whoever
+        # asked (watcher, startup reconcile, rescan, hub-side reprojection, a
+        # mirror fan-out). Its `sync_files` row and base snapshot stay in place.
+        if path_is_ignored(path, root["root_path"], load_tmignore(root["root_path"], logger)):
+            return None
+        return root
 
-_ANY_TM_KEY_RE = re.compile(r"^tm\s*:")
+    def _read_vault_text(self, path: str) -> str:
+        """The file's canonical text."""
+        # build-plan T9.1: the vault file may be transiently locked by
+        # another process (AV scanner, editor autosave) right as its
+        # watcher event fires -- retry with backoff rather than
+        # surfacing a raw OSError for what is, on Windows, a routine
+        # sharing violation. See ``sync.watcher``'s module docstring
+        # ("Windows locking-retry / AV-noise tolerance") for the
+        # reconcile.py/watcher.py split.
+        raw = retry_with_backoff(lambda: Path(path).read_text(encoding="utf-8"))
+        return canonicalize_text(raw)
 
+    def _node_maturity(self, node_id: str) -> Maturity | None:
+        try:
+            return cast("Maturity", store.get_maturity(self.conn, node_id))
+        except store.NodeNotFoundError:
+            return None
 
-def adopt_unmanaged(vault_text: str) -> str | None:
-    """The in-memory ADOPTED copy of an unmanaged file, or ``None`` if nothing to adopt.
+    def _record_agreement(
+        self, path: str, sync_root_id: str, text: str, blockset: BlockSet
+    ) -> None:
+        """Write ``text`` to the file (if it differs) and record it as the new agreed base."""
+        assert self.projection is not None
+        self.write_if_diff(path, text)
+        # base_store.put unconditionally -- agreement may be new even if
+        # the bytes happen to be unchanged (spec §4.8 point 6).
+        base_hash = base_store.put(self.conn, sync_root_id, path, text)
+        self.projection.update(path, set(blockset.blocks.keys()), base_hash=base_hash)
 
-    Ruling M18-B: every non-ignored Markdown file under a sync root is tracked by
-    default, so a file with no ``tm: 1`` front matter is parsed as if it had it.
-    Nothing is written to the file here or by the caller unless the adopted copy
-    holds at least one contract construct (an anchored block, a ``^tm-new``, an
-    embed or a ref); a prose-only file (foreign ``^abc123`` block ids included)
-    yields ``None`` and stays byte-identical on disk. The real front matter is
-    written by the first cycle that has something to project (spec §4.7).
+    def _run_cycle(self, path: str, root: dict[str, Any]) -> set[str]:
+        sync_root_id = root["id"]
+        assert self.projection is not None
+        self._dismiss_stale_pauses(path)
+        vault_text = self._read_vault_text(path)
+        base_text = base_store.get(self.conn, sync_root_id, path)
 
-    An existing front-matter block that lacks a ``tm:`` key gets ``tm: 1``
-    INJECTED as a key inside it (Obsidian keeps ``title:``/``tags:`` there; a
-    second block would corrupt them). A file that already has any ``tm:`` key
-    (say a future ``tm: 2``) or an unterminated ``---`` opener is never adopted:
-    the parser's narrowest reading of those stands. Returns ``vault_text``
-    unchanged for an already-managed file.
-    """
-    if parse(vault_text).managed:
-        return vault_text
-    lines = vault_text.split("\n")
-    if lines and lines[0].strip() == "---":
-        close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
-        if close is None:
-            return None  # unterminated opener: not a well-formed front-matter block
-        if any(_ANY_TM_KEY_RE.match(line) for line in lines[1:close]):
-            return None  # a `tm:` key with another value: never overridden
-        adopted_lines = [*lines[:close], f"tm: {grammar.CONTRACT_VERSION}", *lines[close:]]
-    else:
-        adopted_lines = ["---", f"tm: {grammar.CONTRACT_VERSION}", "---", *lines]
-    adopted = "\n".join(adopted_lines)
-    blocks = parse(adopted)
-    if not (blocks.blocks or blocks.new_requests or blocks.embeds or blocks.refs):
-        return None
-    return adopted
+        blocks_b = parse(base_text or "")
+        blocks_v = blocks_b if vault_text == base_text else parse(vault_text)
+        if not (blocks_b.has_constructs() or blocks_v.has_constructs()):
+            return set()  # prose only (M20-C): never written, never tracked
+        hub_blockset = hub_state_for(self.conn, blocks_b, path=path)
+        hub_text = render(hub_blockset)
+
+        if vault_text == base_text:
+            if hub_text != base_text:
+                # hub-only change: project the hub onto the base skeleton.
+                self._record_agreement(path, sync_root_id, hub_text, hub_blockset)
+            return set()  # else quiet
+
+        # blocks_b/blocks_v (above) each parse their text once -- parse() is
+        # pure/deterministic, so re-parsing is redundant work. It matters at scale:
+        # E20's 5,000-block perf case profiled ~1.6s of a ~2.5s cycle inside parse().
+        anchor_elsewhere = self._make_anchor_elsewhere(root["root_path"], path)
+        outcome = diff_blocks(
+            blocks_b,
+            blocks_v,
+            base_text=base_text or "",
+            vault_text=vault_text,
+            maturity=self._node_maturity,
+            projection=self.projection,
+            current_path=path,
+            anchor_elsewhere=anchor_elsewhere,
+        )
+
+        conservative = detect_cloud_path(root["root_path"]) is not None
+        ops, extra_review, repaired_text = self._resolve_repairs(
+            path,
+            outcome,
+            blocks_b,
+            blocks_v,
+            anchor_elsewhere,
+            vault_text,
+            conservative=conservative,
+        )
+        self._enqueue_findings(path, outcome, extra_review)
+        committed, vault_lines = self._apply_ops(path, ops, repaired_text)
+
+        final_blocks = parse(canonicalize_text("\n".join(vault_lines)))
+        hub2_blockset = hub_state_for(self.conn, final_blocks, path=path)
+        self._record_agreement(path, sync_root_id, render(hub2_blockset), hub2_blockset)
+        return committed
+
+    def _dismiss_stale_pauses(self, path: str) -> None:
+        """Dismiss ``path``'s open pause reviews left by versions that could pause a file.
+
+        M20-G: a file is never paused any more, so any pause review still open for it is stale
+        the moment the file is cycled again.
+        """
+        if path in self._pauses_checked:
+            return  # nothing can create a pause any more, so one look per path is enough
+        self._pauses_checked.add(path)
+        for review in store.find_open_reviews(self.conn, cause_kind="violation"):
+            try:
+                ref: Any = json.loads(review["cause_ref"] or "{}")
+            except ValueError:
+                continue
+            if isinstance(ref, dict) and ref.get("pause") is True and ref.get("path") == path:  # pyright: ignore[reportUnknownMemberType]
+                store.resolve_review(self.conn, review["id"], "dismissed")
+
+    def _resolve_repairs(
+        self,
+        path: str,
+        outcome: DiffOutcome,
+        blocks_b: BlockSet,
+        blocks_v: BlockSet,
+        anchor_elsewhere: Callable[[str], str | None],
+        vault_text: str,
+        *,
+        conservative: bool,
+    ) -> tuple[list[Op], list[ReconcileReviewItem], str]:
+        """Apply (or, on a conservative root, review) the certain repairs; return the ops to run."""
+        if not (conservative and outcome.lint.repairs):
+            # design note (T9.2c): ``outcome.repaired_text`` ==
+            # ``apply_repairs(vault_text, outcome.lint.repairs)`` (see
+            # ``diff_blocks``) -- every item in ``outcome.lint.repairs`` is
+            # silently applied to the vault text that will be written back
+            # this cycle, so each one is exactly one real §4.7 certain-repair
+            # application. Empty when there is nothing to repair -- never
+            # double-counted.
+            for repair in outcome.lint.repairs:
+                metrics.record_auto_repair(repair.code)
+            return outcome.ops, outcome.extra_review_items, outcome.repaired_text
+        # design note (T5.4, fable-reviewed, human-decided 2026-07-12):
+        # a conservative sync root (cloud-synced path, T5.3) never
+        # applies certain-repairs silently -- route them to review
+        # instead, one documented boolean branch. Ops are recomputed
+        # against the RAW (unrepaired) vault blocks.
+        #
+        # design note (T9.2c): these repairs were routed to review,
+        # not applied -- metrics.record_auto_repair must NOT fire here.
+        for repair in outcome.lint.repairs:
+            store.enqueue_review(
+                self.conn,
+                repair.id,
+                "violation",
+                cause_ref=canonical_json(
+                    {
+                        "path": path,
+                        "code": repair.code,
+                        "action": repair.action,
+                        "line_no": repair.line_no,
+                        "before": repair.before,
+                        "after": repair.after,
+                    }
+                ).decode(),
+            )
+        assert self.projection is not None
+        ops, extra_review = _compute_ops(
+            blocks_b,
+            blocks_v,
+            maturity=self._node_maturity,
+            projection=self.projection,
+            current_path=path,
+            lint_result=outcome.lint,
+            anchor_elsewhere=anchor_elsewhere,
+        )
+        return ops, extra_review, vault_text
+
+    def _enqueue_findings(
+        self, path: str, outcome: DiffOutcome, extra_review: list[ReconcileReviewItem]
+    ) -> None:
+        """Queue every lint review item and every reconcile-level finding for a human."""
+        for item in outcome.lint.review_items:
+            store.enqueue_review(
+                self.conn,
+                item.id,
+                "violation",
+                cause_ref=canonical_json(
+                    {
+                        "path": path,
+                        "code": item.code,
+                        "line_nos": item.line_nos,
+                        "message": item.message,
+                    }
+                ).decode(),
+            )
+        for extra in extra_review:
+            store.enqueue_review(
+                self.conn,
+                extra.id,
+                "violation",
+                cause_ref=canonical_json(
+                    {
+                        "path": path,
+                        "code": extra.code,
+                        "line_nos": extra.line_nos,
+                        "message": extra.message,
+                    }
+                ).decode(),
+            )
+
+    def _apply_ops(
+        self, path: str, ops: list[Op], repaired_text: str
+    ) -> tuple[set[str], list[str]]:
+        """Apply ``ops`` through the store; return (committed node ids, the vault's lines).
+
+        The returned lines are ``repaired_text`` with each minted ``^tm-new`` request rewritten
+        to its real anchor; the caller projects the hub onto them.
+        """
+        # Precompute hub_changed_since ONCE per node id, using the store
+        # state as it stood BEFORE this cycle applies anything -- reused
+        # by every op targeting that id (e.g. a co-occurring modified +
+        # reparented pair) so an earlier op's own write within this same
+        # loop never contaminates a later op's conflict verdict.
+        hub_changed_map: dict[str, bool | None] = {}
+        for op in ops:
+            if op.kind == "created" or op.node_id is None or op.base_block is None:
+                continue
+            if op.node_id in hub_changed_map:
+                continue
+            try:
+                hub_changed_map[op.node_id] = hub_changed_since(
+                    self.conn, op.base_block, op.node_id
+                )
+            except store.NodeNotFoundError:
+                hub_changed_map[op.node_id] = None
+
+        committed: set[str] = set()
+        vault_lines = repaired_text.split("\n")
+        for op in ops:
+            if op.kind == "created":
+                self._apply_created(op, path, vault_lines, committed)
+            else:
+                self._apply_existing(op, path, hub_changed_map, committed)
+        return committed, vault_lines
+
+    def _apply_created(
+        self, op: Op, path: str, vault_lines: list[str], committed: set[str]
+    ) -> None:
+        if op.mirror:
+            # T19.4 / M19-C: this file JOINS a node another file
+            # already shows. The hub wins -- never commit the
+            # joining text. Identical text is a quiet no-op;
+            # differing text is preserved as a conflict branch
+            # + one review (nothing lost, nothing guessed), and
+            # the write-back below rewrites this line to the
+            # hub's text.
+            assert op.node_id is not None and op.vault_block is not None
+            try:
+                joins_cleanly = _vault_matches_hub(self.conn, op.node_id, op.vault_block)
+            except store.NodeNotFoundError:
+                return
+            if not joins_cleanly:
+                self.conflict_handler(self.conn, op, path)
+            return
+        new_id = kernel_apply(self.conn, op, author=SYNC_AUTHOR)
+        if op.new_request is not None and new_id is not None:
+            idx = op.new_request.line_no - 1
+            if 0 <= idx < len(vault_lines):
+                vault_lines[idx] = _render_new_line(op.new_request, new_id)
+        elif op.node_id is not None:
+            # cross-file adopt (a move): may have committed the
+            # vault's text/state to the hub head.
+            committed.add(op.node_id)
+
+    def _apply_existing(
+        self,
+        op: Op,
+        path: str,
+        hub_changed_map: dict[str, bool | None],
+        committed: set[str],
+    ) -> None:
+        assert op.node_id is not None
+        changed = hub_changed_map.get(op.node_id)
+        if changed is None:
+            # Node vanished from the hub entirely before we got to
+            # it this cycle -- nothing left to reconcile against.
+            return
+        if not changed:
+            kernel_apply(self.conn, op, author=SYNC_AUTHOR)
+            if op.kind in ("modified", "checkbox_toggled"):
+                committed.add(op.node_id)
+            return
+        vault_matches = op.vault_block is not None and _vault_matches_hub(
+            self.conn, op.node_id, op.vault_block
+        )
+        if vault_matches:
+            return  # convergent no-op: both sides already agree
+        self.conflict_handler(self.conn, op, path)
 
 
 # --- filesystem discovery for newly registered sync roots (task T11.3) -------

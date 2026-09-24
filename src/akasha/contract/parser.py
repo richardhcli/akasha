@@ -5,11 +5,10 @@ block/task structure described by the contract grammar v1
 (``akasha.contract.grammar``). It is line-oriented and reuses every
 token/regex from ``grammar.py`` verbatim — no pattern is redefined here.
 
-File-level rule (spec §4.7): a file is only "managed" if its YAML front
-matter contains a `tm: <version>` line matching ``grammar.CONTRACT_VERSION``.
-Files without that marker are "never parsed for management" — ``parse()``
-returns an empty, ``managed=False`` :class:`BlockSet` for them rather than
-raising.
+File-level rule (spec §4.7, M20-C): there is no file marker. Every file is
+parsed; one with no contract construct yields an empty :class:`BlockSet`. An
+initial YAML front-matter block is **never interpreted**: its lines pass
+through as raw lines (see :func:`front_matter_end`).
 
 Text handling: this module does **not** normalize/canonicalize text (that is
 ``kernel/canonical.py``'s job, spec §4.3) — it simply splits the input on
@@ -89,64 +88,55 @@ class NewRequest(BaseModel):
 
 
 class BlockSet(BaseModel):
-    """Parsed structure of one managed file (spec §4.7).
+    """Parsed structure of one file (spec §4.7).
 
     ``blocks`` is keyed by anchor id and holds both paragraph and task
     blocks in a single namespace (ids are globally unique per sync root
     regardless of block kind); iteration order follows insertion order,
     which mirrors document order since ``parse()`` walks top-to-bottom.
 
-    Lossless-container fields (task T5.8-2, human-decided 2026-07-13,
-    fable-designed): a managed file is a lossless container -- lines that
-    are not contract constructs (prose, blanks, fenced examples, unknown/
-    malformed anchors, an un-minted ``^tm-new`` line) survive write-back
+    Lossless-container field (task T5.8-2, fable-designed): a file is a
+    lossless container -- lines that are not contract constructs (prose,
+    blanks, fenced examples, unknown/malformed anchors, an un-minted
+    ``^tm-new`` line, and an initial front-matter block) survive write-back
     verbatim by position. ``raw_lines`` holds those verbatim lines,
-    1-indexed by source ``line_no`` (mirrors ``Block.line_no``'s
-    convention). ``front_matter`` holds the file's verbatim front-matter
-    lines (including both ``"---"`` delimiters) ONLY when they differ from
-    the canonical 3-line ``["---", "tm: <version>", "---"]`` form (e.g. an
-    extra ``title:``/``tags:`` key); ``None`` means "canonical, derive it
-    from ``contract_version``/``grammar.CONTRACT_VERSION`` at render time".
-    Both fields are additive -- every pre-existing ``BlockSet(...)``
-    construction remains valid with their defaults (``{}``/``None``).
+    1-indexed by source ``line_no`` (mirrors ``Block.line_no``'s convention).
     """
 
-    managed: bool
-    contract_version: int | None = None
     blocks: dict[str, Block] = {}
     embeds: list[Embed] = []
     refs: list[Ref] = []
     new_requests: list[NewRequest] = []
     raw_lines: dict[int, str] = {}
-    front_matter: list[str] | None = None
+
+    def has_constructs(self) -> bool:
+        """True iff the file holds anything to project (a block, ``^tm-new``, embed or ref)."""
+        return bool(self.blocks or self.new_requests or self.embeds or self.refs)
 
 
 # --- front matter ------------------------------------------------------------
 
 
-def _front_matter_bounds(lines: list[str]) -> tuple[list[str], int]:
-    """Return ``(front_matter_lines, body_start_index)``.
+def front_matter_end(lines: list[str]) -> int:
+    """Index of the first line after an initial front-matter block, or ``0`` if there is none.
 
-    ``body_start_index`` is the index into ``lines`` of the first line after
-    the closing ``---`` delimiter. If there is no well-formed front-matter
-    block (opening and closing ``---`` delimiter lines), returns
-    ``([], 0)`` — the whole file is then treated as file body with no
-    front matter, which makes it unmanaged (no `tm:` key found).
+    A front-matter block is an opening ``---`` on the first line and a closing ``---``
+    later, **containing no contract construct** (no end-of-line anchor and no ``^tm-new``):
+    a thematic break at the top of a note that happens to be followed by another one must
+    not swallow real blocks. The daemon never interprets or edits these lines (M20-C).
     """
     if not lines or lines[0].strip() != "---":
-        return [], 0
+        return 0
     for i in range(1, len(lines)):
         if lines[i].strip() == "---":
-            return lines[1:i], i + 1
-    return [], 0
-
-
-def _contract_version(front_matter_lines: list[str]) -> int | None:
-    for line in front_matter_lines:
-        m = grammar.FRONT_MATTER_TM_RE.match(line)
-        if m:
-            return int(m.group("version"))
-    return None
+            inner = lines[1:i]
+            if any(
+                grammar.ANCHOR_EOL_RE.search(x) or grammar.NEW_MARKER_EOL_RE.search(x)
+                for x in inner
+            ):
+                return 0
+            return i + 1
+    return 0
 
 
 # --- parent/child stack --------------------------------------------------------
@@ -167,51 +157,31 @@ def _parent_for_depth(stack: list[tuple[int, str]], depth: int) -> str | None:
 
 
 def parse(text: str) -> BlockSet:
-    """Parse managed-file text into a :class:`BlockSet` (spec §4.7).
+    """Parse file text into a :class:`BlockSet` (spec §4.7).
 
-    ``text`` is split on ``"\\n"``; no canonicalization is performed here.
-    Files lacking a front-matter `tm: <version>` line matching
-    ``grammar.CONTRACT_VERSION`` are unmanaged: returns an empty (except for
-    ``raw_lines``, see below) ``BlockSet(managed=False)`` rather than
-    raising.
+    ``text`` is split on ``"\\n"``; no canonicalization is performed here. There is no
+    file marker (M20-C): every file is parsed, and a file with no contract construct
+    yields a :class:`BlockSet` with no blocks (``has_constructs()`` is false).
 
-    Lossless-container classification (task T5.8-2, human-decided
-    2026-07-13, fable-designed): every source line is either a recognized
-    contract construct (a ``Block``, a standalone ``Embed``/``Ref`` token,
-    or a ``^tm-new`` :class:`NewRequest`) or a verbatim ``raw_lines`` entry
-    -- never silently dropped. The one exception is the single trailing
-    ``""`` artifact ``str.split("\\n")`` produces when ``text`` ends with a
-    newline (or is itself ``""``): that element is not a logical line and
-    is never captured, which keeps ``render(parse(D)) == D`` exact for
-    already-canonical (single-trailing-newline) ``D``.
+    Lossless-container classification (task T5.8-2, fable-designed): every source
+    line is either a recognized contract construct (a ``Block``, a standalone
+    ``Embed``/``Ref`` token, or a ``^tm-new`` :class:`NewRequest`) or a verbatim
+    ``raw_lines`` entry -- never silently dropped. An initial front-matter block is
+    all raw lines. The one exception is the single trailing ``""`` artifact
+    ``str.split("\\n")`` produces when ``text`` ends with a newline (or is itself
+    ``""``): that element is not a logical line and is never captured, which keeps
+    ``render(parse(D)) == D`` exact for already-canonical (single-trailing-newline) ``D``.
     """
     raw_split = text.split("\n")
     lines = raw_split[:-1] if raw_split and raw_split[-1] == "" else raw_split
 
-    front_matter_lines, body_start = _front_matter_bounds(lines)
-    version = _contract_version(front_matter_lines)
-
-    # SPEC-QUESTION (narrowest reading, see docs/spec-questions.md T3.2
-    # entry): spec §4.7 says "front-matter key `tm: 1` marks a managed
-    # file" without specifying behavior for a `tm:` value that does not
-    # match CONTRACT_VERSION (e.g. a future contract version). Narrowest
-    # reading: only an exact match to CONTRACT_VERSION counts as managed;
-    # anything else (including a present-but-mismatched `tm:` key) is
-    # treated as unmanaged rather than guessing at a migration path.
-    if version != grammar.CONTRACT_VERSION:
-        return BlockSet(managed=False, raw_lines=dict(enumerate(lines, start=1)))
-
-    canonical_front_matter = ["---", f"tm: {version}", "---"]
-    front_matter_verbatim = lines[0:body_start]
-    front_matter: list[str] | None = (
-        None if front_matter_verbatim == canonical_front_matter else front_matter_verbatim
-    )
+    body_start = front_matter_end(lines)
 
     blocks: dict[str, Block] = {}
     embeds: list[Embed] = []
     refs: list[Ref] = []
     new_requests: list[NewRequest] = []
-    raw_lines: dict[int, str] = {}
+    raw_lines: dict[int, str] = dict(enumerate(lines[:body_start], start=1))
     task_stack: list[tuple[int, str]] = []
     in_fence = False
 
@@ -315,12 +285,9 @@ def parse(text: str) -> BlockSet:
             refs.append(Ref(path=rf.group("path"), id=rf.group("id"), line_no=line_no))
 
     return BlockSet(
-        managed=True,
-        contract_version=version,
         blocks=blocks,
         embeds=embeds,
         refs=refs,
         new_requests=new_requests,
         raw_lines=raw_lines,
-        front_matter=front_matter,
     )

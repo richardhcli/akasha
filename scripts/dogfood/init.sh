@@ -38,10 +38,6 @@ EOF
 # later deliberate mutation can't accidentally fuzzy-match onto a survivor
 # via E_LOST_ANCHOR's >=0.9 similarity repair path.
 cat > "$SCRATCH/vault-1/note1.md" <<'EOF'
----
-tm: 1
----
-
 Synthetic verification block about weather patterns in coastal regions. ^tm-new
 Synthetic verification block about the history of mechanical clocks. ^tm-new
 Synthetic verification block about sourdough bread fermentation times. ^tm-new

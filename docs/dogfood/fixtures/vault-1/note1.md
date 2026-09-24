@@ -1,7 +1,3 @@
----
-tm: 1
----
-
 Synthetic verification block about weather patterns in coastal regions. ^tm-new
 Synthetic verification block about the history of mechanical clocks. ^tm-new
 Synthetic verification block about sourdough bread fermentation times. ^tm-new

@@ -1,0 +1,8 @@
+[
+  {"id": "aoy5shqm", "node_type": "claim", "body": "alpha", "task_state": null},
+  {"id": "6ok5rvrw", "node_type": "claim", "body": "beta plans for the second quarter", "task_state": null},
+  {"id": "5ec7y5bu", "node_type": "claim", "body": "Important claim", "task_state": null, "vetted": true},
+  {"id": "e23orizv", "node_type": "claim", "body": "padding 0", "task_state": null},
+  {"id": "dtz43zyj", "node_type": "claim", "body": "gamma", "task_state": null},
+  {"id": "e5yntips", "node_type": "claim", "body": "delta untouched", "task_state": null}
+]

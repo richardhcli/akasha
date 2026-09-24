@@ -60,7 +60,6 @@ EXPECTED_TABLE_COLUMNS = {
         "path",
         "sync_root_id",
         "base_hash",
-        "contract_version",
         "last_synced_at",
     ],
     "tokens": [

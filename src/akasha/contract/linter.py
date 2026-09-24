@@ -5,36 +5,37 @@ Pure functions only — no DB or filesystem I/O. Callers pass already-parsed
 maturity lookup (callable or mapping). Repairs are structured, undoable
 records; this module never mutates files.
 
-Violation codes (spec §4.7):
+Violation codes (spec §4.7, resolution per M20-G: a file is never paused; every finding
+is resolved on the spot -- repaired, or the line gets a new node -- and only a deleted
+S1+ node needs a human):
 
-* ``E_ID_CHECKSUM`` — EOL anchor whose id fails ``kernel.ids.validate``
-* ``E_DUP_ID`` — same anchor id appears 2+ times in one file / BlockSet
-* ``E_LOST_ANCHOR`` — base block text found in vault (fuzzy ≥ 0.9) without
-  an anchor
-* ``E_DELETED_S1`` — base block gone from vault (no fuzzy match) and
-  maturity is S1+
-* ``W_UNMANAGED_ANCHOR`` — advisory: ``ANCHOR_RE`` hit in an unmanaged file
+* ``E_ID_CHECKSUM`` — EOL anchor whose id fails ``kernel.ids.validate`` → the line's
+  anchor is replaced by ``^tm-new`` (a new node)
+* ``E_DUP_ID`` — same anchor id appears 2+ times in one file / BlockSet → the copy
+  byte-identical to base (else the first copy) keeps the id; every other copy is
+  replaced by ``^tm-new``
+* ``E_LOST_ANCHOR`` — base block text found in vault (fuzzy ≥ 0.9) without an anchor →
+  byte-identical except the anchor: re-insert it; otherwise the line becomes a new node
+  (``^tm-new`` appended) and the old node follows the ordinary delete rules
+* ``E_DELETED_S1`` — base block gone from vault (or replaced by a new node) and maturity
+  is S1+ → the only review item; nothing is deleted
 
-Certain auto-repairs only (everything else → review item, never a guess):
-
-1. ``E_LOST_ANCHOR`` where vault line body is byte-identical to the base
-   block body except the missing anchor → re-insert anchor.
-2. ``E_DUP_ID`` where at least one duplicate copy is byte-identical to its
-   base line → that copy keeps the id; every other copy is proposed for
-   ``^tm-new`` minting.
+Every repair is structured and undoable (``before``/``after`` per line); this module never
+mutates files. PRD F13 forbids re-attaching a damaged line to its old node by similarity,
+so "changing the ID" -- a new node -- is the fallback wherever identity is ambiguous.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from difflib import SequenceMatcher, unified_diff
+from difflib import SequenceMatcher
 from typing import Literal
 
 from pydantic import BaseModel
 
 from akasha.contract import grammar
-from akasha.contract.parser import Block, BlockSet
+from akasha.contract.parser import Block, BlockSet, front_matter_end
 from akasha.kernel import ids
 from akasha.kernel.ids import contract_anchor
 from akasha.kernel.model import Maturity
@@ -46,7 +47,6 @@ ViolationCode = Literal[
     "E_DUP_ID",
     "E_LOST_ANCHOR",
     "E_DELETED_S1",
-    "W_UNMANAGED_ANCHOR",
 ]
 
 RepairAction = Literal["reinsert_anchor", "propose_tm_new"]
@@ -83,7 +83,7 @@ class Repair(BaseModel):
     this record carries enough to reverse the edit (``before``).
     """
 
-    code: Literal["E_LOST_ANCHOR", "E_DUP_ID"]
+    code: Literal["E_LOST_ANCHOR", "E_DUP_ID", "E_ID_CHECKSUM"]
     action: RepairAction
     id: str
     line_no: int
@@ -149,28 +149,13 @@ def _comparable_text(line: str) -> str:
     return line.strip()
 
 
-def _strip_front_matter(lines: list[str]) -> tuple[int, list[tuple[int, str]]]:
-    """Return ``(body_start_index, [(line_no, line), ...])`` for the file body.
-
-    ``line_no`` is 1-indexed into the original ``lines`` list (same convention
-    as :mod:`akasha.contract.parser`).
-    """
-    if not lines or lines[0].strip() != "---":
-        return 0, [(i + 1, lines[i]) for i in range(len(lines))]
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            body_start = i + 1
-            return body_start, [(j + 1, lines[j]) for j in range(body_start, len(lines))]
-    return 0, [(i + 1, lines[i]) for i in range(len(lines))]
-
-
 def _iter_non_fence_lines(text: str) -> list[tuple[int, str]]:
     """Body lines outside fenced code blocks (spec §4.7: fences ignored)."""
     lines = text.split("\n")
-    _, body = _strip_front_matter(lines)
+    body_start = front_matter_end(lines)
     out: list[tuple[int, str]] = []
     in_fence = False
-    for line_no, line in body:
+    for line_no, line in ((j + 1, lines[j]) for j in range(body_start, len(lines))):
         if grammar.FENCE_RE.match(line):
             in_fence = not in_fence
             continue
@@ -189,26 +174,21 @@ def _eol_anchor_id(line: str) -> str | None:
 # --- detectors ----------------------------------------------------------------
 
 
-def _detect_unmanaged_anchors(vault_text: str) -> list[tuple[Violation, ReviewItem]]:
-    findings: list[tuple[Violation, ReviewItem]] = []
-    for line_no, line in _iter_non_fence_lines(vault_text):
-        for m in grammar.ANCHOR_RE.finditer(line):
-            id_ = m.group("id")
-            msg = (
-                f"anchor ^tm-{id_} found in unmanaged file "
-                f"(no matching tm: {grammar.CONTRACT_VERSION} front matter)"
-            )
-            v = Violation(code="W_UNMANAGED_ANCHOR", id=id_, line_nos=[line_no], message=msg)
-            r = ReviewItem(code="W_UNMANAGED_ANCHOR", id=id_, line_nos=[line_no], message=msg)
-            findings.append((v, r))
-    return findings
+def _line_with_new_marker(line: str, anchor: str) -> str | None:
+    """``line`` with its trailing ``anchor`` replaced by ``^tm-new`` (one space before it)."""
+    stripped = line.rstrip("\r")
+    if not stripped.rstrip().endswith(anchor):
+        return None  # should not happen for lines collected via ANCHOR_EOL_RE; never guess
+    head = stripped.rstrip()[: -len(anchor)].rstrip()
+    return f"{head} ^tm-new{line[len(stripped) :]}"
 
 
 def _detect_id_checksum(
     vault_lines: Sequence[tuple[int, str]],
-) -> list[tuple[Violation, ReviewItem]]:
-    """EOL anchors whose id fails ``ids.validate`` → always review (never repair)."""
-    findings: list[tuple[Violation, ReviewItem]] = []
+) -> tuple[list[Violation], list[Repair]]:
+    """EOL anchors whose id fails ``ids.validate`` → the line gets a new node (M20-G)."""
+    violations: list[Violation] = []
+    repairs: list[Repair] = []
     seen: set[tuple[str, int]] = set()
     for line_no, line in vault_lines:
         id_ = _eol_anchor_id(line)
@@ -222,23 +202,39 @@ def _detect_id_checksum(
                 continue
             seen.add(key)
             msg = f"malformed or checksum-invalid anchor id {id_!r}"
-            v = Violation(code="E_ID_CHECKSUM", id=id_, line_nos=[line_no], message=msg)
-            r = ReviewItem(code="E_ID_CHECKSUM", id=id_, line_nos=[line_no], message=msg)
-            findings.append((v, r))
-    return findings
+            violations.append(
+                Violation(code="E_ID_CHECKSUM", id=id_, line_nos=[line_no], message=msg)
+            )
+            after = _line_with_new_marker(line, contract_anchor(id_))
+            if after is not None:
+                repairs.append(
+                    Repair(
+                        code="E_ID_CHECKSUM",
+                        action="propose_tm_new",
+                        id=id_,
+                        line_no=line_no,
+                        before=line,
+                        after=after,
+                    )
+                )
+    return violations, repairs
 
 
 def _detect_dup_id(
     vault_lines: Sequence[tuple[int, str]],
     base: BlockSet,
-) -> tuple[list[Violation], list[Repair], list[ReviewItem]]:
-    """Same EOL anchor id twice+ in one file.
+) -> tuple[list[Violation], list[Repair]]:
+    """Same EOL anchor id twice+ in one file → one copy keeps the id, the rest are new nodes.
+
+    The keeper is the first copy byte-identical to base, else (no base block, or no copy
+    identical to it) simply the first copy in document order: deterministic, never a
+    similarity guess (PRD F13). Every other copy is proposed for ``^tm-new``.
 
     # SPEC-QUESTION (narrowest reading, see docs/spec-questions.md):
     # §4.7 says E_DUP_ID is "same anchor twice in vault (copy without cut)"
     # without stating whether the scope is one file or the whole vault.
     # Narrowest reading: one BlockSet / one file (the unit this linter
-    # receives). Cross-file duplicate detection belongs to a higher layer.
+    # receives). The same anchor in different files is a mirror (M19).
     """
     by_id: dict[str, list[tuple[int, str]]] = {}
     for line_no, line in vault_lines:
@@ -255,7 +251,6 @@ def _detect_dup_id(
 
     violations: list[Violation] = []
     repairs: list[Repair] = []
-    review_items: list[ReviewItem] = []
 
     for id_, copies in by_id.items():
         if len(copies) < 2:
@@ -264,36 +259,20 @@ def _detect_dup_id(
         msg = f"anchor id {id_!r} appears {len(copies)} times in one file"
         violations.append(Violation(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg))
 
+        keeper = 0
         base_block = base.blocks.get(id_)
-        if base_block is None:
-            # No base to compare against — cannot be certain which copy to keep.
-            review_items.append(ReviewItem(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg))
-            continue
-
-        canonical = _canonical_block_line(base_block)
-        identical_idxs = [i for i, (_, line) in enumerate(copies) if line.rstrip("\r") == canonical]
-
-        if not identical_idxs:
-            # Ambiguous: no copy is byte-identical to base → review, no guess.
-            review_items.append(ReviewItem(code="E_DUP_ID", id=id_, line_nos=line_nos, message=msg))
-            continue
-
-        # Certain: first byte-identical copy keeps the id; every other copy
-        # is proposed for ^tm-new (including other identical copies).
-        keeper = identical_idxs[0]
+        if base_block is not None:
+            canonical = _canonical_block_line(base_block)
+            identical = [i for i, (_, line) in enumerate(copies) if line.rstrip("\r") == canonical]
+            if identical:
+                keeper = identical[0]
         anchor = contract_anchor(id_)
         for i, (line_no, line) in enumerate(copies):
             if i == keeper:
                 continue
-            # Replace the EOL anchor with ^tm-new, preserving leading SP / trailing ws.
-            stripped = line.rstrip("\r")
-            if not stripped.endswith(anchor):
-                # Should not happen for copies collected via ANCHOR_EOL_RE; skip
-                # rather than guess a rewrite.
+            after = _line_with_new_marker(line, anchor)
+            if after is None:
                 continue
-            head = stripped[: -len(anchor)]
-            trailing = line[len(stripped) :]
-            after = f"{head}^tm-new{trailing}"
             repairs.append(
                 Repair(
                     code="E_DUP_ID",
@@ -305,7 +284,7 @@ def _detect_dup_id(
                 )
             )
 
-    return violations, repairs, review_items
+    return violations, repairs
 
 
 def _detect_lost_and_deleted(
@@ -319,16 +298,23 @@ def _detect_lost_and_deleted(
     repairs: list[Repair] = []
     review_items: list[ReviewItem] = []
 
-    # Candidate vault lines: no real EOL anchor (anchor deleted or never had one).
-    candidates: list[tuple[int, str]] = []
+    # Candidate vault lines: no real EOL anchor (anchor deleted or never had one). A line whose
+    # EOL anchor is CORRUPTED (fails the checksum) is a candidate too, but for an EXACT match
+    # only, comparing the text with the bad anchor stripped: byte-identical text is the same
+    # certainty as a deleted anchor, so the base id is restored instead of a new node minted.
+    candidates: list[tuple[int, str, str, bool]] = []  # (line_no, line, body, exact_only)
     for line_no, line in vault_lines:
         if not line.strip():
             continue
-        if _eol_anchor_id(line) is not None:
+        eol_id = _eol_anchor_id(line)
+        if eol_id is None:
+            candidates.append((line_no, line, line.rstrip("\r"), False))
             continue
-        # Skip pure fence/front-matter leftovers already filtered; also skip
-        # lines that are only structural noise.
-        candidates.append((line_no, line))
+        try:
+            ids.validate(eol_id)
+        except ids.IdError:
+            body = grammar.ANCHOR_EOL_RE.sub("", line.rstrip("\r"))
+            candidates.append((line_no, line, body, True))
 
     used_candidate_idxs: set[int] = set()
 
@@ -342,15 +328,16 @@ def _detect_lost_and_deleted(
         best_ratio = 0.0
         exact = False
 
-        for i, (line_no, line) in enumerate(candidates):
+        for i, (line_no, line, body, exact_only) in enumerate(candidates):
             if i in used_candidate_idxs:
                 continue
-            body = line.rstrip("\r")
             if body == expected_body:
                 best_idx = i
                 best_ratio = 1.0
                 exact = True
                 break
+            if exact_only:
+                continue
             ratio = SequenceMatcher(None, _comparable_text(body), base_block.text).ratio()
             if ratio >= LOST_ANCHOR_SIMILARITY and ratio > best_ratio:
                 best_idx = i
@@ -359,7 +346,7 @@ def _detect_lost_and_deleted(
 
         if best_idx is not None:
             used_candidate_idxs.add(best_idx)
-            line_no, line = candidates[best_idx]
+            line_no, line, body, _exact_only = candidates[best_idx]
             msg = (
                 f"anchor for id {base_id!r} missing; vault text similarity {best_ratio:.3f} to base"
             )
@@ -367,8 +354,7 @@ def _detect_lost_and_deleted(
                 Violation(code="E_LOST_ANCHOR", id=base_id, line_nos=[line_no], message=msg)
             )
             if exact:
-                # Certain repair: re-insert the anchor.
-                body = line.rstrip("\r")
+                # Certain repair: re-insert the anchor (replacing a corrupted one, if any).
                 after = f"{body} {contract_anchor(base_id)}"
                 repairs.append(
                     Repair(
@@ -380,14 +366,24 @@ def _detect_lost_and_deleted(
                         after=after,
                     )
                 )
+                continue  # same block, anchor restored: nothing was deleted
             else:
-                # Fuzzy but not exact → review, never guess.
-                review_items.append(
-                    ReviewItem(code="E_LOST_ANCHOR", id=base_id, line_nos=[line_no], message=msg)
+                # Fuzzy but not exact: identity is ambiguous (PRD F13 forbids re-anchoring by
+                # similarity), so CHANGE THE ID (M20-G): the matched line becomes a new node and
+                # the old node falls through to the ordinary delete rules below.
+                after = f"{line.rstrip(chr(13))} ^tm-new"
+                repairs.append(
+                    Repair(
+                        code="E_LOST_ANCHOR",
+                        action="propose_tm_new",
+                        id=base_id,
+                        line_no=line_no,
+                        before=line,
+                        after=after,
+                    )
                 )
-            continue
 
-        # No fuzzy match at all → possible E_DELETED_S1.
+        # The block is gone from the vault (no line kept its identity) → possible E_DELETED_S1.
         stage = _maturity_of(maturity, base_id)
         if stage is not None and stage in _S1_PLUS:
             msg = (
@@ -417,11 +413,11 @@ def lint(
     Parameters
     ----------
     base:
-        Last-agreed :class:`BlockSet` (may be empty / unmanaged).
+        Last-agreed :class:`BlockSet` (may be empty).
     current:
-        Current managed-file :class:`BlockSet` from ``parse(file_text)``.
+        Current :class:`BlockSet` from ``parse(file_text)``.
     file_text:
-        Raw managed-file text (needed because ``BlockSet.blocks`` collapses
+        Raw file text (needed because ``BlockSet.blocks`` collapses
         duplicate ids and drops unanchored lines).
     maturity:
         Callable ``id -> Maturity | None`` or ``Mapping[str, Maturity]`` used
@@ -430,120 +426,36 @@ def lint(
     Returns
     -------
     LintResult
-        ``violations`` lists every finding; ``repairs`` holds only the two
-        certain auto-repair classes; ``review_items`` holds everything else
-        (including all ``E_ID_CHECKSUM``, ``E_DELETED_S1``, advisories, and
-        ambiguous repair-eligible cases).
+        ``violations`` lists every finding; ``repairs`` holds every resolution (re-insert an
+        anchor, or give the line a new node via ``^tm-new``; M20-G); ``review_items`` holds
+        only ``E_DELETED_S1``.
     """
     if maturity is None:
         maturity = {}
 
     result = LintResult()
 
-    # Unmanaged files are never parsed for management; only the advisory.
-    if not current.managed:
-        for v, r in _detect_unmanaged_anchors(file_text):
-            result.violations.append(v)
-            result.review_items.append(r)
-        return result
-
     current_lines = _iter_non_fence_lines(file_text)
 
-    for v, r in _detect_id_checksum(current_lines):
-        result.violations.append(v)
-        result.review_items.append(r)
+    ck_v, ck_repairs = _detect_id_checksum(current_lines)
+    result.violations.extend(ck_v)
+    result.repairs.extend(ck_repairs)
 
-    dup_v, dup_repairs, dup_review = _detect_dup_id(current_lines, base)
+    dup_v, dup_repairs = _detect_dup_id(current_lines, base)
     result.violations.extend(dup_v)
     result.repairs.extend(dup_repairs)
-    result.review_items.extend(dup_review)
 
     lost_v, lost_repairs, lost_review = _detect_lost_and_deleted(
         current_lines, base, current, maturity
     )
+    # A corrupted id on a line that is byte-identical to a base block is restored to that
+    # block's id (above); the "give it a new node" checksum repair for the same line yields.
+    restored = {r.line_no for r in lost_repairs if r.action == "reinsert_anchor"}
+    result.repairs[:] = [
+        r for r in result.repairs if not (r.code == "E_ID_CHECKSUM" and r.line_no in restored)
+    ]
     result.violations.extend(lost_v)
     result.repairs.extend(lost_repairs)
     result.review_items.extend(lost_review)
 
     return result
-
-
-# --- pause & diff (formatter-storm guard, spec §4.7 / §4.8) --------------------
-
-# Spec §4.7: pause when violations affect *more than* 25% of managed blocks.
-PAUSE_THRESHOLD = 0.25
-
-
-class PauseDecision(BaseModel):
-    """Pure pause signal for a formatter storm — no I/O.
-
-    Callers persist ``snapshot`` and enqueue ``review_item``; this module
-    never writes the DB or filesystem.
-    """
-
-    snapshot: str
-    review_item: ReviewItem
-
-
-def _affected_block_ids(result: LintResult) -> set[str]:
-    """Distinct non-None violation ids (numerator for the pause ratio)."""
-    return {v.id for v in result.violations if v.id is not None}
-
-
-def pause_threshold(result: LintResult, base: BlockSet) -> bool:
-    """Return True if violations affect more than 25% of ``base``'s blocks.
-
-    Denominator is ``len(base.blocks)`` (blocks that existed before this sync
-    cycle). Numerator is the count of distinct violation ids (``id=None``
-    ignored). The 25% boundary is exclusive: exactly 25% does not pause.
-
-    # SPEC-QUESTION (narrowest reading, see docs/spec-questions.md):
-    # §4.7 is silent on an empty base (no prior managed blocks). Narrowest
-    # reading: never pause — there is no prior state to disturb, and the
-    # ratio is undefined (division by zero).
-    """
-    total = len(base.blocks)
-    if total == 0:
-        return False
-    return len(_affected_block_ids(result)) / total > PAUSE_THRESHOLD
-
-
-def pause_and_diff(
-    result: LintResult,
-    base: BlockSet,
-    base_text: str,
-    current_text: str,
-) -> PauseDecision | None:
-    """If the formatter-storm guard fires, return a pause decision; else None.
-
-    When paused, the decision carries a snapshot of ``current_text`` and exactly
-    one :class:`ReviewItem` whose ``message`` is a ``difflib.unified_diff`` of
-    ``base_text`` → ``current_text``. No writes, no side effects.
-
-    # SPEC-QUESTION (narrowest reading, see docs/spec-questions.md):
-    # §4.7 says "open one review item with a diff" but does not name a
-    # ViolationCode for that item. Narrowest reading: reuse ReviewItem with
-    # ``message`` = the unified diff; ``code`` taken from the first violation
-    # that has a non-None id (lint() order is deterministic); ``id`` /
-    # ``line_nos`` left empty because the pause is file-scoped, not per-block.
-    """
-    if not pause_threshold(result, base):
-        return None
-
-    diff_text = "".join(
-        unified_diff(
-            base_text.splitlines(keepends=True),
-            current_text.splitlines(keepends=True),
-            fromfile="base",
-            tofile="vault",
-        )
-    )
-
-    first = next(v for v in result.violations if v.id is not None)
-    review_item = ReviewItem(
-        code=first.code,
-        id=None,
-        line_nos=[],
-        message=diff_text,
-    )
-    return PauseDecision(snapshot=current_text, review_item=review_item)

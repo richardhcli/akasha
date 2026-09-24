@@ -35,8 +35,8 @@ from akasha.kernel.ids import ID_LEN, A
 
 # --- Contract version -------------------------------------------------------
 
-# Front-matter key `tm: <version>` marks a managed file (spec §4.7 file-level
-# rule); version 1 is the v1 grammar frozen in this module.
+# The grammar version (hub-owned, reported by `/health`; M20-C: files carry no version marker).
+# Version 1 is the v1 grammar frozen in this module.
 CONTRACT_VERSION = 1
 
 # --- id8 / anchor ------------------------------------------------------------
@@ -128,9 +128,3 @@ REF_RE = re.compile(rf"(?<!!)\[\[{PATH_PATTERN}#{ANCHOR_PATTERN}\]\]")
 # the fence-line token; fence-state tracking across lines is parser logic
 # (T3.2), not this module's job.
 FENCE_RE = re.compile(r"^ {0,3}`{3,}")
-
-# --- front matter ------------------------------------------------------------
-
-# Front-matter key `tm: <version>` marking a managed file (spec §4.7
-# file-level rule). Only the key/value line token, not YAML parsing.
-FRONT_MATTER_TM_RE = re.compile(r"^tm:\s*(?P<version>\d+)\s*$")

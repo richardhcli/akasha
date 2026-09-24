@@ -24,7 +24,7 @@ E-number -> fixture/test mapping
 * E11 startup    -- behavioral (``reconcile.reconcile_all``); full coverage in
   T5.6's own ``tests/integration/test_crash_recovery.py``.
 * E12 conflict   -- golden fixture (REUSED T5.4): golden/reconcile/conflict/
-* E13 pause      -- behavioral + fixture data: golden/reconcile/e13-pause-storm/
+* E13 storm      -- behavioral + fixture data: golden/reconcile/e13-formatter-storm/
 * E14 fenced     -- behavioral + fixture data: golden/reconcile/e14-fenced-anchor-ignored/
 * E15 checksum   -- behavioral + fixture data (KNOWN GAP, see below)
 * E16 embed      -- golden fixture (NEW, two-file): golden/reconcile/e16-embed-shows-head/
@@ -114,6 +114,7 @@ need.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 import tracemalloc
@@ -620,41 +621,70 @@ def test_e07_silent_guess_check_isolated():
 
 
 # =================================================================================
-# E13 -- pause & diff (formatter storm): zero writes, zero node mutations.
+# E13 -- formatter storm (M20-G: a file is never paused). A formatter mangles most of a
+# file's anchors at once; each block is resolved on the spot: the exact lost anchor is
+# re-inserted, a reworded / bad-checksum / duplicated line gets a new node, a deleted S1+
+# node is the one review, and the file keeps syncing. Nothing is lost silently.
 # =================================================================================
 
 
 def _case_e13() -> bool:
+    """Returns ``silently_mutated``: True iff an untouched node changed, an S1+ node was
+    removed, a pause was raised, text was lost, or the file stopped syncing."""
     conn = _conn()
-    case_dir = GOLDEN_ROOT / "e13-pause-storm"
+    case_dir = GOLDEN_ROOT / "e13-formatter-storm"
     hub_specs = json.loads(_read(case_dir / "hub.json"))
     _seed_hub_from_json(conn, hub_specs)
-    ids_ = [spec["id"] for spec in hub_specs]
-    histories_before = {i: store.history(conn, i) for i in ids_}
+    alpha, s1, control = "aoy5shqm", "5ec7y5bu", "e5yntips"
+    histories_before = {i: store.history(conn, i) for i in (alpha, s1, control)}
 
     with _tmp_dir() as tmp_path:
         root_id = _register_root(conn, tmp_path)
         path = tmp_path / "note.md"
-        base_text = _read(case_dir / "base.md")
-        base_store.put(conn, root_id, str(path), base_text)
+        base_store.put(conn, root_id, str(path), _read(case_dir / "base.md"))
         vault_text = _read(case_dir / "vault.md")
         path.write_bytes(vault_text.encode("utf-8"))
+        reconciler = Reconciler(conn, OriginTracker())
 
-        Reconciler(conn, OriginTracker()).on_change(str(path))
+        reconciler.on_change(str(path))
 
-        final_text = path.read_bytes().decode("utf-8")
-        assert final_text == vault_text, "pause must make ZERO writes"
-        assert base_store.get(conn, root_id, str(path)) == base_text, "base_store untouched"
+        final = path.read_bytes().decode("utf-8")
+        live_bodies = {
+            n.body.rstrip("\n")
+            for n in (store.get_node(conn, r[0]) for r in conn.execute("SELECT id FROM nodes"))
+            if n.status == "live"
+        }
+        # every line the vault held survives in the file AND is a live hub node
+        for text in (
+            "alpha",
+            "beta plans for the second quarters",
+            "padding 0 extra",
+            "gamma",
+            "gamma again",
+            "delta untouched",
+        ):
+            assert re.search(rf"^{re.escape(text)} \^tm-(?!new)[0-9a-z]{{8}}$", final, re.M), text
+            assert text in live_bodies, text
+        assert "^tm-aaaaaaab" not in final and "^tm-new" not in final
+        # the exact lost anchor came back; the duplicate's first copy kept its id
+        assert "alpha ^tm-aoy5shqm" in final and "gamma ^tm-dtz43zyj" in final
+        # the deleted S1 node stays live and is the ONLY thing for a human
+        assert store.get_node(conn, s1).status == "live"
+        codes = [json.loads(r["cause_ref"])["code"] for r in store.find_open_reviews(conn)]
+        assert codes == ["E_DELETED_S1"], codes
+        reviews = store.find_open_reviews(conn)
+        assert not any(json.loads(r["cause_ref"]).get("pause") for r in reviews)
 
-        rows = store.find_open_reviews(conn, cause_kind="violation")
-        payloads = [json.loads(r["cause_ref"]) for r in rows]
-        assert any(p.get("pause") is True for p in payloads)
+        # and the file keeps syncing: a follow-up edit reaches the hub
+        path.write_text(final.replace("delta untouched", "delta EDITED"), encoding="utf-8")
+        reconciler.on_change(str(path))
+        assert store.get_node(conn, control).body == "delta EDITED\n"
 
-    histories_after = {i: store.history(conn, i) for i in ids_}
-    return histories_after != histories_before
+    untouched = {alpha: histories_before[alpha], s1: histories_before[s1]}
+    return any(store.history(conn, i) != h for i, h in untouched.items())
 
 
-def test_e13_pause_makes_zero_writes_and_zero_mutations():
+def test_e13_formatter_storm_is_resolved_per_block_never_paused():
     assert _case_e13() is False
 
 
@@ -712,9 +742,8 @@ def test_e14_fenced_anchor_is_ignored_not_flagged():
 
 
 # =================================================================================
-# E15 -- malformed checksum: E_ID_CHECKSUM review, never a node mutation/guess.
-# Since task T5.8-2 (lossless container), the malformed anchor's own line is
-# also asserted to survive write-back verbatim -- see module docstring note 2.
+# E15 -- malformed checksum (M20-G): the anchor cannot name any node, so the line is given a
+# new one, silently; nothing else changes and nothing is lost.
 # =================================================================================
 
 
@@ -724,6 +753,7 @@ def _case_e15() -> bool:
     hub_specs = json.loads(_read(case_dir / "hub.json"))
     _seed_hub_from_json(conn, hub_specs)
     ids_before = {r[0] for r in conn.execute("SELECT id FROM nodes").fetchall()}
+    histories_before = {i: store.history(conn, i) for i in ids_before}
 
     with _tmp_dir() as tmp_path:
         root_id = _register_root(conn, tmp_path)
@@ -735,25 +765,23 @@ def _case_e15() -> bool:
 
         Reconciler(conn, OriginTracker()).on_change(str(path))
 
-        rows = store.find_open_reviews(conn, cause_kind="violation")
-        codes = [json.loads(r["cause_ref"])["code"] for r in rows]
-        assert "E_ID_CHECKSUM" in codes
-        # Padding content (the legitimate blocks) survives untouched.
+        assert store.find_open_reviews(conn) == []  # resolved, not queued
         final_text = path.read_bytes().decode("utf-8")
-        for i in range(6):
+        for i in range(6):  # padding content (the legitimate blocks) survives untouched
             assert f"padding {i}" in final_text
-        # Lossless-container byte-survival (task T5.8-2): the malformed
-        # anchor's own line survives verbatim too -- the file is unchanged.
-        assert "bad line ^tm-aaaaaaab" in final_text
-        assert final_text == vault_text
+        assert "^tm-aaaaaaab" not in final_text  # the malformed anchor is gone ...
+        assert re.search(r"^bad line \^tm-(?!new)[0-9a-z]{8}$", final_text, re.M)  # ... a real id
 
     ids_after = {r[0] for r in conn.execute("SELECT id FROM nodes").fetchall()}
-    # No silent guess: the malformed id NEVER becomes a real node (no mint,
-    # no create, no delete of anything).
-    return ids_after != ids_before
+    new_ids = ids_after - ids_before
+    assert len(new_ids) == 1 and store.get_node(conn, next(iter(new_ids))).body == "bad line\n"
+    # No silent guess: nothing that existed was removed or changed.
+    return ids_before - ids_after != set() or any(
+        store.history(conn, i) != h for i, h in histories_before.items()
+    )
 
 
-def test_e15_malformed_checksum_is_review_only_never_a_node():
+def test_e15_malformed_checksum_gets_a_new_node_and_nothing_else_changes():
     assert _case_e15() is False
 
 
@@ -1088,11 +1116,10 @@ def test_e24_reparent_in_a_mirror_adds_a_second_composes_parent(tmp_path):
     assert store.find_open_reviews(conn) == []
 
 
-def test_e25_plain_markdown_is_adopted_by_default_only_when_it_has_something_to_project(
-    tmp_path,
-):
-    """M18-B: no `tm: 1` needed. A prose-only file is never touched; a file with a
-    `^tm-new` is minted, gains the front matter, and keeps its own front matter."""
+def test_e25_plain_markdown_is_tracked_only_when_it_has_something_to_project(tmp_path):
+    """M18-B / M20-C: no file marker at all. A prose-only file is never touched or tracked; a
+    file with a `^tm-new` is minted in place and gains NOTHING; front matter (whatever it holds,
+    a `tm:` key included) is never read, edited or reordered."""
     conn = _conn()
     _register_root(conn, tmp_path)
     reconciler = Reconciler(conn, OriginTracker())
@@ -1109,7 +1136,7 @@ def test_e25_plain_markdown_is_adopted_by_default_only_when_it_has_something_to_
     plain.write_text("- [ ] first ^tm-new\n", encoding="utf-8")
     reconciler.on_change(str(plain))
     text = plain.read_bytes().decode()
-    assert text.startswith("---\ntm: 1\n---\n- [ ] first ^tm-")
+    assert text.startswith("- [ ] first ^tm-") and "---" not in text  # no header, ever
     assert "^tm-new" not in text
     assert len(store.list_sync_files(conn)) == 1
 
@@ -1117,8 +1144,17 @@ def test_e25_plain_markdown_is_adopted_by_default_only_when_it_has_something_to_
     props.write_text("---\ntitle: Kept\ntags: [a]\n---\nA claim. ^tm-new\n", encoding="utf-8")
     reconciler.on_change(str(props))
     out = props.read_bytes().decode()
-    assert out.count("---\n") == 2  # exactly one front-matter block
-    assert out.startswith("---\ntitle: Kept\ntags: [a]\ntm: 1\n---\nA claim. ^tm-")
+    assert out.startswith("---\ntitle: Kept\ntags: [a]\n---\nA claim. ^tm-")
+
+    legacy = tmp_path / "legacy.md"  # a leftover `tm:` key is just a YAML key: kept byte for byte
+    legacy.write_text("---\ntm: 1\ntags: [a]\n---\nAnother. ^tm-new\n", encoding="utf-8")
+    reconciler.on_change(str(legacy))
+    assert legacy.read_bytes().decode().startswith("---\ntm: 1\ntags: [a]\n---\nAnother. ^tm-")
+
+    hr = tmp_path / "hr.md"  # `---` around a real block is a thematic break, not front matter
+    hr.write_text("---\n- [ ] inside rules ^tm-new\n---\n", encoding="utf-8")
+    reconciler.on_change(str(hr))
+    assert "^tm-new" not in hr.read_bytes().decode()
 
 
 # =================================================================================

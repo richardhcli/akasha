@@ -629,6 +629,7 @@ def _create_node_tx(
     task_state: str | None,
     author: str,
     message: str,
+    node_id: str | None = None,
 ) -> Node:
     """Body of ``create_node``, without opening its own transaction.
 
@@ -646,7 +647,15 @@ def _create_node_tx(
     content = _node_content(canonical_body, facets, task_state)
     now = _now()
 
-    node_id = _mint_unique_id(conn)
+    if node_id is None:
+        node_id = _mint_unique_id(conn)
+    else:
+        # M20-G: the sync engine ADOPTS an anchor the hub has never seen under its own id (a
+        # restored backup, a second machine's hub, a reset hub) instead of minting a different
+        # one, so transclusion links survive. Only a well-formed id no row uses is accepted.
+        ids.validate(node_id)
+        if conn.execute("SELECT 1 FROM nodes WHERE id=?", (node_id,)).fetchone() is not None:
+            raise ValueError(f"node id {node_id!r} already exists")
     obj_hash = _insert_object(conn, content, now)
     conn.execute(
         "INSERT INTO nodes (id, node_type, head_hash, maturity, status, vetted, "
@@ -687,8 +696,12 @@ def create_node(
     task_state: str | None = None,
     author: str = "system",
     message: str = "",
+    node_id: str | None = None,
 ) -> Node:
     """Create a brand-new node with a genesis commit (spec §4.5, §4.1).
+
+    ``node_id`` (M20-G) adopts a caller-supplied, well-formed id no row uses yet instead of
+    minting one; ``ValueError`` if it is malformed or taken.
 
     Invariant: mints a fresh id (retrying on ``nodes.id`` collision, bound
     10 attempts, then raising ``IdMintError`` — spec §4.1), inserts exactly
@@ -704,7 +717,9 @@ def create_node(
     ``commit_node``, spec §4.6).
     """
     with conn:
-        return _create_node_tx(conn, node_type, body, facets, task_state, author, message)
+        return _create_node_tx(
+            conn, node_type, body, facets, task_state, author, message, node_id
+        )
 
 
 class _Unset:
@@ -2272,7 +2287,6 @@ def write_base_snapshot(
     sync_root_id: str,
     path: str,
     canonical_text: str,
-    contract_version: int | None = None,
 ) -> str:
     """Durably record ``canonical_text`` as ``path``'s new last-agreed base snapshot.
 
@@ -2283,39 +2297,19 @@ def write_base_snapshot(
     upserts ``sync_files`` keyed by ``path`` (its primary key, spec §4.4)
     so ``base_hash`` and ``sync_root_id`` both move together, inside one
     transaction. Returns the new base snapshot's ``objects.hash``.
-
-    # design note (T5.4, fable-reviewed, human-decided 2026-07-12): closes
-    # T5.1's logged SPEC-QUESTION on ``sync_files.contract_version``. The
-    # new optional ``contract_version`` keyword lets a caller that actually
-    # parsed the file's front matter (T5.4's reconcile pipeline) pass the
-    # real value through explicitly; omitting it (the default, ``None``)
-    # preserves T5.1's exact original behavior (preserve the existing row's
-    # value across a re-``put``, else default to the literal ``1``) — fully
-    # backward compatible, ``sync/base_store.py::put`` (T5.1) is unchanged.
     """
     if not sync_root_exists(conn, sync_root_id):
         raise SyncRootNotFoundError(sync_root_id)
     now = _now()
     with conn:
         obj_hash = _insert_base_snapshot(conn, canonical_text, now)
-        existing = conn.execute(
-            "SELECT contract_version FROM sync_files WHERE path=?", (path,)
-        ).fetchone()
-        if contract_version is not None:
-            resolved_contract_version = contract_version
-        elif existing is not None:
-            resolved_contract_version = existing[0]
-        else:
-            resolved_contract_version = 1
         conn.execute(
-            "INSERT INTO sync_files "
-            "(path, sync_root_id, base_hash, contract_version, last_synced_at) "
-            "VALUES (?, ?, ?, ?, ?) "
+            "INSERT INTO sync_files (path, sync_root_id, base_hash, last_synced_at) "
+            "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(path) DO UPDATE SET "
             "sync_root_id=excluded.sync_root_id, base_hash=excluded.base_hash, "
-            "contract_version=excluded.contract_version, "
             "last_synced_at=excluded.last_synced_at",
-            (path, sync_root_id, obj_hash, resolved_contract_version, now),
+            (path, sync_root_id, obj_hash, now),
         )
     return obj_hash
 
@@ -2328,7 +2322,7 @@ def list_sync_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     # other store.py touches listed above — ``sync/reconcile.py``'s
     # ``ProjectionIndex`` (cross-file ``E_DUP_ID``/move detection, spec
     # §4.7/§3.5's M5 follow-up) needs to enumerate every synced file's
-    # ``(path, sync_root_id, base_hash, contract_version)`` to rebuild its
+    # ``(path, sync_root_id, base_hash)`` to rebuild its
     # id -> path ownership map purely from durable state (crash-safe,
     # rebuildable). Read-only; never used to author truth, only to look up
     # which base snapshot to re-parse per path.
@@ -2339,10 +2333,10 @@ def list_sync_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     # schema change) so ``GET /sync/status`` can report each file's
     # last-synced timestamp without a second query. Purely additive;
     # T5.4's existing callers that only read ``path``/``sync_root_id``/
-    # ``base_hash``/``contract_version`` are unaffected.
+    # ``base_hash`` are unaffected.
     """
     rows = conn.execute(
-        "SELECT path, sync_root_id, base_hash, contract_version, last_synced_at "
+        "SELECT path, sync_root_id, base_hash, last_synced_at "
         "FROM sync_files ORDER BY path"
     ).fetchall()
     return [
@@ -2350,8 +2344,7 @@ def list_sync_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             "path": r[0],
             "sync_root_id": r[1],
             "base_hash": r[2],
-            "contract_version": r[3],
-            "last_synced_at": r[4],
+            "last_synced_at": r[3],
         }
         for r in rows
     ]

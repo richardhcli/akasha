@@ -92,7 +92,7 @@ def _token_from(output: str) -> str:
 
 
 def test_setup_gives_a_live_reconciled_vault_and_a_working_token(env):
-    (env["vault"] / "todo.md").write_text("- [ ] ship it ^tm-new\n", encoding="utf-8")  # no tm: 1!
+    (env["vault"] / "todo.md").write_text("- [ ] ship it ^tm-new\n", encoding="utf-8")  # plain
 
     result = _setup(env, str(env["vault"]))
 
@@ -106,7 +106,7 @@ def test_setup_gives_a_live_reconciled_vault_and_a_working_token(env):
     assert daemon_module.is_healthy(load_config(env["config"]))
     # a plain Markdown file (no front matter) was adopted and minted on the way through
     text = (env["vault"] / "todo.md").read_text(encoding="utf-8")
-    assert text.startswith("---\ntm: 1\n---\n- [ ] ship it ^tm-") and "^tm-new" not in text
+    assert text.startswith("- [ ] ship it ^tm-") and "^tm-new" not in text  # NO header
     # the printed token really authenticates, and the vault is registered
     status = httpx.get(f"{env['url']}/v1/sync/status", headers={"Authorization": f"Bearer {token}"})
     assert status.status_code == 200

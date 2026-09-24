@@ -141,16 +141,34 @@ def test_a_healthy_vault_produces_no_hint(daemon, tmp_path):
 
 
 def test_violations_are_grouped_by_code(daemon, tmp_path):
-    dup = "---\ntm: 1\n---\n- [ ] one ^tm-4cgfdxpi\n- [ ] two ^tm-4cgfdxpi\n"
-    _root(daemon, tmp_path, {"dup.md": dup})
+    # M20-G: the sync engine now resolves a duplicate or unknown anchor by itself, so only a
+    # deleted S1+ node (or a legacy review) is left to group: seed the review queue directly.
+    vault = _root(daemon, tmp_path, {"a.md": "- [ ] one ^tm-new\n"})
+    path = str(vault / "a.md")
+    for code in ("E_DELETED_S1", "E_DELETED_S1", "E_UNPROJECTABLE_BODY"):
+        store.enqueue_review(
+            daemon["conn"],
+            None,
+            "violation",
+            cause_ref=json.dumps({"path": path, "code": code, "line_nos": [1], "message": "x"}),
+        )
     result = _run(daemon, "--json", "status")
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)["data"]
     (root,) = data["sync_roots"]
-    assert root["violations"] == {"E_DUP_ID": 1, "E_UNKNOWN_ANCHOR": 1}
-    assert data["open_reviews"] == 2
+    assert root["violations"] == {"E_DELETED_S1": 2, "E_UNPROJECTABLE_BODY": 1}
+    assert data["open_reviews"] == 3
     plain = _run(daemon, "status")
-    assert "violation E_DUP_ID: 1" in plain.output
+    assert "violation E_DELETED_S1: 2" in plain.output
+
+
+def test_a_duplicate_anchor_is_resolved_not_queued(daemon, tmp_path):
+    dup = "- [ ] one ^tm-4cgfdxpi\n- [ ] two ^tm-4cgfdxpi\n"
+    _root(daemon, tmp_path, {"dup.md": dup})
+    result = _run(daemon, "--json", "status")
+    data = json.loads(result.output)["data"]
+    (root,) = data["sync_roots"]
+    assert root["violations"] == {} and data["open_reviews"] == 0
 
 
 def test_bad_credential_is_the_shared_unauthorized_mapping(daemon):

@@ -130,7 +130,6 @@ def sync_status(
             entry["files"].append(
                 {
                     "path": f["path"],
-                    "contract_version": f["contract_version"],
                     "last_synced_at": f["last_synced_at"],
                 }
             )

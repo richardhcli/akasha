@@ -375,7 +375,7 @@ def test_e_deleted_s1_id_withheld_from_ops():
     assert any(item.code == "E_DELETED_S1" and item.id == x for item in outcome.lint.review_items)
 
 
-def test_e_id_checksum_withheld_from_ops():
+def test_e_id_checksum_anchor_is_replaced_by_a_new_request():
     # A well-shaped but checksum-invalid anchor: never an op, always review.
     bad_id = "aaaaaaab"  # shape-valid (8 lowercase base32 chars), checksum wrong
     base = parse(_managed(""))
@@ -390,9 +390,10 @@ def test_e_id_checksum_withheld_from_ops():
         projection=ProjectionIndex(),
         current_path="vault.md",
     )
-    assert all(op.node_id != bad_id for op in outcome.ops)
-    checksum_items = [item for item in outcome.lint.review_items if item.code == "E_ID_CHECKSUM"]
-    assert any(item.id == bad_id for item in checksum_items)
+    assert all(op.node_id != bad_id for op in outcome.ops)  # the bad id never becomes a node
+    assert outcome.lint.review_items == []  # M20-G: resolved, not queued
+    assert outcome.repaired_text.endswith("Some text ^tm-new\n")
+    assert [op.new_request.text for op in outcome.ops if op.new_request] == ["Some text"]
 
 
 # --- cross-file classification (spec §7) ----------------------------------------
@@ -551,7 +552,7 @@ def test_same_anchor_twice_in_one_file_is_still_e_dup_id():
     assert any(v.code == "E_DUP_ID" for v in outcome.lint.violations)
 
 
-def test_unknown_anchor_id_is_withheld_and_reviewed():
+def test_unknown_anchor_id_is_adopted_under_its_own_id():
     x = "fr5wvmjg"  # a real, checksum-valid id -- but never minted anywhere
     base = parse(_managed(""))
     vault_text = _managed(f"References an id that does not exist {contract_anchor(x)}\n")
@@ -565,9 +566,40 @@ def test_unknown_anchor_id_is_withheld_and_reviewed():
         projection=ProjectionIndex(),
         current_path="f.md",
     )
-    assert all(op.node_id != x for op in outcome.ops)
-    assert len(outcome.extra_review_items) == 1
-    assert outcome.extra_review_items[0].code == "E_UNKNOWN_ANCHOR"
+    assert outcome.extra_review_items == []  # M20-G: resolved, not queued
+    [op] = outcome.ops
+    assert (op.kind, op.node_id, op.adopt_unknown) == ("created", x, True)
+    assert op.vault_block is not None
+    assert op.vault_block.text == "References an id that does not exist"
+
+
+def test_an_unknown_anchor_creates_the_node_under_that_id_and_keeps_mirrors_linked(tmp_path):
+    """A reset/second hub over an existing vault: two files sharing an unknown id must end up
+    as ONE node under that id, not two different fresh ones."""
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    x = "fr5wvmjg"
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    for f in (a, b):
+        f.write_text(f"Shared line {contract_anchor(x)}\n", encoding="utf-8")
+    reconciler = Reconciler(conn, OriginTracker())
+    reconciler.on_change(str(a))
+    reconciler.on_change(str(b))
+
+    assert store.get_node(conn, x).body == "Shared line\n"
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1  # one node, not two
+    assert contract_anchor(x) in _read(a) and contract_anchor(x) in _read(b)
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
+def test_create_node_with_an_explicit_id_rejects_malformed_and_taken_ids():
+    conn = _conn()
+    node = store.create_node(conn, "claim", "hello", node_id="fr5wvmjg")
+    assert node.id == "fr5wvmjg"
+    with pytest.raises(ValueError):
+        store.create_node(conn, "claim", "again", node_id="fr5wvmjg")
+    with pytest.raises(Exception, match="E_ID_CHECKSUM|checksum"):
+        store.create_node(conn, "claim", "bad", node_id="aaaaaaab")
 
 
 # --- anchor_elsewhere (T5.8-3: S0 cross-file move withholding) ------------------
@@ -852,13 +884,14 @@ def test_convergent_edit_is_a_no_op_not_a_conflict(tmp_path):
     assert store.get_node(conn, x).body == "agreed text\n"
 
 
-def test_pause_makes_zero_writes(tmp_path):
+def test_a_file_is_never_paused_and_a_bad_checksum_line_gets_a_new_node(tmp_path):
+    """M20-G: what used to pause the whole file (1 of 2 blocks affected) is now resolved in
+    place: the damaged line gets a new id, the rest of the file is untouched, sync continues."""
     conn = _conn()
     root_id = _register_root(conn, tmp_path)
     x, y = "pakprpmm", "pit7kgjj"
     _seed_node(conn, x, "claim", "alpha")
     _seed_node(conn, y, "claim", "beta")
-
     base_text = render(
         parse(_managed(f"alpha {contract_anchor(x)}\nbeta {contract_anchor(y)}\n"))
     )
@@ -866,25 +899,36 @@ def test_pause_makes_zero_writes(tmp_path):
     path.write_text(base_text, encoding="utf-8")
     base_store.put(conn, root_id, str(path), base_text)
 
-    bad_id = "aaaaaaab"  # checksum-invalid -> E_ID_CHECKSUM, 1 of 2 base blocks -> 50% > 25%
-    new_line = f"new line {contract_anchor(bad_id)}\n"
-    vault_text = _managed(f"alpha {contract_anchor(x)}\nbeta {contract_anchor(y)}\n{new_line}")
+    bad_id = "aaaaaaab"  # checksum-invalid
+    vault_text = _managed(
+        f"alpha {contract_anchor(x)}\nbeta {contract_anchor(y)}\n"
+        f"new line {contract_anchor(bad_id)}\n"
+    )
     path.write_text(vault_text, encoding="utf-8")
 
-    origin = OriginTracker()
-    reconciler = Reconciler(conn, origin)
-    reconciler.on_change(str(path))
+    Reconciler(conn, OriginTracker()).on_change(str(path))
 
-    # Zero writes: file untouched, base_store untouched.
-    assert path.read_text(encoding="utf-8") == vault_text
-    assert base_store.get(conn, root_id, str(path)) == base_text
+    text = path.read_text(encoding="utf-8")
+    assert re.search(r"\nnew line \^tm-(?!new)[0-9a-z]{8}\n$", text)  # a real id now
+    assert f"alpha {contract_anchor(x)}\nbeta {contract_anchor(y)}\n" in text  # rest untouched
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+    assert store.get_node(conn, x).body == "alpha\n"
 
-    rows = conn.execute(
-        "SELECT cause_ref FROM review_queue WHERE cause_kind='violation'"
-    ).fetchall()
-    assert len(rows) == 1
-    payload = json.loads(rows[0][0])
-    assert payload["pause"] is True
+
+def test_stale_pause_reviews_are_dismissed_on_the_files_next_cycle(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    for path in (a, b):
+        store.enqueue_review(
+            conn,
+            None,
+            "violation",
+            cause_ref=json.dumps({"path": str(path), "pause": True, "diff": "x", "snapshot": "y"}),
+        )
+    a.write_text(_managed(f"Edited in A {contract_anchor(_MX)}\n"), encoding="utf-8")
+
+    reconciler.on_change(str(a))  # cycles a.md, then propagates to b.md
+
+    assert store.find_open_reviews(conn, cause_kind="violation") == []
 
 
 def test_tm_new_mint_rewrite_and_origin_recorded(tmp_path):
@@ -1741,6 +1785,17 @@ def test_projection_refresh_only_reparses_files_whose_base_changed(tmp_path, mon
 
 
 
+def test_a_corrupted_id_on_an_unchanged_mirror_line_keeps_the_mirror_linked(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    b.write_text(_managed("Shared text ^tm-aaaaaaab\n"), encoding="utf-8")  # only the id damaged
+
+    reconciler.on_change(str(b))
+
+    assert _read(b).endswith(f"Shared text {contract_anchor(_MX)}\n")  # restored, not re-minted
+    assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM review_queue").fetchone()[0] == 0
+
+
 def test_mirror_same_line_edited_in_both_files_conflicts_without_loss(tmp_path):
     conn, reconciler, a, b = _mirror_setup(tmp_path)
     a.write_text(_managed(f"A version {contract_anchor(_MX)}\n"), encoding="utf-8")
@@ -1909,38 +1964,46 @@ def test_on_change_is_inert_for_a_tmignored_path(tmp_path):
     assert "^tm-new" not in normal.read_text(encoding="utf-8")
 
 
-# --- default adoption of plain Markdown (T18.10c, ruling M18-B) ------------------
+# --- no file marker (T20.3, ruling M20-C; supersedes T18.10c's adoption shim) --------
 
 
-def test_adopt_unmanaged_prepends_front_matter_when_there_is_none():
-    assert reconcile.adopt_unmanaged("- [ ] x ^tm-new\n") == "---\ntm: 1\n---\n- [ ] x ^tm-new\n"
+def test_has_constructs_counts_blocks_new_requests_embeds_and_refs():
+    assert parse("- [ ] x ^tm-new\n").has_constructs()
+    assert parse("![[other.md#^tm-4cgfdxpi]]\n").has_constructs()
+    assert parse("see [[other.md#^tm-4cgfdxpi]] here\n").has_constructs()
+    assert not parse("Just prose.\n\nAnother. ^abc123\n").has_constructs()  # foreign anchor
+    assert not parse("").has_constructs()
 
 
-def test_adopt_unmanaged_injects_into_existing_front_matter_never_a_second_block():
-    src = "---\ntitle: T\ntags: [a, b]\n---\nBody. ^tm-new\n"
-    adopted = reconcile.adopt_unmanaged(src)
-    assert adopted == "---\ntitle: T\ntags: [a, b]\ntm: 1\n---\nBody. ^tm-new\n"
-    assert adopted.count("\n---\n") == 1
+def test_minting_never_adds_or_edits_front_matter(tmp_path):
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    plain, fm = tmp_path / "plain.md", tmp_path / "fm.md"
+    plain.write_text("- [ ] x ^tm-new\n", encoding="utf-8")
+    fm.write_text("---\ntitle: T\ntm: 2\n---\nBody. ^tm-new\n", encoding="utf-8")
+    r = Reconciler(conn, OriginTracker())
+    r.on_change(str(plain))
+    r.on_change(str(fm))
+    assert re.fullmatch(r"- \[ \] x \^tm-[0-9a-z]{8}\n", plain.read_text(encoding="utf-8"))
+    assert re.fullmatch(
+        r"---\ntitle: T\ntm: 2\n---\nBody\. \^tm-[0-9a-z]{8}\n", fm.read_text(encoding="utf-8")
+    )  # a `tm:` key of any value is just YAML: kept byte for byte
 
 
-def test_adopt_unmanaged_leaves_prose_and_foreign_anchors_alone():
-    assert reconcile.adopt_unmanaged("Just prose.\n\nAnother. ^abc123\n") is None
-    assert reconcile.adopt_unmanaged("") is None
+def test_front_matter_is_raw_lines_and_a_block_holding_a_construct_is_not_front_matter():
+    bs = parse("---\ntitle: t\ntm: 1\n---\n- [ ] x ^tm-new\n")
+    front = [bs.raw_lines[i] for i in (1, 2, 3, 4)]
+    assert front == ["---", "title: t", "tm: 1", "---"]  # never interpreted
+    assert len(bs.new_requests) == 1 and bs.new_requests[0].line_no == 5
+    assert parse("---\n- [ ] x ^tm-new\n---\n").has_constructs()  # thematic breaks around a block
 
 
-def test_adopt_unmanaged_counts_embeds_and_refs_as_constructs():
-    assert reconcile.adopt_unmanaged("![[other.md#^tm-4cgfdxpi]]\n") is not None
-    assert reconcile.adopt_unmanaged("see [[other.md#^tm-4cgfdxpi]] here\n") is not None
-
-
-def test_adopt_unmanaged_never_overrides_a_tm_key_or_adopts_a_broken_opener():
-    assert reconcile.adopt_unmanaged("---\ntm: 2\n---\nx ^tm-new\n") is None
-    assert reconcile.adopt_unmanaged("---\ntitle: never closed\nx ^tm-new\n") is None
-
-
-def test_adopt_unmanaged_passes_a_managed_file_through_unchanged():
-    text = "---\ntm: 1\n---\nx ^tm-new\n"
-    assert reconcile.adopt_unmanaged(text) == text
+def test_deleting_every_construct_from_a_tracked_file_still_runs_the_delete_rules(tmp_path):
+    conn, reconciler, a, b = _mirror_setup(tmp_path)
+    b.write_text("nothing shared here any more\n", encoding="utf-8")
+    reconciler.on_change(str(b))
+    assert store.get_node(conn, _MX).body == "Shared text\n"  # a mirror removal: node lives on
+    assert _read(a).endswith(f"Shared text {contract_anchor(_MX)}\n")
 
 
 def test_prose_only_file_is_byte_identical_and_untracked_after_reconcile(tmp_path):
@@ -1966,4 +2029,4 @@ def test_ignored_file_with_a_mint_request_mints_nothing_but_a_normal_one_does(tm
     r.on_change(str(skip))
     r.on_change(str(keep))
     assert skip.read_text(encoding="utf-8") == "- [ ] x ^tm-new\n"
-    assert keep.read_text(encoding="utf-8").startswith("---\ntm: 1\n---\n- [ ] x ^tm-")
+    assert keep.read_text(encoding="utf-8").startswith("- [ ] x ^tm-")

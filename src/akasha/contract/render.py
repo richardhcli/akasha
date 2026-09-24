@@ -66,9 +66,6 @@ def render(
 ) -> str:
     """Project a :class:`BlockSet` to canonical managed-file markdown (spec §4.7).
 
-    When ``block_set.managed`` is true, emits a YAML front-matter block with
-    ``tm: <CONTRACT_VERSION>`` (or ``block_set.contract_version`` when set).
-
     Blocks are emitted in ``line_no`` order (dict insertion order is the
     fallback when line numbers coincide with the kind tie-break). Standalone
     embeds/refs (no block at the same ``line_no``) become their own lines.
@@ -80,9 +77,8 @@ def render(
     examples, unknown/malformed anchors) -- is interleaved back in at its
     original ``line_no``, verbatim; a raw line sharing a ``line_no`` with a
     block is skipped (already inline in that block's text, same rule as
-    embeds/refs). ``block_set.front_matter`` (when not ``None``) replaces
-    the canonical 3-line ``tm:`` front matter verbatim (e.g. a file with
-    extra ``title:``/``tags:`` keys).
+    embeds/refs). An initial front-matter block is just raw lines, so it passes
+    through verbatim; nothing is ever added to it (M20-C).
 
     For each embed, if ``resolve_body`` is supplied it is called with the
     embed target id (read-only body lookup). The contract form remains the
@@ -96,18 +92,6 @@ def render(
     # duplicate standalone line (same line_no as a Block) is the narrowest
     # reading that keeps render(parse(D)) lossless for inline embeds/refs.
     lines: list[str] = []
-
-    if block_set.managed:
-        version = (
-            block_set.contract_version
-            if block_set.contract_version is not None
-            else grammar.CONTRACT_VERSION
-        )
-        lines.extend(
-            block_set.front_matter
-            if block_set.front_matter is not None
-            else ["---", f"tm: {version}", "---"]
-        )
 
     # Lossless-container write-back (task T5.8-2, human-decided 2026-07-13,
     # fable-designed): a raw line sharing a block's line_no is skipped just

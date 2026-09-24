@@ -267,12 +267,3 @@ def test_fenced_anchor_line_is_identified_via_fence_re() -> None:
     id_ = _valid_id()
     fence_line = f"``` {id_}"
     assert grammar.FENCE_RE.match(fence_line) is not None
-
-
-# --- front matter ------------------------------------------------------------
-
-
-def test_front_matter_tm_key_matches_contract_version() -> None:
-    m = grammar.FRONT_MATTER_TM_RE.match("tm: 1")
-    assert m is not None
-    assert int(m.group("version")) == grammar.CONTRACT_VERSION

@@ -164,4 +164,64 @@ def test_after_one_setup_editing_any_copy_changes_every_copy(env: dict[str, Any]
     assert _wait_until(both), {p.name: p.read_text() for p in (inbox, trip, today)}
 
     assert open_reviews() == []  # nothing was ever queued for a human, nothing was lost
+    for note in (inbox, trip, today):  # M20-C: setup, a mint, edits and mirrors add no header
+        assert not note.read_text(encoding="utf-8").startswith("---"), note.name
+    assert trip.read_text(encoding="utf-8").startswith("# Trip\n")  # its own first line
     assert _ID_RE.findall(trip.read_text()) == [dentist, passport]  # ids untouched by all of it
+
+
+def test_a_formatter_storm_never_stops_the_file_syncing(env: dict[str, Any]) -> None:
+    """M20-G through the real daemon: a formatter strips, rewords and corrupts most of a file's
+    ids at once. Every line is resolved on the spot (no pause, no review, no lost text) and the
+    file keeps syncing to a mirror afterwards."""
+    vault: Path = env["vault"]
+    notes, mirror = vault / "notes.md", vault / "mirror.md"
+    body = "write the quarterly report section"
+    notes.write_text("".join(f"- [ ] {body} {n} ^tm-new\n" for n in range(1, 6)), encoding="utf-8")
+    result = runner.invoke(cli_app, ["setup", "--config", env["config"], str(vault)])
+    assert result.exit_code == 0, result.output
+    match = re.search(r"export AKASHA_TOKEN=(\S+)", result.output)
+    assert match
+    headers = {"Authorization": f"Bearer {match.group(1)}"}
+    ids = _ID_RE.findall(notes.read_text(encoding="utf-8"))
+    assert len(ids) == 5
+    line5 = notes.read_text(encoding="utf-8").splitlines()[4]
+    mirror.write_text(line5 + "\n", encoding="utf-8")  # section 5 is transcluded
+
+    def tracked() -> int:
+        status = httpx.get(f"{env['url']}/v1/sync/status", headers=headers).json()
+        return len(status["sync_roots"][0]["files"])
+
+    assert _wait_until(lambda: tracked() == 2)
+
+    notes.write_text(
+        f"- [ ] {body} 1\n"  # anchor stripped, text identical: the anchor is restored
+        f"- [ ] {body}s 2\n"  # anchor stripped and text slightly changed: a new node
+        f"- [ ] {body} 3 ^tm-aaaaaaab\n"  # corrupted id: a new node
+        f"- [ ] {body} 4 {ids[3]}\n"  # a duplicated id: the second copy is a new node
+        f"- [ ] {body} 4 again {ids[3]}\n"
+        f"{line5}\n",
+        encoding="utf-8",
+    )
+
+    def resolved() -> bool:
+        text = notes.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        return (
+            "^tm-new" not in text
+            and "^tm-aaaaaaab" not in text
+            and len(lines) == 6
+            and all(_ID_RE.search(line) for line in lines)
+        )
+
+    assert _wait_until(resolved), notes.read_text(encoding="utf-8")
+    text = notes.read_text(encoding="utf-8")
+    for expected in (f"{body} 1", f"{body}s 2", f"{body} 3", f"{body} 4", f"{body} 4 again"):
+        assert re.search(rf"- \[ \] {re.escape(expected)} \^tm-[0-9a-z]{{8}}\n", text), expected
+    assert text.count(ids[3]) == 1  # exactly one copy kept the duplicated id
+    reviews = httpx.get(f"{env['url']}/v1/review?status=open", headers=headers).json()["reviews"]
+    assert reviews == []  # no pause, no review: every line resolved on the spot
+
+    # ...and the file still syncs: an edit of the transcluded line reaches the mirror
+    notes.write_text(text.replace(f"{body} 5", f"{body} FIVE"), encoding="utf-8")
+    assert _wait_until(lambda: "FIVE" in mirror.read_text(encoding="utf-8"))

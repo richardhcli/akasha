@@ -83,9 +83,9 @@ def test_gc_never_removes_base_snapshot_object(tmp_path):
         )
         conn.execute(
             "INSERT INTO sync_files "
-            "(path, sync_root_id, base_hash, contract_version, last_synced_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            ("notes/foo.md", "default", base_hash, 1, now),
+            "(path, sync_root_id, base_hash, last_synced_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("notes/foo.md", "default", base_hash, now),
         )
 
     deleted = store.gc_objects(conn)

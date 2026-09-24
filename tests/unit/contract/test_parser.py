@@ -15,44 +15,38 @@ def _managed(body: str) -> str:
     return "---\ntm: 1\n---\n" + body
 
 
-# --- unmanaged files -----------------------------------------------------------
+def _body_raw(bs: parser.BlockSet) -> dict[int, str]:
+    """``raw_lines`` past the 3-line front matter that ``_managed`` puts on top."""
+    return {n: t for n, t in bs.raw_lines.items() if n > 3}
 
 
-def test_unmanaged_file_no_front_matter_returns_empty() -> None:
+# --- no file marker (M20-C) -----------------------------------------------------------
+
+
+def test_file_without_front_matter_is_parsed() -> None:
     id_ = _id()
-    text = f"Some claim ^tm-{id_}\n"
-    bs = parser.parse(text)
-    assert bs.managed is False
-    assert bs.blocks == {}
-    assert bs.embeds == []
-    assert bs.refs == []
-    assert bs.new_requests == []
+    bs = parser.parse(f"Some claim ^tm-{id_}\n")
+    assert list(bs.blocks) == [id_]
+    assert bs.has_constructs()
 
 
-def test_unmanaged_file_empty_text_returns_empty() -> None:
-    bs = parser.parse("")
-    assert bs.managed is False
-    assert bs.blocks == {}
+def test_empty_text_and_prose_have_no_constructs() -> None:
+    assert not parser.parse("").has_constructs()
+    assert not parser.parse("Just prose. ^abc123\n").has_constructs()  # a foreign anchor
 
 
-def test_unmanaged_file_front_matter_without_tm_key() -> None:
+def test_front_matter_without_tm_key_is_skipped_not_interpreted() -> None:
     id_ = _id()
-    text = "---\ntitle: foo\n---\n" + f"Some claim ^tm-{id_}\n"
-    bs = parser.parse(text)
-    assert bs.managed is False
-    assert bs.blocks == {}
+    bs = parser.parse("---\ntitle: foo\n---\n" + f"Some claim ^tm-{id_}\n")
+    assert list(bs.blocks) == [id_] and bs.blocks[id_].line_no == 4
 
 
-def test_unmanaged_file_tm_version_mismatch_is_unmanaged() -> None:
-    """Narrowest reading (SPEC-QUESTION): only an exact CONTRACT_VERSION match
-
-    counts as managed; a present-but-different `tm:` version is unmanaged.
-    """
+def test_a_tm_key_of_any_value_is_just_yaml() -> None:
+    """There is no marker any more: `tm: 2` (or `tm: 1`) is an ordinary front-matter key."""
     id_ = _id()
-    text = "---\ntm: 2\n---\n" + f"Some claim ^tm-{id_}\n"
-    bs = parser.parse(text)
-    assert bs.managed is False
-    assert bs.blocks == {}
+    bs = parser.parse("---\ntm: 2\n---\n" + f"Some claim ^tm-{id_}\n")
+    assert list(bs.blocks) == [id_]
+    assert bs.raw_lines[2] == "tm: 2"
 
 
 # --- managed paragraph -----------------------------------------------------------
@@ -62,8 +56,6 @@ def test_managed_paragraph_is_parsed() -> None:
     id_ = _id()
     text = _managed(f"Water boils at 100C at sea level ^tm-{id_}\n")
     bs = parser.parse(text)
-    assert bs.managed is True
-    assert bs.contract_version == 1
     assert id_ in bs.blocks
     block = bs.blocks[id_]
     assert block.kind == "paragraph"
@@ -266,7 +258,7 @@ def test_prose_line_captured_as_raw_line() -> None:
     body = "Just some free-form prose, no anchor here.\n"
     bs = parser.parse(_managed(body))
     assert bs.blocks == {}
-    assert bs.raw_lines == {4: "Just some free-form prose, no anchor here."}
+    assert _body_raw(bs) == {4: "Just some free-form prose, no anchor here."}
 
 
 def test_blank_lines_captured_as_raw_lines() -> None:
@@ -296,19 +288,16 @@ def test_fenced_content_survives_as_raw_lines_including_fake_anchor() -> None:
     assert bs.embeds == []  # the fenced fake anchor is not a block/embed
 
 
-def test_extra_front_matter_keys_captured_verbatim() -> None:
-    text = "---\ntitle: My Note\ntm: 1\ntags: foo\n---\nA claim ^tm-{}\n".format(
-        ids.mint()
-    )
+def test_front_matter_lines_pass_through_as_raw_lines() -> None:
+    text = "---\ntitle: My Note\ntm: 1\ntags: foo\n---\nA claim ^tm-{}\n".format(ids.mint())
     bs = parser.parse(text)
-    assert bs.managed is True
-    assert bs.front_matter == ["---", "title: My Note", "tm: 1", "tags: foo", "---"]
-
-
-def test_canonical_front_matter_is_not_captured() -> None:
-    id_ = _id()
-    bs = parser.parse(_managed(f"A claim ^tm-{id_}\n"))
-    assert bs.front_matter is None
+    assert [bs.raw_lines[n] for n in range(1, 6)] == [
+        "---",
+        "title: My Note",
+        "tm: 1",
+        "tags: foo",
+        "---",
+    ]
 
 
 def test_new_line_marker_survives_as_raw_line() -> None:
@@ -341,7 +330,7 @@ def test_standalone_embed_line_not_captured_as_raw() -> None:
     embed_id = _id()
     body = f"![[Some Note#^tm-{embed_id}]]\n"
     bs = parser.parse(_managed(body))
-    assert bs.raw_lines == {}
+    assert _body_raw(bs) == {}
     assert len(bs.embeds) == 1
 
 
@@ -349,16 +338,15 @@ def test_standalone_ref_line_not_captured_as_raw() -> None:
     ref_id = _id()
     body = f"[[Some Note#^tm-{ref_id}]]\n"
     bs = parser.parse(_managed(body))
-    assert bs.raw_lines == {}
+    assert _body_raw(bs) == {}
     assert len(bs.refs) == 1
 
 
-def test_unmanaged_file_raw_lines_is_total() -> None:
+def test_every_line_is_a_construct_or_a_raw_line() -> None:
     id_ = _id()
-    text = f"Some claim ^tm-{id_}\nMore prose\n"
-    bs = parser.parse(text)
-    assert bs.managed is False
-    assert bs.raw_lines == {1: f"Some claim ^tm-{id_}", 2: "More prose"}
+    bs = parser.parse(f"Some claim ^tm-{id_}\nMore prose\n")
+    assert bs.blocks[id_].line_no == 1
+    assert bs.raw_lines == {2: "More prose"}
 
 
 # --- glued anchors (M20-F) --------------------------------------------------------

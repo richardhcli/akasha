@@ -53,20 +53,14 @@ _NEGATIVE_WAIT = 1.6  # > the 500 ms debounce, for "this must NOT propagate" che
 _TASK_TEXT = "- [ ] ship the transclusion demo"
 _NOTE_TEXT = "Caffeine has a half-life of about five hours."
 
-_A_MD = f"""---
-tm: 1
----
-# File A
+_A_MD = f"""# File A
 
 {_TASK_TEXT} ^tm-new
 {_NOTE_TEXT} ^tm-new
 """
 
 # B and C carry the SAME anchored lines inside different surrounding prose.
-_B_MD = """---
-tm: 1
----
-# File B (mirrors A)
+_B_MD = """# File B (mirrors A)
 
 Some unrelated text that is only in B.
 
@@ -74,10 +68,7 @@ Some unrelated text that is only in B.
 {note}
 """
 
-_C_MD = """---
-tm: 1
----
-# File C (mirrors only the note)
+_C_MD = """# File C (mirrors only the note)
 
 {note}
 
@@ -361,7 +352,7 @@ class Demo:
         conflicts_before = self._open_conflicts()
         d = self.vault / "D.md"
         d.write_text(
-            f"---\ntm: 1\n---\nMy own wording of the note. ^tm-{self.note_id}\n", encoding="utf-8"
+            f"My own wording of the note. ^tm-{self.note_id}\n", encoding="utf-8"
         )
         healed = _wait_until(lambda: "Set from the hub" in _read(d), _SETTLE_TIMEOUT)
         time.sleep(0.5)

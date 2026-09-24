@@ -18,10 +18,8 @@ def _managed_blocks(
     embeds: list[Embed] | None = None,
     refs: list[Ref] | None = None,
 ) -> BlockSet:
-    """Minimal managed BlockSet; callers override blocks/embeds/refs."""
+    """Minimal BlockSet; callers override blocks/embeds/refs."""
     return BlockSet(
-        managed=True,
-        contract_version=grammar.CONTRACT_VERSION,
         blocks=blocks or {},
         embeds=embeds or [],
         refs=refs or [],
@@ -44,9 +42,7 @@ def test_paragraph_rendering() -> None:
         }
     )
     out = render(bs)
-    assert out == (
-        f"---\ntm: {grammar.CONTRACT_VERSION}\n---\nWater boils at 100C at sea level ^tm-{id_}\n"
-    )
+    assert out == f"Water boils at 100C at sea level ^tm-{id_}\n"
 
 
 # --- tasks: both states + nesting -----------------------------------------------
@@ -166,38 +162,15 @@ def test_ref_rendering() -> None:
 # --- front-matter ---------------------------------------------------------------
 
 
-def test_front_matter_emitted_when_managed() -> None:
+def test_no_front_matter_is_ever_emitted() -> None:
+    """M20-C: render adds no header; a file gains none from being projected."""
     id_ = _id()
     bs = _managed_blocks(
-        blocks={
-            id_: Block(
-                id=id_,
-                kind="paragraph",
-                text="A claim",
-                line_no=1,
-            )
-        }
-    )
-    out = render(bs)
-    assert out.startswith(f"---\ntm: {grammar.CONTRACT_VERSION}\n---\n")
-
-
-def test_front_matter_absent_when_unmanaged() -> None:
-    id_ = _id()
-    bs = BlockSet(
-        managed=False,
-        blocks={
-            id_: Block(
-                id=id_,
-                kind="paragraph",
-                text="Unmanaged claim",
-                line_no=1,
-            )
-        },
+        blocks={id_: Block(id=id_, kind="paragraph", text="A claim", line_no=1)}
     )
     out = render(bs)
     assert not out.startswith("---")
-    assert out == f"Unmanaged claim ^tm-{id_}\n"
+    assert out == f"A claim ^tm-{id_}\n"
 
 
 # --- lossless container (task T5.8-2, human-decided 2026-07-13, fable-designed) ----
@@ -206,8 +179,6 @@ def test_front_matter_absent_when_unmanaged() -> None:
 def test_raw_lines_interleaved_verbatim_by_position() -> None:
     id_ = _id()
     bs = BlockSet(
-        managed=True,
-        contract_version=grammar.CONTRACT_VERSION,
         blocks={
             id_: Block(id=id_, kind="paragraph", text="A claim", line_no=2),
         },
@@ -218,22 +189,16 @@ def test_raw_lines_interleaved_verbatim_by_position() -> None:
     assert body == f"Some prose above\nA claim ^tm-{id_}\nTrailing prose below\n"
 
 
-def test_non_canonical_front_matter_emitted_verbatim() -> None:
-    bs = BlockSet(
-        managed=True,
-        contract_version=grammar.CONTRACT_VERSION,
-        front_matter=["---", "title: My Note", f"tm: {grammar.CONTRACT_VERSION}", "---"],
-    )
+def test_front_matter_raw_lines_are_emitted_verbatim() -> None:
+    bs = BlockSet(raw_lines={1: "---", 2: "title: My Note", 3: "tm: 1", 4: "---"})
     out = render(bs)
-    assert out.startswith(f"---\ntitle: My Note\ntm: {grammar.CONTRACT_VERSION}\n---\n")
+    assert out == "---\ntitle: My Note\ntm: 1\n---\n"  # never added to, never reordered
 
 
 def test_embed_sharing_a_raw_lines_line_no_is_not_re_emitted() -> None:
     """An embed already inline in a raw (multi-embed/prose) line is not duplicated."""
     embed_id = _id()
     bs = BlockSet(
-        managed=True,
-        contract_version=grammar.CONTRACT_VERSION,
         embeds=[Embed(path="Note", id=embed_id, line_no=1)],
         raw_lines={1: f"prose with ![[Note#^tm-{embed_id}]] inline"},
     )

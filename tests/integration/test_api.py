@@ -902,7 +902,7 @@ def test_sync_status_reports_seeded_roots_and_files(api, tmp_path):
     assert entry["name"] == "vault"
     assert entry["root_path"] == str(tmp_path)
     assert [f["path"] for f in entry["files"]] == [path]
-    assert entry["files"][0]["contract_version"] == 1
+    assert "contract_version" not in entry["files"][0]  # no per-file marker (M20-C)
     assert entry["violations"] == []
     assert entry["pauses"] == []
     assert entry["conflicts"] == []

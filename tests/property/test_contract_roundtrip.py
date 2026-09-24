@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import string
 
-from hypothesis import given, settings
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from akasha.contract import grammar
@@ -126,7 +126,7 @@ def _canonical_document_strategy(draw: st.DrawFn) -> str:
     would then correctly reject the generator's own output as malformed
     input, not a real property failure).
     """
-    extra_front_matter = draw(st.booleans())
+    front_kind = draw(st.sampled_from(["none", "extra", "tm_key"]))
 
     n_items = draw(st.integers(min_value=0, max_value=12))
     kinds = [draw(st.sampled_from(_LINE_KINDS)) for _ in range(n_items)]
@@ -180,11 +180,14 @@ def _canonical_document_strategy(draw: st.DrawFn) -> str:
         lines.pop()
 
     body = "".join(line + "\n" for line in lines)
-    if extra_front_matter:
-        front = f"---\ntitle: Extra\ntm: {grammar.CONTRACT_VERSION}\ntags: sample\n---\n"
-    else:
-        front = f"---\ntm: {grammar.CONTRACT_VERSION}\n---\n"
-    return front + body
+    # M20-C: front matter is never interpreted, only passed through -- with no `tm:` key
+    # (the norm now), with other keys, or with a leftover `tm:` key (an ordinary YAML key).
+    front = {
+        "none": "",
+        "extra": "---\ntitle: Extra\ntags: sample\n---\n",
+        "tm_key": f"---\ntm: {grammar.CONTRACT_VERSION}\n---\n",
+    }[front_kind]
+    return front + body or "\n"  # the canonical empty file is a lone newline
 
 
 @settings(max_examples=500, deadline=None)
@@ -212,12 +215,11 @@ def test_render_parse_round_trip_on_generated_documents(doc: str) -> None:
 
 @st.composite
 def _block_set_strategy(draw: st.DrawFn) -> BlockSet:
-    """Build a random valid, managed :class:`BlockSet` directly.
+    """Build a random valid :class:`BlockSet` directly.
 
     Every item (block/embed/ref) is assigned a unique, strictly increasing
-    ``line_no`` starting at 4 (the first body line after the 3-line front
-    matter, matching the convention observed in the parser/render unit
-    tests). Because line numbers are already unique and monotonic, and no
+    ``line_no`` starting at 1 (there is no front matter; M20-C). Because line numbers
+    are already unique and monotonic, and no
     embed/ref shares a ``line_no`` with a block, ``render()`` emits exactly
     one line per item in draw order and re-parsing recovers the identical
     ``line_no`` for each -- so full structural equality (including
@@ -258,7 +260,7 @@ def _block_set_strategy(draw: st.DrawFn) -> BlockSet:
     refs: list[Ref] = []
     task_stack: list[tuple[int, str]] = []
     depth_max = -1
-    line_no = 4
+    line_no = 1
 
     for id_ in ids:
         kind = draw(st.sampled_from(["paragraph", "task", "embed", "ref"]))
@@ -290,8 +292,6 @@ def _block_set_strategy(draw: st.DrawFn) -> BlockSet:
         line_no += 1
 
     return BlockSet(
-        managed=True,
-        contract_version=grammar.CONTRACT_VERSION,
         blocks=blocks,
         embeds=embeds,
         refs=refs,
@@ -303,6 +303,7 @@ def _block_set_strategy(draw: st.DrawFn) -> BlockSet:
 @given(_block_set_strategy())
 def test_parse_render_round_trip_on_generated_block_sets(block_set: BlockSet) -> None:
     """DoD: parse(render(G)) == G for generated hub graphs G (scoped per docstring above)."""
+    assume(block_set.has_constructs())  # an empty file renders as a lone newline: one raw line
     rendered = render(block_set)
     reparsed = parse(rendered)
     assert reparsed == block_set
