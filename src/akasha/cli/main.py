@@ -377,6 +377,63 @@ def daemon(
 
 
 @app.command()
+def up(
+    config: str | None = typer.Option(
+        None, "--config", help="path to config.toml (default: per-OS default location)"
+    ),
+) -> None:
+    """Start the daemon detached and wait until it is healthy (build-plan T18.3).
+
+    Idempotent: if the daemon already answers at the config's address, nothing is
+    spawned. Like ``daemon`` and ``init`` this is a process verb, not an HTTP
+    client -- it ignores ``--base-url``/``--token``. The daemon writes its own
+    rotating log in the config directory; the path is printed. Exit 4 if the
+    single-instance lock is held but nothing answers (something else owns it),
+    1 if the daemon did not become healthy in time.
+    """
+    cfg = load_config(config)
+    result = daemon_module.up(cfg)
+    if result.status == "already":
+        typer.echo(f"daemon already running at {result.url} (log: {result.log_path})")
+    elif result.status == "started":
+        typer.echo(f"started daemon at {result.url} (log: {result.log_path})")
+    elif result.status == "conflict":
+        typer.echo(
+            f"error: the daemon lock is held but nothing answers at {result.url}; "
+            f"see {result.log_path}",
+            err=True,
+        )
+        raise typer.Exit(4)
+    else:
+        typer.echo(
+            f"error: daemon did not become healthy at {result.url}; see {result.log_path}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
+def down(
+    config: str | None = typer.Option(
+        None, "--config", help="path to config.toml (default: per-OS default location)"
+    ),
+) -> None:
+    """Stop the detached daemon (build-plan T18.3). Idempotent.
+
+    "Running" means the single-instance lock is held, not that a pid file exists,
+    so a stale pid file is removed and never signalled. Stopping abruptly is safe:
+    startup reconcile is idempotent (spec §4.8), so anything edited meanwhile is
+    picked up on the next start. Exit 1 if it did not stop in time.
+    """
+    cfg = load_config(config)
+    outcome = daemon_module.down(cfg)
+    if outcome == "timeout":
+        typer.echo("error: the daemon did not stop in time", err=True)
+        raise typer.Exit(1)
+    typer.echo("stopped daemon" if outcome == "stopped" else "daemon is not running")
+
+
+@app.command()
 def tray(
     config: str | None = typer.Option(
         None, "--config", help="path to config.toml (default: per-OS default location)"

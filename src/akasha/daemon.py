@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
+import subprocess
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
@@ -34,6 +38,9 @@ if TYPE_CHECKING:
     from akasha.config import Config
 
 LOCK_FILE_NAME = "tm-daemon.lock"
+# build-plan T18.3 (neutral name, rule 6): the running daemon's pid, written
+# after the lock is held and removed on shutdown. `akasha down` reads it.
+PID_FILE_NAME = "tm-daemon.pid"
 LOG_FILE_NAME = "daemon.log"
 
 # T0.6 default rotation sizing, kept as module constants (rather than
@@ -428,6 +435,10 @@ def serve(config: Config) -> None:
     db_path = config.db_path if config.db_path is not None else default_db_path()
 
     with single_instance_lock(lock_path):
+        # T18.3: written only once the lock is ours, so a second instance (which
+        # fails at the line above) can never overwrite or delete the first's file.
+        pid_path = config_dir / PID_FILE_NAME
+        pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
         logger.info(f"daemon starting on {config.bind}:{config.port}")
         gc_scheduler = GcScheduler(
             db_path, s0_gc_retention_days=config.s0_gc_retention_days, logger=logger
@@ -463,3 +474,146 @@ def serve(config: Config) -> None:
         finally:
             gc_scheduler.stop()
             logger.info("daemon shutting down")
+            pid_path.unlink(missing_ok=True)
+
+
+# --- detached lifecycle: `akasha up` / `akasha down` (build-plan T18.3) ---------
+
+UP_TIMEOUT_SECONDS = 30.0
+DOWN_TIMEOUT_SECONDS = 10.0
+
+
+def lock_is_held(lock_path: str | Path) -> bool:
+    """True iff another process currently holds the single-instance lock.
+
+    Probes by trying to take the lock and releasing it again at once. Never
+    creates the config directory: a missing lock file means nobody holds it.
+    """
+    lock_path = Path(lock_path)
+    if not lock_path.exists():
+        return False
+    try:
+        with single_instance_lock(lock_path):
+            return False
+    except AlreadyRunningError:
+        return True
+
+
+def health_url(config: Config) -> str:
+    return f"http://{config.bind}:{config.port}"
+
+
+def is_healthy(config: Config, *, timeout: float = 1.0) -> bool:
+    """True iff ``GET /health`` answers 200 at the config's bind:port."""
+    import httpx
+
+    try:
+        return httpx.get(f"{health_url(config)}/health", timeout=timeout).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def _spawn_command(config: Config) -> list[str]:
+    config_path = str(config.path) if config.path is not None else None
+    tail = ["daemon", *(["--config", config_path] if config_path else [])]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, *tail]
+    return [sys.executable, "-m", "akasha.cli.main", *tail]
+
+
+def spawn_detached(config: Config) -> subprocess.Popen[bytes]:
+    """Start ``akasha daemon`` detached from this terminal, stdio to the null device.
+
+    The daemon writes its own rotating log in the config dir, so nothing is lost.
+    """
+    kwargs: dict[str, object] = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(  # noqa: S603 - argv is our own interpreter + fixed verbs
+        _spawn_command(config),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+class UpResult:
+    """Outcome of :func:`up`: ``status`` is ``already``/``started``/``conflict``/``failed``."""
+
+    def __init__(self, status: str, url: str, log_path: Path, pid: int | None = None) -> None:
+        self.status = status
+        self.url = url
+        self.log_path = log_path
+        self.pid = pid
+
+
+def up(config: Config, *, timeout: float = UP_TIMEOUT_SECONDS) -> UpResult:
+    """Make sure a daemon is serving ``config``'s address; idempotent.
+
+    ``already`` if ``/health`` answers; ``conflict`` if the lock is held but
+    ``/health`` is silent (something else owns it -- spec §4.12's conflict
+    class); otherwise spawn detached and poll ``/health`` for ``timeout``
+    seconds (``started``, or ``failed`` if the child exits or never answers).
+    """
+    config_dir = _config_dir(config)
+    url = health_url(config)
+    log_path = config_dir / LOG_FILE_NAME
+    if is_healthy(config):
+        return UpResult("already", url, log_path, _read_pid(config_dir))
+    if lock_is_held(config_dir / LOCK_FILE_NAME):
+        return UpResult("conflict", url, log_path, _read_pid(config_dir))
+    proc = spawn_detached(config)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_healthy(config):
+            return UpResult("started", url, log_path, proc.pid)
+        if proc.poll() is not None:
+            return UpResult("failed", url, log_path)
+        time.sleep(0.1)
+    return UpResult("failed", url, log_path, proc.pid)
+
+
+def _read_pid(config_dir: Path) -> int | None:
+    try:
+        return int((config_dir / PID_FILE_NAME).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def down(config: Config, *, timeout: float = DOWN_TIMEOUT_SECONDS) -> str:
+    """Stop the detached daemon; returns ``not-running``, ``stopped`` or ``timeout``.
+
+    The single-instance lock -- which the daemon holds for exactly as long as it
+    lives -- is the source of truth for "is it running", NOT the pid file, so a
+    stale pid file (whose number may since have been reused by an unrelated
+    process) is only ever deleted, never signalled. An abrupt stop is safe by
+    design: startup reconcile is idempotent (spec §4.8) and the project already
+    survives ``kill -9``.
+    """
+    config_dir = _config_dir(config)
+    lock_path = config_dir / LOCK_FILE_NAME
+    pid_path = config_dir / PID_FILE_NAME
+    if not lock_is_held(lock_path):
+        pid_path.unlink(missing_ok=True)
+        return "not-running"
+    pid = _read_pid(config_dir)
+    if pid is None:
+        return "timeout"  # locked by something that left no pid: never guess at a target
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:  # already gone (ProcessLookupError, or a generic OSError on Windows)
+        pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not lock_is_held(lock_path):
+            pid_path.unlink(missing_ok=True)
+            return "stopped"
+        time.sleep(0.1)
+    return "timeout"
