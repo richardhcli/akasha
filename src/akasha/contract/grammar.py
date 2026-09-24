@@ -128,3 +128,36 @@ REF_RE = re.compile(rf"(?<!!)\[\[{PATH_PATTERN}#{ANCHOR_PATTERN}\]\]")
 # the fence-line token; fence-state tracking across lines is parser logic
 # (T3.2), not this module's job.
 FENCE_RE = re.compile(r"^ {0,3}`{3,}")
+
+# --- spans (M20-A/B/E, spec §4.7 "Spans") ----------------------------------------
+#
+#   span     := SPAN_OPEN text SPAN_CLOSE SPAN_ID_OPEN "tm-" id8 SPAN_ID_CLOSE     ; may cross lines
+#   span_new := SPAN_OPEN text SPAN_CLOSE SPAN_ID_OPEN "tm-new" SPAN_ID_CLOSE
+#
+# Nothing outside this block hard-codes a brace: every pattern is built from these constants.
+# NOTE: changing them turns every span already written into plain text (files carry no
+# grammar version, M20-C), so decide them before real use.
+
+SPAN_OPEN = "{"
+SPAN_CLOSE = "}"
+SPAN_ID_OPEN = "{"
+SPAN_ID_CLOSE = "}"
+
+# A span's scan is capped so a stray SPAN_OPEN can never make parsing quadratic (M20-B).
+SPAN_MAX_LINES = 200
+SPAN_MAX_CHARS = 65536
+# ...and the whole file's scanning is budgeted (in brace tokens looked at), so a note full of
+# unclosed braces (LaTeX, JSON fragments) parses in bounded time; past the budget the remaining
+# braces are simply prose.
+SPAN_SCAN_BUDGET = 200_000
+
+# What must follow the closing SPAN_CLOSE (immediately) for the span to end there: the id wrapper
+# around "tm-" + a well-formed id8 (whose checksum the parser then validates), or "tm-new".
+SPAN_ID_TAIL_RE = re.compile(
+    re.escape(SPAN_ID_OPEN) + r"tm-(?P<id>" + ID8_PATTERN + r"|new)" + re.escape(SPAN_ID_CLOSE)
+)
+
+
+def span_source(text: str, id_: str, *, lead: str = "", trail: str = "") -> str:
+    """The source form of a span: ``{lead text trail}{tm-id}`` (whitespace is per file, M20-E)."""
+    return f"{SPAN_OPEN}{lead}{text}{trail}{SPAN_CLOSE}{SPAN_ID_OPEN}tm-{id_}{SPAN_ID_CLOSE}"

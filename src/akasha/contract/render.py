@@ -59,6 +59,35 @@ def _render_ref(ref: Ref) -> str:
     return f"[[{ref.path}#{contract_anchor(ref.id)}]]"
 
 
+def _substitute_spans(block_set: BlockSet) -> dict[int, str]:
+    """``raw_lines`` with every span's source region rewritten from its block (M20-A/B/E).
+
+    A span lives inside prose lines that ``parse`` kept verbatim, so rendering it is a text
+    substitution: the region from its opening token to just past its ``{tm-id}`` wrapper is
+    replaced by ``{lead text trail}{tm-id}`` (the file's own padding, the hub's text). Spans are
+    processed last-first, so an earlier region's offsets are never disturbed by a later one; a
+    region that now spans a different number of lines is merged into its first line's entry.
+    """
+    raw = dict(block_set.raw_lines)
+    spans = sorted(
+        (b for b in block_set.blocks.values() if b.kind == "span"),
+        key=lambda b: (b.line_no, b.col),
+        reverse=True,
+    )
+    for span in spans:
+        first, last = span.line_no, span.end_line_no
+        if any(n not in raw for n in range(first, last + 1)):
+            continue  # its lines are gone (a hand-built BlockSet): nothing to substitute into
+        region = [raw[n] for n in range(first, last + 1)]
+        joined = "\n".join(region)
+        end = len("\n".join(region[:-1])) + (1 if len(region) > 1 else 0) + span.end_col
+        source = grammar.span_source(span.text, span.id, lead=span.lead, trail=span.trail)
+        raw[first] = joined[: span.col] + source + joined[end:]
+        for n in range(first + 1, last + 1):
+            del raw[n]
+    return raw
+
+
 def render(
     block_set: BlockSet,
     *,
@@ -98,7 +127,7 @@ def render(
     # like a co-located embed/ref (it is understood to already be part of
     # that block's own inline text); every other raw line becomes its own
     # output line, in position, verbatim.
-    block_line_nos = {block.line_no for block in block_set.blocks.values()}
+    block_line_nos = {block.line_no for block in block_set.blocks.values() if block.kind != "span"}
     skip_line_nos = block_line_nos | set(block_set.raw_lines.keys())
     items: list[tuple[int, int, int, str]] = []
     # (line_no, kind_tie, seq, rendered) — seq preserves insertion order
@@ -106,6 +135,8 @@ def render(
     seq = 0
 
     for block in block_set.blocks.values():
+        if block.kind == "span":
+            continue  # rendered in place inside its prose lines (_substitute_spans)
         items.append((block.line_no, _KIND_BLOCK, seq, _render_block(block)))
         seq += 1
 
@@ -125,7 +156,7 @@ def render(
         items.append((ref.line_no, _KIND_REF, seq, _render_ref(ref)))
         seq += 1
 
-    for line_no, raw_text in block_set.raw_lines.items():
+    for line_no, raw_text in _substitute_spans(block_set).items():
         items.append((line_no, _KIND_RAW, seq, raw_text))
         seq += 1
 

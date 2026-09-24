@@ -778,8 +778,9 @@ def setup(
         typer.echo(
             "        transclusion is live: the same ^tm- id in several notes is one line kept "
             "identical in all of them.\n"
-            '        Try it: write "- [ ] something ^tm-new" in a note, then copy that line '
-            "(id included) into another."
+            '        Try it: write "- [ ] something ^tm-new" (or only a part, '
+            '"{something}{tm-new}", which may span lines) in a note, then copy it (id '
+            "included) into another."
         )
         if warning:
             typer.echo(f"warning: {warning}")

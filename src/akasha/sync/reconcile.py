@@ -823,6 +823,9 @@ def hub_state_for(
         if node.status == "tombstone":
             continue
         line = _body_line(node.body)
+        if block.kind == "span":
+            new_blocks[node_id] = block.model_copy(update={"text": line})  # newlines are fine
+            continue
         if "\n" in line:
             if not read_only:
                 store.enqueue_review(
@@ -881,6 +884,24 @@ def _render_new_line(nr: NewRequest, node_id: str) -> str:
         mark = "x" if nr.task_state == "done" else " "
         return f"{indent}- [{mark}] {nr.text} {anchor}"
     return f"{nr.text} {anchor}"
+
+
+_SPAN_NEW_MARKER = f"{grammar.SPAN_ID_OPEN}tm-new{grammar.SPAN_ID_CLOSE}"
+
+
+def _mint_span_marker(line: str, nr: NewRequest, node_id: str, shift: int) -> tuple[str, int]:
+    """``line`` with a span request's ``{tm-new}`` replaced by ``{tm-<id>}``; also the new shift.
+
+    Only the marker changes (the text and the file's own padding stay as typed). ``shift`` is
+    how many characters earlier markers on this same line have already added, since a line can
+    hold several span requests and each mint lengthens it.
+    """
+    at = nr.marker_col + shift
+    if not line.startswith(_SPAN_NEW_MARKER, at):
+        return line, shift  # the line changed under us; the next cycle will see it again
+    minted = f"{grammar.SPAN_ID_OPEN}tm-{node_id}{grammar.SPAN_ID_CLOSE}"
+    new_line = line[:at] + minted + line[at + len(_SPAN_NEW_MARKER) :]
+    return new_line, shift + len(minted) - len(_SPAN_NEW_MARKER)
 
 
 def kernel_apply(conn: sqlite3.Connection, op: Op, *, author: str = SYNC_AUTHOR) -> str | None:
@@ -1578,15 +1599,21 @@ class Reconciler:
 
         committed: set[str] = set()
         vault_lines = repaired_text.split("\n")
+        shifts: dict[int, int] = {}  # per line: characters already added by span-marker mints
         for op in ops:
             if op.kind == "created":
-                self._apply_created(op, path, vault_lines, committed)
+                self._apply_created(op, path, vault_lines, committed, shifts)
             else:
                 self._apply_existing(op, path, hub_changed_map, committed)
         return committed, vault_lines
 
     def _apply_created(
-        self, op: Op, path: str, vault_lines: list[str], committed: set[str]
+        self,
+        op: Op,
+        path: str,
+        vault_lines: list[str],
+        committed: set[str],
+        shifts: dict[int, int],
     ) -> None:
         if op.mirror:
             # T19.4 / M19-C: this file JOINS a node another file
@@ -1606,9 +1633,17 @@ class Reconciler:
             return
         new_id = kernel_apply(self.conn, op, author=SYNC_AUTHOR)
         if op.new_request is not None and new_id is not None:
-            idx = op.new_request.line_no - 1
-            if 0 <= idx < len(vault_lines):
-                vault_lines[idx] = _render_new_line(op.new_request, new_id)
+            nr = op.new_request
+            if nr.shape == "span":
+                idx = nr.marker_line - 1
+                if 0 <= idx < len(vault_lines):
+                    vault_lines[idx], shifts[idx] = _mint_span_marker(
+                        vault_lines[idx], nr, new_id, shifts.get(idx, 0)
+                    )
+            else:
+                idx = nr.line_no - 1
+                if 0 <= idx < len(vault_lines):
+                    vault_lines[idx] = _render_new_line(nr, new_id)
         elif op.node_id is not None:
             # cross-file adopt (a move): may have committed the
             # vault's text/state to the hub head.

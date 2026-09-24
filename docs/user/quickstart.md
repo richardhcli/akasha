@@ -60,7 +60,17 @@ akasha search caffeine
 
 Each note keeps its own indentation, and the rest of each note is never touched. If two notes change the *same* line in the same instant, one version wins and the other is kept as a review item (`akasha review list`) — nothing is lost.
 
-**What is shared is one line** — a task line or a one-line paragraph. A multi-line section cannot be shared yet (only its anchored last line would be); that needs a grammar decision (`docs/spec-questions.md` M19-A).
+**By default the whole line is shared** (`text ^tm-id`). To share only *part* of a line, or *several lines*, wrap it in braces and follow it with the id:
+
+```markdown
+The launch is on {friday the 13th}{tm-new} unless it rains.
+
+{ Bring the tent
+
+and the stove }{tm-new}
+```
+
+The daemon replaces each `{tm-new}` with the real id (`{tm-4cgfdxpi}`); copy the braced part with its id into any other note and edit either copy. Only the braced text is shared: the rest of each line, and any spaces just inside the braces, stay each note's own (the daemon never adds or removes them). Braces inside the text must balance (`{ a {b} c }` is fine); a brace group with no `{tm-…}` after it is just text. Obsidian shows the braces and id in reading view. If you delete only the `{tm-…}` part, the daemon puts it back when the braced text is unchanged; if you break the text as well, that copy simply stops being shared.
 
 **Damaged ids repair themselves.** Typing at the end of a line (which eats the space before its id) is fine. If a formatter or a typo breaks an id, the daemon never stops syncing the file: an exactly-restorable id comes back (a line that still reads exactly as before gets its id back even if the id itself was corrupted), otherwise the line simply gets a new node (an id it has never seen is adopted as it is, so a second machine or a reset database keeps your transclusions linked). The only thing that asks you anything is deleting a line whose node other things depend on (`akasha review list`).
 

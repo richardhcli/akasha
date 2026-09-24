@@ -92,8 +92,10 @@ _fence_content_strategy = st.text(alphabet=_SAFE_TEXT_ALPHABET, min_size=0, max_
 # Line kinds a generated document interleaves (spec T5.8-2): the original
 # four contract-construct kinds, plus three non-contract-construct kinds
 # that must survive write-back verbatim by position.
-_LINE_KINDS = ["paragraph", "task", "embed", "ref", "prose", "blank", "fence"]
-_ID_CONSUMING_KINDS = {"paragraph", "task", "embed", "ref"}
+_LINE_KINDS = ["paragraph", "task", "embed", "ref", "prose", "blank", "fence", "span", "multispan"]
+_ID_CONSUMING_KINDS = {"paragraph", "task", "embed", "ref", "span", "multispan"}
+_PAD = st.sampled_from(["", " ", "  "])
+_CONTEXT = st.sampled_from(["", "see ", "A: "])
 
 
 # --- Direction 1: render(parse(D)) == D --------------------------------------
@@ -158,6 +160,22 @@ def _canonical_document_strategy(draw: st.DrawFn) -> str:
             id_ = next(ids)
             path = draw(_path_strategy)
             lines.append(f"[[{path}#{contract_anchor(id_)}]]")
+        elif kind == "span":  # M20-A/E: braces, per-file padding, context on both sides
+            id_ = next(ids)
+            text = draw(_safe_text_strategy)
+            tail = draw(st.sampled_from(["", " done"]))
+            lead, trail = draw(_PAD), draw(_PAD)
+            lines.append(f"{draw(_CONTEXT)}{{{lead}{text}{trail}}}{{tm-{id_}}}{tail}")
+        elif kind == "multispan":  # M20-B: a span across lines, blank interior lines included
+            id_ = next(ids)
+            first, last = draw(_safe_text_strategy), draw(_safe_text_strategy)
+            inner = [
+                draw(st.one_of(_prose_line_strategy, st.just("")))
+                for _ in range(draw(st.integers(0, 3)))
+            ]
+            lines.append(f"{draw(_CONTEXT)}{{{draw(_PAD)}{first}")
+            lines.extend(inner)
+            lines.append(f"{last}{draw(_PAD)}}}{{tm-{id_}}}{draw(st.sampled_from(['', '!']))}")
         elif kind == "prose":
             lines.append(draw(_prose_line_strategy))
         elif kind == "blank":

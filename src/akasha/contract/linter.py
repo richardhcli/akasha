@@ -287,11 +287,79 @@ def _detect_dup_id(
     return violations, repairs
 
 
+def _detect_dup_spans(
+    file_lines: Sequence[str], current: BlockSet
+) -> tuple[list[Violation], list[Repair]]:
+    """A span id used again later in the same file: the copy becomes a new node (M20-G)."""
+    violations: list[Violation] = []
+    repairs: list[Repair] = []
+    marker_len = len(grammar.SPAN_ID_OPEN) + len("tm-") + ids.ID_LEN + len(grammar.SPAN_ID_CLOSE)
+    for dup in current.duplicate_spans:
+        msg = f"span id {dup.id!r} appears more than once in one file"
+        violations.append(
+            Violation(code="E_DUP_ID", id=dup.id, line_nos=[dup.marker_line], message=msg)
+        )
+        idx = dup.marker_line - 1
+        if not 0 <= idx < len(file_lines):
+            continue
+        line = file_lines[idx]
+        new_marker = f"{grammar.SPAN_ID_OPEN}tm-new{grammar.SPAN_ID_CLOSE}"
+        after = line[: dup.marker_col] + new_marker + line[dup.marker_col + marker_len :]
+        repairs.append(
+            Repair(
+                code="E_DUP_ID",
+                action="propose_tm_new",
+                id=dup.id,
+                line_no=dup.marker_line,
+                before=line,
+                after=after,
+            )
+        )
+    return violations, repairs
+
+
+def _restore_span_id(
+    file_lines: Sequence[str], eligible: set[int], block: Block
+) -> Repair | None:
+    """Certain repair: the base span's braces and text survive exactly, only its id wrapper is gone.
+
+    The one place ``{lead text trail}`` still appears (in eligible prose lines, not followed by an
+    id wrapper) gets ``{tm-<id>}`` put back. Byte-identical text is the same certainty as an
+    exact lost anchor; anything less is not guessed (PRD F13): the node follows the delete rules.
+    """
+    core = f"{grammar.SPAN_OPEN}{block.lead}{block.text}{block.trail}{grammar.SPAN_CLOSE}"
+    joined = "\n".join(file_lines)
+    starts = [m.start() for m in re.finditer(re.escape(core), joined)]
+    hits: list[tuple[int, int]] = []  # (end line_no, column just past the closing token)
+    for start in starts:
+        end = start + len(core)
+        if grammar.SPAN_ID_TAIL_RE.match(joined, end):
+            continue  # it still has an id wrapper (its own, or another node's)
+        first = joined.count("\n", 0, start) + 1
+        last = joined.count("\n", 0, end) + 1
+        if all(n in eligible for n in range(first, last + 1)):
+            hits.append((last, end - (joined.rfind("\n", 0, end) + 1)))
+    if len(hits) != 1:
+        return None
+    line_no, col = hits[0]
+    line = file_lines[line_no - 1]
+    marker = f"{grammar.SPAN_ID_OPEN}tm-{block.id}{grammar.SPAN_ID_CLOSE}"
+    return Repair(
+        code="E_LOST_ANCHOR",
+        action="reinsert_anchor",
+        id=block.id,
+        line_no=line_no,
+        before=line,
+        after=line[:col] + marker + line[col:],
+    )
+
+
 def _detect_lost_and_deleted(
     vault_lines: Sequence[tuple[int, str]],
     base: BlockSet,
     vault: BlockSet,
     maturity: MaturityLookup,
+    file_lines: Sequence[str] = (),
 ) -> tuple[list[Violation], list[Repair], list[ReviewItem]]:
     """E_LOST_ANCHOR (certain or review) and E_DELETED_S1 (always review)."""
     violations: list[Violation] = []
@@ -323,12 +391,30 @@ def _detect_lost_and_deleted(
         if base_id in vault.blocks:
             continue
 
-        expected_body = _block_body_without_anchor(base_block)
+        if base_block.kind == "span":
+            # A span is never fuzzy-matched: its text survives exactly with only the id wrapper
+            # gone (certain repair), or it is simply gone and the delete rules apply.
+            fix = _restore_span_id(file_lines, {n for n, _ in vault_lines}, base_block)
+            if fix is not None:
+                violations.append(
+                    Violation(
+                        code="E_LOST_ANCHOR",
+                        id=base_id,
+                        line_nos=[fix.line_no],
+                        message=f"span id wrapper for {base_id!r} missing; text intact",
+                    )
+                )
+                repairs.append(fix)
+                continue
+            expected_body = ""
+        else:
+            expected_body = _block_body_without_anchor(base_block)
+        is_span = base_block.kind == "span"
         best_idx: int | None = None
         best_ratio = 0.0
         exact = False
 
-        for i, (line_no, line, body, exact_only) in enumerate(candidates):
+        for i, (line_no, line, body, exact_only) in enumerate([] if is_span else candidates):
             if i in used_candidate_idxs:
                 continue
             if body == expected_body:
@@ -445,8 +531,13 @@ def lint(
     result.violations.extend(dup_v)
     result.repairs.extend(dup_repairs)
 
+    file_lines = file_text.split("\n")
+    span_dup_v, span_dup_repairs = _detect_dup_spans(file_lines, current)
+    result.violations.extend(span_dup_v)
+    result.repairs.extend(span_dup_repairs)
+
     lost_v, lost_repairs, lost_review = _detect_lost_and_deleted(
-        current_lines, base, current, maturity
+        current_lines, base, current, maturity, file_lines
     )
     # A corrupted id on a line that is byte-identical to a base block is restored to that
     # block's id (above); the "give it a new node" checksum repair for the same line yields.

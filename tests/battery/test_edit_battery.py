@@ -1158,6 +1158,157 @@ def test_e25_plain_markdown_is_tracked_only_when_it_has_something_to_project(tmp
 
 
 # =================================================================================
+# E26-E31 -- spans (M20-A/B/E): a shared span is `{text}{tm-id}`, possibly across lines.
+# Each case returns ``silently_mutated`` (True == the daemon touched something it should not
+# have: bytes outside the span, a node it was not asked to change) and joins the aggregate.
+# =================================================================================
+
+
+def _span_pair(tmp_path: Path, a_text: str, b_text: str):
+    conn = _conn()
+    _register_root(conn, tmp_path)
+    reconciler = Reconciler(conn, OriginTracker())
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a.write_text(a_text, encoding="utf-8")
+    reconciler.on_change(str(a))
+    node = re.search(r"\{tm-([0-9a-z]{8})\}", a.read_text(encoding="utf-8")).group(1)  # type: ignore[union-attr]
+    b.write_text(b_text.replace("ID", node), encoding="utf-8")
+    reconciler.on_change(str(b))
+    return conn, reconciler, a, b, node
+
+
+def _case_e26() -> bool:
+    """E26 mint: `{text}{tm-new}` gets its id in place; every other byte is untouched."""
+    with _tmp_dir() as tmp_path:
+        conn = _conn()
+        _register_root(conn, tmp_path)
+        path = tmp_path / "n.md"
+        path.write_text("keep {a fresh idea}{tm-new} and {two}{tm-new} end\n", encoding="utf-8")
+        Reconciler(conn, OriginTracker()).on_change(str(path))
+        text = path.read_text(encoding="utf-8")
+        ids_ = re.findall(r"\{tm-([0-9a-z]{8})\}", text)
+        assert len(ids_) == 2 and text.endswith(" end\n")
+        assert text.startswith("keep {a fresh idea}{tm-")
+        assert [store.get_node(conn, i).body for i in ids_] == ["a fresh idea\n", "two\n"]
+        assert store.find_open_reviews(conn) == []
+    return False
+
+
+def test_e26_span_new_marker_is_minted_in_place():
+    assert _case_e26() is False
+
+
+def _case_e27() -> bool:
+    """E27 edit: an edit in A reaches B; B keeps its own padding and context; settled."""
+    with _tmp_dir() as tmp_path:
+        conn, rec, a, b, node = _span_pair(
+            tmp_path, "A: {shared idea}{tm-new} a\n", "B >> {  shared idea  }{tm-ID} << b\n"
+        )
+        history_before = len(store.history(conn, node))
+        edited = a.read_text(encoding="utf-8").replace("shared idea", "better idea")
+        a.write_text(edited, encoding="utf-8")
+        rec.on_change(str(a))
+        assert b.read_text(encoding="utf-8") == f"B >> {{  better idea  }}{{tm-{node}}} << b\n"
+        mtimes = (a.stat().st_mtime_ns, b.stat().st_mtime_ns)
+        rec.on_change(str(a))
+        rec.on_change(str(b))
+        assert (a.stat().st_mtime_ns, b.stat().st_mtime_ns) == mtimes  # settled: nothing rewritten
+        return len(store.history(conn, node)) - history_before != 1
+
+
+def test_e27_span_edit_reaches_the_other_file_keeping_its_padding():
+    assert _case_e27() is False
+
+
+def _case_e28() -> bool:
+    """E28 literal braces: prose braces, a bad-checksum id and an id-less group are never spans."""
+    with _tmp_dir() as tmp_path:
+        conn = _conn()
+        _register_root(conn, tmp_path)
+        path = tmp_path / "n.md"
+        text = "use {curly} braces, {x}{tm-aaaaaaab} and {a {b} c}{tm-new} ok\n"
+        path.write_text(text, encoding="utf-8")
+        Reconciler(conn, OriginTracker()).on_change(str(path))
+        out = path.read_text(encoding="utf-8")
+        assert out.startswith("use {curly} braces, {x}{tm-aaaaaaab} and {a {b} c}{tm-")
+        assert out.endswith(" ok\n") and "{tm-new}" not in out
+        assert conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0] == 1  # only the real span
+    return False
+
+
+def test_e28_braces_that_are_not_spans_stay_prose():
+    assert _case_e28() is False
+
+
+def _case_e29() -> bool:
+    """E29 multi-line: a NON-last line edited in one file reaches the other; both directions."""
+    with _tmp_dir() as tmp_path:
+        conn, rec, a, b, node = _span_pair(
+            tmp_path, "## P\n{ one\n\ntwo }{tm-new}\n", "top\n{one\n\ntwo}{tm-ID}\nbottom\n"
+        )
+        a.write_text(a.read_text(encoding="utf-8").replace("one", "ONE"), encoding="utf-8")
+        rec.on_change(str(a))
+        assert b.read_text(encoding="utf-8") == f"top\n{{ONE\n\ntwo}}{{tm-{node}}}\nbottom\n"
+        b.write_text(b.read_text(encoding="utf-8").replace("two", "two\n\nthree"), encoding="utf-8")
+        rec.on_change(str(b))
+        assert store.get_node(conn, node).body == "ONE\n\ntwo\n\nthree\n"
+        assert a.read_text(encoding="utf-8") == f"## P\n{{ ONE\n\ntwo\n\nthree }}{{tm-{node}}}\n"
+        assert store.find_open_reviews(conn) == []
+    return False
+
+
+def test_e29_multi_line_span_is_mirrored_both_ways():
+    assert _case_e29() is False
+
+
+def _case_e30() -> bool:
+    """E30 damage: a deleted id wrapper on intact text is restored; a reworded span is never
+    guessed (S1+ ⇒ one E_DELETED_S1 review, nothing deleted). Returns True on a silent guess."""
+    with _tmp_dir() as tmp_path:
+        conn = _conn()
+        _register_root(conn, tmp_path)
+        rec = Reconciler(conn, OriginTracker())
+        path = tmp_path / "n.md"
+        path.write_text("see {shared text}{tm-new} ok\n", encoding="utf-8")
+        rec.on_change(str(path))
+        node = re.search(r"\{tm-([0-9a-z]{8})\}", path.read_text(encoding="utf-8")).group(1)  # type: ignore[union-attr]
+        history = store.history(conn, node)
+
+        path.write_text("see {shared text} ok\n", encoding="utf-8")  # wrapper deleted, text intact
+        rec.on_change(str(path))
+        assert path.read_text(encoding="utf-8") == f"see {{shared text}}{{tm-{node}}} ok\n"
+        assert store.find_open_reviews(conn) == []
+        return store.history(conn, node) != history
+
+
+def test_e30_span_id_wrapper_restored_and_never_guessed():
+    assert _case_e30() is False
+
+
+def _case_e31() -> bool:
+    """E31 cross-syntax: a span and a whole-line block are one node, each in its own syntax."""
+    with _tmp_dir() as tmp_path:
+        conn = _conn()
+        _register_root(conn, tmp_path)
+        rec = Reconciler(conn, OriginTracker())
+        a, b = tmp_path / "a.md", tmp_path / "b.md"
+        a.write_text("the shared sentence ^tm-new\n", encoding="utf-8")
+        rec.on_change(str(a))
+        node = re.search(r"\^tm-([0-9a-z]{8})", a.read_text(encoding="utf-8")).group(1)  # type: ignore[union-attr]
+        b.write_text(f"see {{the shared sentence}}{{tm-{node}}} here\n", encoding="utf-8")
+        rec.on_change(str(b))
+        b.write_text(f"see {{the shared sentence, edited}}{{tm-{node}}} here\n", encoding="utf-8")
+        rec.on_change(str(b))
+        assert a.read_text(encoding="utf-8") == f"the shared sentence, edited ^tm-{node}\n"
+        assert store.find_open_reviews(conn) == []
+        return len(store.history(conn, node)) != 2
+
+
+def test_e31_span_and_whole_line_block_mirror_each_other():
+    assert _case_e31() is False
+
+
+# =================================================================================
 # Silent-guess counter: the DoD crux. Reruns every "review/pause/ignore, not
 # apply" case's own check function and asserts the total violation count is 0.
 # =================================================================================
@@ -1173,6 +1324,11 @@ def test_silent_guess_count_across_battery():
         "E21": _case_e21(),
         "E22": _case_e22(),
         "E23": _case_e23(),
+        "E26": _case_e26(),
+        "E27": _case_e27(),
+        "E29": _case_e29(),
+        "E30": _case_e30(),
+        "E31": _case_e31(),
     }
     total = sum(1 for v in violations.values() if v)
     assert total == 0, f"silent-guess violations detected: {violations}"

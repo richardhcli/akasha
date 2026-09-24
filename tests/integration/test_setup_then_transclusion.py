@@ -28,6 +28,7 @@ from akasha.cli.main import app as cli_app
 
 runner = CliRunner()
 _ID_RE = re.compile(r"\^tm-[0-9a-z]{8}")
+_SPAN_ID_RE = re.compile(r"\{tm-([0-9a-z]{8})\}")
 _CEILING_SECONDS = 10.0  # the assertion ceiling; measured propagation is about half a second
 
 
@@ -70,6 +71,12 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, A
                 os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
             except ProcessLookupError:
                 pass
+
+
+def _headers(setup_result: Any) -> dict[str, str]:
+    match = re.search(r"export AKASHA_TOKEN=(\S+)", setup_result.output)
+    assert match, setup_result.output
+    return {"Authorization": f"Bearer {match.group(1)}"}
 
 
 def _wait_until(predicate: Callable[[], bool], timeout: float = _CEILING_SECONDS) -> bool:
@@ -225,3 +232,63 @@ def test_a_formatter_storm_never_stops_the_file_syncing(env: dict[str, Any]) -> 
     # ...and the file still syncs: an edit of the transcluded line reaches the mirror
     notes.write_text(text.replace(f"{body} 5", f"{body} FIVE"), encoding="utf-8")
     assert _wait_until(lambda: "FIVE" in mirror.read_text(encoding="utf-8"))
+
+
+def test_spans_transclude_part_of_a_line_and_several_lines_after_one_setup(
+    env: dict[str, Any],
+) -> None:
+    """M20-A/B/E through the real daemon: `{text}{tm-id}` shares only the braced text, across
+    lines too; each file keeps its own surroundings and padding; no header is ever added."""
+    vault: Path = env["vault"]
+    one, two, three = vault / "one.md", vault / "two.md", vault / "three.md"
+    one.write_text(
+        "# Plan\n\nThe launch is on {friday the 13th}{tm-new} unless it rains.\n\n"
+        "{ Bring the tent\n\nand the stove }{tm-new}\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(cli_app, ["setup", "--config", env["config"], str(vault)])
+    assert result.exit_code == 0, result.output
+    ids = _SPAN_ID_RE.findall(one.read_text(encoding="utf-8"))
+    assert len(ids) == 2, one.read_text(encoding="utf-8")
+    date_id, list_id = ids
+
+    two.write_text(
+        f"Reminder: {{friday the 13th}}{{tm-{date_id}}} (do not forget)\n", encoding="utf-8"
+    )
+    three.write_text(
+        f"Checklist\n{{Bring the tent\n\nand the stove}}{{tm-{list_id}}}\nend\n", encoding="utf-8"
+    )
+
+    def tracked() -> int:
+        return len(
+            httpx.get(f"{env['url']}/v1/sync/status", headers=_headers(result)).json()[
+                "sync_roots"
+            ][0]["files"]
+        )
+
+    assert _wait_until(lambda: tracked() == 3)
+
+    _edit(two, "friday the 13th", "monday the 16th")  # a span in the middle of a sentence
+    assert _wait_until(lambda: "monday the 16th" in one.read_text(encoding="utf-8"))
+    assert one.read_text(encoding="utf-8").startswith(
+        "# Plan\n\nThe launch is on {monday the 16th}"
+    )
+    assert "unless it rains." in one.read_text(encoding="utf-8")  # its own context, untouched
+
+    _edit(three, "Bring the tent", "Bring TWO tents")  # a NON-last line of a multi-line span
+    assert _wait_until(lambda: "TWO tents" in one.read_text(encoding="utf-8"))
+    assert "{ Bring TWO tents\n\nand the stove }{tm-" in one.read_text(
+        encoding="utf-8"
+    )  # its padding
+
+    _edit(one, "and the stove", "and the stove\n\nand a map")  # the multi-line text grows
+    assert _wait_until(lambda: "and a map" in three.read_text(encoding="utf-8"))
+    assert three.read_text(encoding="utf-8").startswith(
+        "Checklist\n{Bring TWO tents\n\nand the stove"
+    )
+
+    reviews = httpx.get(f"{env['url']}/v1/review?status=open", headers=_headers(result)).json()
+    assert reviews["reviews"] == []
+    for note in (one, two, three):
+        assert not note.read_text(encoding="utf-8").startswith("---"), note.name
+
