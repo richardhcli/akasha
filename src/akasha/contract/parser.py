@@ -1,32 +1,15 @@
-"""Parser: managed-file contract text -> ``BlockSet`` (task T3.2, spec §4.7).
+"""Parser: contract text -> ``BlockSet`` (spec §4.7).
 
-This module turns one managed file's raw text into the anchored
-block/task structure described by the contract grammar v1
-(``akasha.contract.grammar``). It is line-oriented and reuses every
-token/regex from ``grammar.py`` verbatim — no pattern is redefined here.
+Line-oriented, reusing every token and regex of ``grammar.py``. There is no file marker (M20-C):
+every file is parsed and one with no construct yields an empty :class:`BlockSet`; an initial
+front-matter block is never interpreted (its lines pass through as raw lines, see
+:func:`front_matter_end`). Text is not canonicalized here (``kernel/canonical.py``, §4.3): the
+input is split on ``"\\n"``, one logical line per element. Fenced code is tracked line by line and
+ignored.
 
-File-level rule (spec §4.7, M20-C): there is no file marker. Every file is
-parsed; one with no contract construct yields an empty :class:`BlockSet`. An
-initial YAML front-matter block is **never interpreted**: its lines pass
-through as raw lines (see :func:`front_matter_end`).
-
-Text handling: this module does **not** normalize/canonicalize text (that is
-``kernel/canonical.py``'s job, spec §4.3) — it simply splits the input on
-``"\\n"`` and treats each resulting element as one logical line.
-
-Fenced code (```` ``` ````-delimited, detected via ``grammar.FENCE_RE``) is
-tracked line-by-line and its contents are ignored entirely, per spec §4.7:
-"Anything inside fenced code blocks is ignored entirely."
-
-Parent/child derivation for nested tasks: an indented ``task_line`` under
-another task implies a `composes(parent->child)` edge downstream (creating
-that edge is T1.4's ``store.create_edge`` job, not this module's); this
-parser only records, per task block, the id of the nearest preceding task
-block whose indent depth is smaller than its own (the narrowest reading of
-"the nearest preceding task block at depth-1 is the parent" — a well-formed
-document never skips a depth, so "nearest shallower" and "depth-1" coincide;
-this parser does not reject documents that skip a depth, it just picks the
-nearest shallower task as parent).
+Nesting: an indented task records only the id of the nearest preceding SHALLOWER task block as its
+parent (creating the ``composes`` edge is ``store.create_edge``'s job); a skipped depth is
+tolerated.
 """
 
 from __future__ import annotations
@@ -43,16 +26,13 @@ from akasha.kernel import ids
 
 
 class Block(BaseModel):
-    """A single anchored block: a managed paragraph, a task line, or a span.
-
-    Mirrors ``kernel.model.Node``'s convention of a single model with
-    task-only fields left at their defaults for non-task blocks
-    (``task_state``, ``depth``, ``parent_id``).
+    """An anchored block: a managed paragraph, a task line, or a span. Task-only fields
+    (``task_state``, ``depth``, ``parent_id``) stay at their defaults otherwise.
 
     A ``span`` (M20-A/B/E) shares only the text between its braces, possibly across lines:
     ``line_no``/``col`` locate its opening brace, ``end_line_no``/``end_col`` the character just
-    past its ``{tm-id}`` wrapper, and ``lead``/``trail`` are the whitespace just inside the
-    braces -- per file, never part of ``text`` (which is trimmed) and never edited by the daemon.
+    past its ``{tm-id}`` wrapper, ``lead``/``trail`` the whitespace just inside the braces: per
+    file, never part of ``text`` (which is trimmed) and never edited by the daemon.
     """
 
     id: str
@@ -114,17 +94,11 @@ class DuplicateSpan(BaseModel):
 class BlockSet(BaseModel):
     """Parsed structure of one file (spec §4.7).
 
-    ``blocks`` is keyed by anchor id and holds both paragraph and task
-    blocks in a single namespace (ids are globally unique per sync root
-    regardless of block kind); iteration order follows insertion order,
-    which mirrors document order since ``parse()`` walks top-to-bottom.
-
-    Lossless-container field (task T5.8-2, fable-designed): a file is a
-    lossless container -- lines that are not contract constructs (prose,
-    blanks, fenced examples, unknown/malformed anchors, an un-minted
-    ``^tm-new`` line, and an initial front-matter block) survive write-back
-    verbatim by position. ``raw_lines`` holds those verbatim lines,
-    1-indexed by source ``line_no`` (mirrors ``Block.line_no``'s convention).
+    ``blocks`` maps anchor id to block (paragraphs, tasks and spans share one namespace, ids being
+    unique per sync root) in document order. A file is a lossless container: every line that is not
+    a construct (prose, blanks, fenced examples, unknown anchors, an un-minted ``^tm-new``, a
+    front-matter block) survives write-back verbatim in ``raw_lines``, keyed by 1-indexed line
+    number.
     """
 
     blocks: dict[str, Block] = {}
@@ -194,12 +168,10 @@ def _find_span_at(
 ) -> _FoundSpan | None:
     """The span whose opening token is at (``start_line``, ``start_col``), or ``None``.
 
-    Counts nested open/close tokens; the span ends at the first close token that returns the
-    depth to 0 AND is immediately followed by the id wrapper (``{tm-<id8>}`` / ``{tm-new}``).
-    Depth reaching 0 without that suffix, an unbalanced run, a construct/fence/front-matter line
-    in the range, or a cap (lines, characters, or the file's token ``budget``) all mean "this
-    token is literal prose". Every line in the range must be a prose line, so a span never
-    swallows a whole-line construct.
+    Counts open/close tokens; the span ends at the first close that returns the depth to 0 AND is
+    immediately followed by the id wrapper (``{tm-<id8>}`` / ``{tm-new}``). Anything else (depth 0
+    with no wrapper, unbalanced braces, a non-prose line in range, or a cap on lines, characters or
+    the file's token ``budget``) makes the token literal prose.
     """
     open_tok = grammar.SPAN_OPEN
     depth = 0
@@ -320,20 +292,13 @@ def _parent_for_depth(stack: list[tuple[int, str]], depth: int) -> str | None:
 
 
 def parse(text: str) -> BlockSet:
-    """Parse file text into a :class:`BlockSet` (spec §4.7).
+    """Parse file text into a :class:`BlockSet` (spec §4.7); no canonicalization.
 
-    ``text`` is split on ``"\\n"``; no canonicalization is performed here. There is no
-    file marker (M20-C): every file is parsed, and a file with no contract construct
-    yields a :class:`BlockSet` with no blocks (``has_constructs()`` is false).
-
-    Lossless-container classification (task T5.8-2, fable-designed): every source
-    line is either a recognized contract construct (a ``Block``, a standalone
-    ``Embed``/``Ref`` token, or a ``^tm-new`` :class:`NewRequest`) or a verbatim
-    ``raw_lines`` entry -- never silently dropped. An initial front-matter block is
-    all raw lines. The one exception is the single trailing ``""`` artifact
-    ``str.split("\\n")`` produces when ``text`` ends with a newline (or is itself
-    ``""``): that element is not a logical line and is never captured, which keeps
-    ``render(parse(D)) == D`` exact for already-canonical (single-trailing-newline) ``D``.
+    Every line is a construct (a ``Block``, standalone ``Embed``/``Ref``, or ``^tm-new``
+    :class:`NewRequest`) or a verbatim ``raw_lines`` entry, never dropped, so ``render(parse(D)) ==
+    D`` for canonical ``D``; the one exception is the empty element ``split`` yields after a
+    trailing newline. A front-matter block is all raw lines, and a file with no construct has
+    ``has_constructs()`` false.
     """
     raw_split = text.split("\n")
     lines = raw_split[:-1] if raw_split and raw_split[-1] == "" else raw_split

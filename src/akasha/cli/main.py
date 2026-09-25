@@ -1,81 +1,29 @@
-"""CLI verbs (build-plan task T4.8, spec §4.12): a pure HTTP client.
+"""CLI verbs (spec §4.12): a thin ``typer`` HTTP client over the localhost API (spec §4.11).
 
-This module is a thin ``typer`` client over the localhost API (spec §4.11)
-— it never imports ``kernel/store.py`` and never touches SQLite directly
-(build-plan rule 0.4; every persistent write happens on the daemon side,
-behind the API). The one exception is ``kernel.ids.mint()`` for
-client-side facet-id generation (``--facet name=span``, see below) — that
-function is documented as pure/DB-free (spec §4.1, ``kernel/ids.py``
-docstring: "Minting here is pure (no DB access)") and is already reused
-by the (non-store) contract layer (``contract/render.py``,
-``contract/linter.py``) for the same reason, so this is not a rule-0.4
-violation.
+Except for the process and bootstrap verbs, this module never imports ``kernel/store.py`` or
+touches SQLite (rule 0.4): every write happens daemon-side. Two deliberate exceptions to "pure
+client":
 
-Verbs (spec §4.12): ``new/get/set/rm/search/review/token/export/daemon/init/sync``,
-plus build-plan additions ``neighborhood``/``history`` (T14.1),
-``edge add``/``edge rm`` (T14.2, both over the already-shipped
-``POST /v1/edges``/``DELETE /v1/edges/{id}``, spec §4.11), and ``vet``
-(T14.3, over the already-shipped ``POST /v1/nodes/{id}/vet``, spec §4.11).
-Unlike every other verb, ``daemon`` does not speak HTTP to an
-already-running server -- it *is* the server process: it loads config,
-acquires the single-instance lock (``akasha.daemon.single_instance_lock``,
-build-plan task T4.9), and serves the API in-process via uvicorn. That
-work lives in ``akasha/daemon.py`` (not here) so this module's "pure HTTP
-client, no SQLite" contract holds for every other verb (including
-``export``, task T10.2, a pure client of ``GET /v1/sync/export`` -- see
-its own docstring below); the ``daemon`` command below is a thin dispatch
-to ``akasha.daemon.serve``.
+* ``daemon`` (and ``up``/``down``/``tray``) is the server process, not a client: it delegates to
+  ``akasha/daemon.py``.
+* ``init`` and ``setup`` use the store directly (``connect``/``run_migrations``/``create_token``)
+  because the very first human token cannot come from ``POST /v1/tokens``, which is
+  ``require_human`` and a fresh database has no token yet. They mint the identical row and bearer
+  shape through the same ``api/auth.py`` helpers; no authless HTTP surface is added.
 
-``init`` (task T12.1, closing ``docs/spec-questions.md`` T11.1) is the
-second, deliberate exception to the "pure HTTP client" rule: it talks to
-``kernel/store.py`` directly (via ``store.connect``/``store.run_migrations``/
-``store.create_token``, the same helpers ``daemon``'s startup path and
-``api/routes/tokens.py::create_token`` already use) rather than a new HTTP
-endpoint, because the very first human token cannot be minted through
-``POST /v1/tokens`` -- that route is ``require_human`` and a fresh DB has
-no token to authenticate with yet. No new authless HTTP surface is added;
-``init`` mints the identical ``tokens`` row/bearer-token shape
-``POST /v1/tokens`` does, via the same ``api/auth.py::mint_secret``/
-``hash_secret``/``format_bearer_token`` helpers.
+``kernel.ids.mint()`` is also used client-side for ``--facet name=span`` ids: it is pure, no DB.
 
-Global flags: ``--json`` (versioned ``cli/v1`` output, additive-only),
-``--dry-run`` (mutating verbs print the would-be request and exit 0
-without sending it), ``--token`` (bearer). ``--base-url`` is this client's
-documented wiring override for pointing at a non-default daemon; it also
-supports live integration tests and defaults to the spec's
-``127.0.0.1:7433``. ``--token`` and ``--base-url`` also read the
-``AKASHA_TOKEN`` / ``AKASHA_BASE_URL`` environment variables (build-plan
-T18.2; flag > environment > default; ``daemon``/``init``/``tray`` ignore both).
+Global flags: ``--json`` (versioned, additive-only ``cli/v1`` output), ``--dry-run`` (a mutating
+verb prints the would-be request and exits 0; every mutating verb goes through ``_mutate``, which a
+source-scanning meta-test in ``test_cli_dry_run.py`` enforces), ``--token``, and ``--base-url``
+(defaults to the spec's ``127.0.0.1:7433``). ``--token`` and ``--base-url`` also read
+``AKASHA_TOKEN`` / ``AKASHA_BASE_URL`` (flag > environment > default; the process verbs ignore
+both).
 
-Exit codes (spec §4.12): 0 ok · 1 error · 2 usage · 3 not found · 4
-conflict/violation/needs-redirect. Click/typer already exits 2 on its own
-argument-parsing failures (missing/malformed CLI args), so this module
-only needs to map *server* responses (via ``_exit_code_for``) plus a
-handful of client-side "usage" checks (e.g. a malformed ``--facet``
-value) that typer's own parser cannot validate.
-
-``review list``/``review resolve`` call the documented future
-``GET /v1/review`` / ``POST /v1/review/{id}/resolve`` endpoints. Until
-T7.5 lands them, any HTTP 404 (envelope or not) maps to exit 3 without a
-traceback; no CLI-side contract change is expected when the routes arrive.
-
-T9.4 audit note: every mutating verb (``new``/``set``/``rm``/
-``review resolve``/``token create``/``token revoke``) already funneled
-through the shared ``_mutate`` helper as of T4.8, so ``--dry-run``
-coverage was already structurally complete — confirmed, not re-derived,
-by ``tests/integration/test_cli_dry_run.py``'s source-scanning meta-test,
-which fails if a future verb calls ``_request`` with a mutating HTTP
-method (bypassing ``--dry-run``) instead of ``_mutate``. The one real gap
-found and fixed: ``_usage_error`` (client-side argument validation, exit
-2) did not honor ``--json`` and always printed the plain-text form even
-under ``--json`` — unlike ``_fail`` (server-reported errors), which
-already emitted the ``cli/v1`` envelope. Fixed by threading ``state``
-through ``_usage_error`` and its callers (``_parse_facets``,
-``token create``) so both client- and server-rejected requests get a
-consistent, machine-parseable error shape under ``--json``. Also
-clarified the connection-error message (``E_CONNECTION``) to name the
-unreachable ``--base-url`` explicitly rather than a bare httpx exception
-string.
+Exit codes (spec §4.12): 0 ok, 1 error, 2 usage, 3 not found, 4 conflict/violation/needs-redirect.
+typer exits 2 on its own parse failures; this module maps server responses (``_exit_code_for``) and
+the few client-side checks typer cannot express (a malformed ``--facet``), which honor ``--json``
+like server errors do (``_usage_error``). ``review list``/``resolve`` map any HTTP 404 to exit 3.
 """
 
 from __future__ import annotations
@@ -111,16 +59,10 @@ from akasha.contract import grammar
 if TYPE_CHECKING:
     import httpx
 
-# Windows consoles default `sys.stdout`/`sys.stderr` to the legacy locale
-# codepage (e.g. cp1252), not UTF-8 -- confirmed live on a real Windows 11
-# host, where this crashed several `--help` invocations with
-# UnicodeEncodeError on a plain U+2205 character in a command docstring.
-# UTF-8 can represent every Unicode string losslessly, so reconfiguring
-# here removes the crash risk entirely rather than avoiding specific
-# characters case by case. The `isinstance` check (not just `hasattr`)
-# both narrows the type for pyright and skips streams that have already
-# been replaced with something that doesn't support `.reconfigure` (e.g.
-# click's test `CliRunner`).
+# Windows consoles default stdout/stderr to the legacy codepage (cp1252), which crashed ``--help``
+# on a non-ASCII character in a command docstring (seen on Windows 11). Reconfiguring to UTF-8
+# removes the class of crash. The ``isinstance`` check narrows the type and skips streams that
+# cannot ``reconfigure`` (click's ``CliRunner``).
 if sys.platform == "win32":  # pragma: no cover - platform-specific, see T9.1/T9.2 precedent
     for _stream in (sys.stdout, sys.stderr):
         if isinstance(_stream, io.TextIOWrapper):
@@ -254,28 +196,15 @@ def _echo_dry_run(state: CliState, method: str, path: str, body: dict[str, Any] 
 
 
 def _exit_code_for(status_code: int, code: str) -> int:
-    """Map an HTTP status / error code to a spec §4.12 exit code.
+    """Map an HTTP status / error code to a spec §4.12 exit code: 404 / ``E_NOT_FOUND`` -> 3; 409 /
+    ``E_NEEDS_REDIRECT`` (any conflict-ish code) -> 4; everything else -> 1 (usage errors, 2, are
+    typer's own parse failures).
 
-    404 / ``E_NOT_FOUND`` -> 3; 409 / ``E_NEEDS_REDIRECT`` (and any other
-    conflict-ish code) -> 4; everything else the server returns -> 1
-    (usage errors, code 2, are reserved for this CLI's own argument
-    parsing — see module docstring).
-
-    # SPEC-QUESTION (T14.2): ``POST /v1/edges``' facet-binding-rule
-    # rejection (a justification edge with no ``facet_binding``) is a
-    # ``400 E_INVALID`` (``api/routes/edges.py``), which this mapping
-    # sends to exit 1 — spec §4.12's exit-code table reads "4
-    # conflict/violation/needs-redirect", and every existing use of the
-    # word "violation" elsewhere in this codebase (``cause_kind="violation"``
-    # review items, ``sync/reconcile.py``) names a *contract*-violation
-    # concept unrelated to generic request validation, and ``E_INVALID``
-    # is used identically (400, exit 1) by every other verb's own
-    # server-side validation (e.g. ``new`` with a malformed ``node_type``,
-    # ``sync add`` with a bad root path) with no dedicated test anywhere
-    # pinning a different exit code for it. Narrowest reading: leave this
-    # shared mapping untouched rather than widen it (a cross-cutting
-    # change touching every verb, not scoped to edges) — see
-    # docs/spec-questions.md T14.2 entry.
+    # SPEC-QUESTION (T14.2): a facet-binding rejection is ``400 E_INVALID`` and maps to 1.
+    # §4.12's "4 conflict/violation/needs-redirect" uses "violation" for CONTRACT violations
+    # elsewhere, and ``E_INVALID`` is used the same way by every verb's validation. Narrowest
+    # reading: leave this shared mapping alone rather than widen it for one verb. See
+    # docs/spec-questions.md T14.2.
     """
     if status_code == 404 or code == "E_NOT_FOUND":
         return 3
@@ -321,14 +250,9 @@ def _fail(
 
 
 def _usage_error(state: CliState, message: str) -> NoReturn:
-    """Client-side argument-validation failure (exit 2, spec §4.12).
-
-    ``E_USAGE`` is a CLI-local code (never sent by the server) for the
-    handful of checks typer's own parser cannot express (e.g. `--facet`
-    shape) — same precedent as ``_request``'s ``E_CONNECTION`` below.
-    Honors ``--json`` so a scripted/machine caller always gets the
-    documented ``cli/v1`` envelope regardless of which layer rejected the
-    input, matching ``_fail``'s server-error behavior below.
+    """Client-side argument-validation failure (exit 2, spec §4.12). ``E_USAGE`` is CLI-local
+    (never sent by the server) for checks typer cannot express, like ``E_CONNECTION``. It honors
+    ``--json`` so a script always gets the ``cli/v1`` envelope whichever layer rejected the input.
     """
     if state.json_mode:
         typer.echo(
@@ -347,13 +271,12 @@ def _usage_error(state: CliState, message: str) -> NoReturn:
 
 
 def _autostart_daemon(state: CliState) -> bool:
-    """Start the default local daemon on demand after a refused connection (T18.4).
+    """Start the default local daemon on demand after a refused connection (T18.4); True iff
+    started.
 
-    Only for the default endpoint (never an explicit --base-url / AKASHA_BASE_URL:
-    test daemons and remote hosts are not ours to spawn), never with
-    ``AKASHA_NO_AUTOSTART`` set. Never silent: one line on stderr. Safe because startup
-    reconcile is idempotent (spec §4.8), so anything edited while the daemon was
-    down is picked up on start. Returns True iff a daemon was started.
+    Only for the default endpoint (an explicit ``--base-url`` / ``AKASHA_BASE_URL`` is not ours to
+    spawn) and never with ``AKASHA_NO_AUTOSTART``. Never silent: one line on stderr. Safe because
+    startup reconcile is idempotent (spec §4.8).
     """
     if not state.default_endpoint or os.environ.get("AKASHA_NO_AUTOSTART"):
         return False
@@ -432,13 +355,9 @@ def _mutate(
 
 
 def _parse_facets(state: CliState, raw: list[str]) -> list[dict[str, Any]]:
-    """Parse repeated ``--facet name=span`` into full ``Facet`` dicts.
-
-    The API's ``Facet`` model (spec §4.2) requires ``facet_id``/``version``
-    in addition to ``name``/``span``; the CLI syntax only names the two
-    human-supplied fields (spec §4.12), so a fresh ``facet_id`` is minted
-    client-side (``kernel.ids.mint()`` — pure, no DB, see module
-    docstring) and ``version`` starts at 1, matching a brand-new facet.
+    """Parse repeated ``--facet name=span`` into ``Facet`` dicts. The API model needs ``facet_id``
+    and ``version`` too, so a fresh id is minted client-side (``ids.mint()``: pure) and ``version``
+    is 1.
     """
     from akasha.kernel import ids
 
@@ -1113,21 +1032,12 @@ def vet(ctx: typer.Context, node_id: str) -> None:
     state = _state(ctx)
     result = _mutate(state, "POST", f"/v1/nodes/{node_id}/vet", None)
     if state.json_mode:
-        # SPEC-QUESTION (T14.3): PRD R9's parenthetical ("including MCP
-        # responses") explicitly extends the "never say the forbidden word"
-        # rule to at least one machine-facing surface, and the API's
-        # `vetted` field is a literal JSON boolean -- so a freshly-vetted
-        # node's `--json` output here necessarily contains that literal
-        # token. Narrowest reading taken here: `--json` is this CLI's
-        # documented, versioned wire contract (`cli/v1`), the same contract
-        # every other verb's `--json` mode gives a scripted caller
-        # unmodified (contrast the MCP surface R9 names, which speaks
-        # generated prose to a model, not a fixed JSON schema to a script)
-        # -- so it passes the real API response through verbatim rather
-        # than inventing a divergent response shape for this one verb
-        # (rule 0.2). This is a genuine open question, not settled by this
-        # task's narrowest reading alone -- see docs/spec-questions.md
-        # T14.3 for the human ruling needed.
+        # SPEC-QUESTION (T14.3): PRD R9's "including MCP responses" extends the
+        # never-say-the-forbidden-word rule to machine-facing surfaces, yet the API's ``vetted`` is
+        # a literal JSON boolean, so a vetted node's ``--json`` output contains that token.
+        # Narrowest reading: ``--json`` is this CLI's versioned wire contract (``cli/v1``) and
+        # passes the API response through verbatim rather than inventing a divergent shape for one
+        # verb (rule 0.2). Open; needs a human ruling (docs/spec-questions.md T14.3).
         typer.echo(json_lib.dumps({"schema": CLI_SCHEMA, "ok": True, "data": result}))
     else:
         maturity = result.get("maturity", "?")

@@ -1,31 +1,15 @@
-"""SQLite access layer. The only module that writes SQLite (build-plan rule 0.4).
+"""SQLite access layer: the only module that writes SQLite (rule 0.4).
 
-Carries the migration runner (task T0.3), the node/commit-DAG store API
-(task T1.3, spec §4.5), the edge create/retract + neighborhood/search
-surface (task T1.4, spec §4.5, §4.2, §4.4), and deletion/tombstone/
-redirects/split/merge plus maturity-recompute wiring (task T1.6, spec
-§4.5, §4.6, §4.4 redirects table). Review queue + GC land in subsequent
-M1 tasks.
+Migration runner, node/commit-DAG store, edges, deletion/redirects/split/merge, maturity recompute,
+review queue, tokens, sync roots and files, GC.
 
-Content-addressing scheme used throughout (not spelled out verbatim in the
-DDL, spec §4.4, beyond "hash TEXT PRIMARY KEY" columns; narrowest reading
-chosen here, see individual docstrings): both ``objects.hash`` and
-``commits.hash`` are the sha256 hex digest (``canonical.object_hash``) of
-the canonical-JSON (``canonical.canonical_json``) encoding of their own
-content, mirroring how ``objects.hash`` is already used as a content
-address for object bytes. A node's versioned content (body, facets,
-task_state) is stored as one canonical-JSON blob per ``objects`` row
-(kind ``"node_snapshot"``); ``node_type``/``maturity``/``status``/``vetted``
-live only on the ``nodes`` row (not versioned by commits).
+Content addressing: ``objects.hash`` and ``commits.hash`` are the sha256 of the canonical JSON of
+their own content. A node's versioned content (body, facets, task_state) is one ``node_snapshot``
+object; ``node_type``/``maturity``/``status``/``vetted`` live only on the ``nodes`` row.
 
-# SPEC-QUESTION (T1.3): §4.4/§4.5 name ``objects.bytes``/``commits.hash`` but
-# never pin down (a) the exact byte layout of a node's versioned content
-# blob, (b) whether ``commits.hash`` is content-addressed (git-style) or a
-# minted id8 like other ids, or (c) which order ``history(id)`` returns
-# commits in. Narrowest reading implemented above; each is independently
-# testable/replaceable without an on-disk-format break to other modules
-# (facets are not represented anywhere else in the DDL, so they must live
-# in the object blob). See docs/spec-questions.md entry for T1.3.
+# SPEC-QUESTION (T1.3): §4.4/§4.5 do not pin the blob layout, whether ``commits.hash`` is
+# content-addressed, or ``history()`` order. Narrowest reading above; docs/spec-questions.md
+# T1.3.
 """
 
 from __future__ import annotations
@@ -53,28 +37,12 @@ from akasha.kernel.model import (
 
 
 def _migrations_dir() -> Path:
-    """Resolve the ``migrations/`` directory (build-plan T0.3).
+    """Resolve ``migrations/``: the packaged copy (installed wheel), the PyInstaller bundle, else
+    the repo root.
 
-    Source checkout (every test, the CLI, `uv run akasha daemon`): unchanged
-    from before -- `migrations/` lives at the repo root, 3 parents up from
-    this file (`kernel/` -> `akasha/` -> `src/` -> repo root).
-
-    Installed wheel (T18.1, `uv tool install`/`pipx`/`pip`): `pyproject.toml`
-    force-includes the directory as package data at `akasha/migrations`, so
-    it sits one parent up from this file. That branch is checked before the
-    repo-root fallback and only matches when the packaged copy exists -- a
-    source checkout has no `src/akasha/migrations`, so it is unaffected.
-
-    # SPEC-QUESTION (T12.5): a PyInstaller-frozen build has no repo root at
-    # all -- everything lives under `sys._MEIPASS` -- so `parents[3]` would
-    # resolve to an arbitrary OS temp-dir ancestor instead of `migrations/`,
-    # breaking `akasha.exe` on first run (`run_migrations` can't find any
-    # `.sql` files). Narrowest fix: check `sys.frozen` first and look for
-    # `migrations/` bundled alongside the `akasha` package there instead
-    # (`scripts/windows/build-exe.ps1`'s `--add-data` wires that up).
-    # Behavior for every existing (non-frozen) caller is byte-for-byte
-    # unchanged -- `sys.frozen` is only ever true inside a PyInstaller
-    # bundle, never under pytest/dev/CI. See docs/spec-questions.md.
+    # SPEC-QUESTION (T12.5): a frozen build has no repo root (everything is under
+    # ``sys._MEIPASS``), so ``parents[3]`` would point at an arbitrary temp ancestor; check
+    # ``sys.frozen`` first. Non-frozen callers are unaffected. See docs/spec-questions.md.
     """
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "migrations"  # type: ignore[attr-defined]
@@ -157,15 +125,10 @@ def _now() -> str:
 def connect(db_path: str | Path, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Open a WAL sqlite3 connection (spec §3 PRAGMAs).
 
-    ``check_same_thread`` defaults to ``True`` (stdlib default, preserving
-    every existing caller). The API daemon opens one connection PER REQUEST
-    (see ``api/deps.py::get_conn``): WAL permits concurrent readers plus a
-    single writer, so the daemon's real concurrency (the Web UI fires several
-    ``fetch()``es in parallel) is served safely — a single ``sqlite3.Connection``
-    shared across the ASGI threadpool is NOT safe under concurrent access and
-    corrupts reads (see SPEC-QUESTION T8.5b amending spec §3). ``busy_timeout``
-    makes a connection wait for a held write lock instead of raising
-    ``SQLITE_BUSY`` when two requests write near-simultaneously.
+    The daemon opens one connection per request (``api/deps.py::get_conn``): WAL allows concurrent
+    readers plus one writer, and one connection shared across the ASGI threadpool corrupts reads
+    (SPEC-QUESTION T8.5b). ``busy_timeout`` makes a writer wait for a held lock instead of raising
+    ``SQLITE_BUSY``.
     """
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -263,23 +226,11 @@ def enqueue_review(
     cause_ref: str | None = None,
     facet: str | None = None,
 ) -> dict[str, Any]:
-    """Append exactly one ``review_queue`` row (spec §4.4, §4.6, §4.11).
+    """Append one ``review_queue`` row and return it as a dict (spec §4.4, §4.6, §4.11).
 
-    Persistent write, so per rule 0.4 this lives in ``kernel/store.py`` (no
-    other module INSERTs into ``review_queue`` directly) -- same precedent
-    as ``append_audit``/``vet_node``/``create_token``. ``cause_kind`` is a
-    closed enum per the §4.4 DDL comment
-    (``facet_break|subtasks_closed|evidence_retracted|recheck|conflict|
-    violation|proposal``); this function does not validate membership
-    itself (callers are the trusted in-repo call sites: T4.6's agent-proposal
-    gate passes ``cause_kind="proposal"`` verbatim, future M7 triggers pass
-    their own values) -- never invents a new value. ``resolved_at``/
-    ``resolution`` start NULL (open item). ``node_id`` is NULL only when a
-    create-node proposal has no node yet; the review id correlates that
-    proposal and the real node id is minted on human approval. Returns the
-    inserted row as a plain dict (mirrors ``create_token``'s "return what
-    was persisted" shape) so callers can render it directly in an API
-    response.
+    ``cause_kind`` is the closed enum from the §4.4 DDL; it is not validated here (callers are
+    trusted in-repo sites). ``node_id`` is NULL only for a create-node proposal that has no node
+    yet.
     """
     with conn:
         return enqueue_review_within_transaction(
@@ -295,21 +246,12 @@ def enqueue_review_within_transaction(
     cause_ref: str | None = None,
     facet: str | None = None,
 ) -> dict[str, Any]:
-    """Body of ``enqueue_review``, without opening its own transaction (task T7.2).
+    """``enqueue_review`` without its own transaction.
 
-    Invariant: identical to ``enqueue_review`` (see its docstring) but
-    assumes the caller already holds an open ``with conn:`` block --
-    mirrors ``_create_node_tx``'s/``_insert_commit``'s rationale exactly:
-    sqlite3's ``with conn:`` commits on every block exit, not just the
-    outermost one, so a function that may run INSIDE another mutation's
-    transaction (``tms/invalidate.py``'s ``invalidate()``, called from
-    ``commit_node`` on a major commit) must never open a second, nested
-    ``with conn:`` of its own -- doing so would silently commit the
-    caller's still-pending writes early, breaking the "atomic with the
-    commit" invariant spec §4.9 requires for invalidation. Used by both
-    ``enqueue_review`` itself (the standalone, transactional entry point)
-    and ``tms.invalidate.invalidate`` (transaction-less, composed inside
-    a caller's own transaction).
+    sqlite3's ``with conn:`` commits on every block exit, so a function that runs inside another
+    mutation's transaction (``tms/invalidate.py`` via ``commit_node``) must not open a nested one:
+    it would commit the caller's pending writes early, breaking spec §4.9's atomic-with-the-commit
+    rule.
     """
     now = _now()
     review_id = _mint_unique_review_id(conn)
@@ -337,18 +279,9 @@ def find_open_reviews(
     cause_kind: str | None = None,
     cause_ref: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Read-only: every OPEN (``resolved_at IS NULL``) ``review_queue`` row (task T5.5).
+    """Read-only: every open (``resolved_at IS NULL``) review row; the optional filters are ANDed.
 
-    All three filters are optional and ANDed together (mirrors
-    ``find_live_edges``'s filter style, T5.4); omitting all of them returns
-    every open review item. Added outside this task's own Files list (rule
-    0.4 recurring precedent, same as T4.2/T4.4/T4.5/T4.6/T5.1/T5.4's
-    store.py touches) because ``sync/reconcile.py``'s conflict handler needs
-    an idempotence gate ("is there already an open conflict review for this
-    exact node+cause_ref?") before enqueueing a duplicate on crash-replay
-    (T5.6). T5.7 ("Sync API routes") reuses this verbatim for
-    ``/sync/status``'s open-review reporting -- designed as a general
-    read-only query, not a conflict-only helper.
+    Also the idempotence gate for conflict replay (T5.6) and the source of ``/sync/status``.
     """
     clauses = ["resolved_at IS NULL"]
     params: list[Any] = []
@@ -446,14 +379,11 @@ def resolve_review(
     review_id: str,
     resolution: str,
 ) -> dict[str, Any]:
-    """Mark a review_queue row resolved (spec §4.5, §4.9; task T7.5).
+    """Mark a review resolved in one transaction (spec §4.5, §4.9).
 
-    Sets ``resolved_at=now()`` and ``resolution`` inside a single
-    transaction. Raises ``ReviewNotFoundError`` if missing,
-    ``ReviewAlreadyResolvedError`` if already resolved, ``ValueError`` if
-    ``resolution`` is not one of ``still_holds|revised|retracted|dismissed``.
-    Policy (e.g. ``dismissed`` only for ``violation``) lives in
-    ``tms.review.resolve_review``, not here.
+    Raises ``ReviewNotFoundError``, ``ReviewAlreadyResolvedError``, or ``ValueError`` for a
+    resolution outside ``still_holds|revised|retracted|dismissed``. Policy (``dismissed`` only for
+    violations) lives in ``tms.review``.
     """
     with conn:
         return resolve_review_within_transaction(conn, review_id, resolution)
@@ -586,22 +516,11 @@ def _insert_commit(
 
 
 def _recompute_maturity(conn: sqlite3.Connection, node_id: str) -> None:
-    """Recompute and persist node_id's maturity stage in place (spec §4.6).
+    """Recompute and persist ``nodes.maturity`` (spec §4.6) from the node's type, ``vetted`` flag,
+    head facet count and live inbound edges, via the pure ``maturity.derive``.
 
-    Invariant: reads node_id's ``node_type``/``vetted`` plus its current
-    head object's facet count, and every *live* inbound edge
-    (``dst=node_id AND retracted_at IS NULL``) resolved to
-    ``(edge_type, source node_type)`` via a join against ``nodes`` on
-    ``e.src = n.id``; feeds these into ``maturity.derive`` (spec §4.6,
-    pure function, no DB access of its own) and ``UPDATE``s
-    ``nodes.maturity`` to the result. Read-then-write only — never touches
-    ``objects``/``commits``/``edges``. The caller is responsible for
-    invoking this inside the same transaction as the mutation that changed
-    an input (spec §4.6: "recomputed inside the same transaction as any
-    mutation that can change the inputs"); this function does not open its
-    own ``with conn:`` block. No-op if node_id no longer exists (e.g.
-    called for a node that was hard-deleted earlier in the same
-    transaction).
+    The caller must hold the transaction of the mutation that changed an input. No-op if the node
+    is gone.
     """
     row = conn.execute(
         "SELECT node_type, head_hash, vetted FROM nodes WHERE id=?", (node_id,)
@@ -631,14 +550,8 @@ def _create_node_tx(
     message: str,
     node_id: str | None = None,
 ) -> Node:
-    """Body of ``create_node``, without opening its own transaction.
-
-    Invariant: identical to ``create_node`` (see its docstring) but assumes
-    the caller already holds an open ``with conn:`` block — used both by
-    ``create_node`` itself and by ``split_node`` (which mints several new
-    nodes inside one outer transaction and must not nest ``with conn:``
-    blocks, since sqlite3's context manager commits on every block exit,
-    not just the outermost one).
+    """``create_node`` without its own transaction (``split_node`` mints several nodes inside one
+    outer transaction; see ``enqueue_review_within_transaction``).
     """
     if node_type not in _VALID_NODE_TYPES:
         raise ValueError(f"invalid node_type {node_type!r}; must be one of {_VALID_NODE_TYPES}")
@@ -698,23 +611,12 @@ def create_node(
     message: str = "",
     node_id: str | None = None,
 ) -> Node:
-    """Create a brand-new node with a genesis commit (spec §4.5, §4.1).
+    """Create a node with a genesis commit (spec §4.5, §4.1) in one transaction and return it.
 
-    ``node_id`` (M20-G) adopts a caller-supplied, well-formed id no row uses yet instead of
-    minting one; ``ValueError`` if it is malformed or taken.
-
-    Invariant: mints a fresh id (retrying on ``nodes.id`` collision, bound
-    10 attempts, then raising ``IdMintError`` — spec §4.1), inserts exactly
-    one new ``objects`` row (canonical body+facets+task_state) and exactly
-    one genesis ``commits`` row (empty ``parents``, ``change_class="major"``
-    since a fresh node touches every facet it starts with), sets
-    ``nodes.head_hash`` to that object, and inserts a matching row into
-    ``nodes_fts`` (id, canonical body) so the node is immediately
-    searchable — all inside a single transaction. Returns the resulting
-    Node with its canonical body. A freshly-created node has no possible
-    live inbound edges yet, so it is always ``S0`` at creation; no maturity
-    recompute is needed here (unlike ``create_edge``/``retract_edge``/
-    ``commit_node``, spec §4.6).
+    Mints an id (retrying on collision, bound 10, then ``IdMintError``) unless ``node_id`` is
+    given: that adopts a well-formed, unused id (M20-G; ``ValueError`` if malformed or taken).
+    Inserts the snapshot object, the ``nodes`` row (always ``S0``: no inbound edges yet), the
+    genesis commit (``change_class="major"``) and the ``nodes_fts`` row.
     """
     with conn:
         return _create_node_tx(
@@ -742,21 +644,11 @@ _UNSET_TASK_STATE = _Unset()
 
 
 def _head_commit_hash(conn: sqlite3.Connection, node_id: str) -> str | None:
-    """Return the commit hash that produced ``nodes.head_hash``, or ``None`` if unknown.
+    """The commit that produced ``nodes.head_hash``, or ``None`` if the node has no commits.
 
-    Invariant: the newest (``rowid DESC``) commit whose ``object_hash``
-    equals the node's CURRENT ``head_hash`` -- i.e. the commit the hub
-    actually considers "current", not merely the most-recently-inserted
-    commit row for this node. These differ once a conflict-branch commit
-    (task T5.5, ``record_conflict_branch``) exists: a branch commit is
-    appended to the DAG WITHOUT moving ``head_hash``, so the newest-inserted
-    commit and the head commit are no longer the same row. Falls back to
-    the newest commit by ``rowid`` if no commit matches ``head_hash``
-    exactly (defensive; should not happen in practice since every write
-    path that changes ``head_hash`` also inserts the commit that produced
-    it in the same transaction). Returns ``None`` if node_id has no commits
-    at all (or does not exist) -- callers treat that as "genesis, no
-    parent", same as every existing parent-lookup call site.
+    This is the newest commit whose object is the current head, which differs from the newest
+    commit row once a conflict branch exists (branches never move ``head_hash``). Falls back to the
+    newest commit (defensive).
     """
     row = conn.execute("SELECT head_hash FROM nodes WHERE id=?", (node_id,)).fetchone()
     if row is None:
@@ -783,37 +675,16 @@ def record_conflict_branch(
     author: str = "sync",
     message: str = "",
 ) -> str:
-    """Append the vault's conflicting version as a BRANCH commit (task T5.5, spec §4.8).
+    """Append the vault's conflicting version as a BRANCH commit (T5.5, spec §4.8) without moving
+    the head.
 
-    On a both-sides-edit conflict, the reconcile pipeline keeps BOTH
-    versions on the node's commit DAG rather than discarding either one
-    (spec §4.8: "hub keeps both versions as branches on the node's commit
-    DAG"). This function records the VAULT side as a new commit whose
-    ``parents`` is the node's CURRENT head commit (``_head_commit_hash`` --
-    the deterministic fork-anchor; the true last-synced commit the base
-    snapshot reflects is not recoverable without a new schema addition, see
-    the logged SPEC-QUESTION) WITHOUT moving ``nodes.head_hash`` -- the hub
-    head stays whatever the file-side winner is (the mainline commit the
-    caller already applied via ``commit_node``, or the pre-existing head if
-    nothing was applied). Content: canonicalized ``branch_body`` (or the
-    current head's body if ``branch_body`` is ``None`` -- e.g. a
-    task-state-only conflict), the CURRENT head object's facets (a conflict
-    branch never carries a facet edit of its own), and ``task_state``
-    resolved via the same ``_UNSET_TASK_STATE`` sentinel ``commit_node``
-    uses (omit to preserve the head's task_state, pass a value to set it).
-
-    Idempotence (required for T5.6 crash-replay): the new object is
-    content-addressed (``_insert_object``'s ``INSERT OR IGNORE`` -- a repeat
-    call with identical content reuses the same ``objects`` row), and this
-    function additionally gates the COMMIT insert itself: if a commit for
-    ``node_id`` with this exact ``object_hash`` already exists, its hash is
-    returned and NOTHING is inserted (no duplicate branch, no duplicate
-    parent-chain fork). Never touches ``nodes.head_hash``/``updated_at``/
-    ``nodes_fts`` and never calls ``_recompute_maturity`` -- no maturity
-    input (facet count, vetted, live inbound edges) changed by recording an
-    alternate, non-head version. Raises ``NodeNotFoundError`` if node_id
-    does not exist. All inside a single transaction. Returns the (new or
-    pre-existing) branch commit's hash.
+    Both sides of a both-edited conflict stay on the commit DAG. The branch's parent is the current
+    head commit (the true last-synced commit is not recoverable without a schema change; see the
+    SPEC-QUESTION). Content: ``branch_body`` (or the head's body if ``None``), the head's facets,
+    and ``task_state`` via the ``_UNSET_TASK_STATE`` sentinel like ``commit_node``. Idempotent for
+    crash replay (T5.6): an existing commit of this node with the same object is returned and
+    nothing is inserted. Never touches ``head_hash``, ``updated_at``, ``nodes_fts`` or maturity.
+    Raises ``NodeNotFoundError``; returns the branch commit hash.
     """
     now = _now()
     with conn:
@@ -880,31 +751,15 @@ def commit_node(
     author: str,
     message: str = "",
 ) -> Node:
-    """Append a new commit to node_id's DAG and move its head (spec §4.5).
+    """Append a commit to node_id's DAG and move its head (spec §4.5), in one transaction.
 
-    Invariant: inserts exactly one new ``objects`` row (canonicalized
-    ``new_body`` if given, else the current body; ``facets`` if given, else
-    the current facets — "new_body|facets", spec §4.5) and exactly one new
-    ``commits`` row parented on the node's current head commit (the most
-    recently inserted commit for this node_id), then moves
-    ``nodes.head_hash``/``updated_at`` to the new object and updates the
-    matching ``nodes_fts`` row to the (possibly new) canonical body — all
-    inside a single transaction. Never mutates an existing ``objects`` or
-    ``commits`` row; the previous head remains reachable via ``history``.
-    Also recomputes and persists node_id's maturity in the same
-    transaction (spec §4.6), since a commit can change its facet count.
+    Inserts the new object (``new_body``/``facets`` if given, else the current ones) and a commit
+    parented on the current head, moves ``head_hash``/``updated_at``, updates ``nodes_fts`` and
+    recomputes maturity (a commit can change the facet count). Never mutates an existing row; the
+    previous head stays reachable via ``history``.
 
-    # design note (T5.4, fable-reviewed, human-decided 2026-07-12, rule 0.4):
-    # ``task_state`` is a new sentinel-guarded optional keyword, added here
-    # (outside T5.4's own Files list, same recurring precedent as T4.2/T4.4/
-    # T4.5/T4.6/T5.1's store.py touches) because the sync reconcile pipeline
-    # needs to commit a checkbox toggle (spec §4.8 ``checkbox_toggled``) and
-    # a same-commit body+state flip (``modified``) without any other caller
-    # being able to accidentally clobber ``task_state`` on an ordinary body
-    # edit. Omitting the argument (the default) preserves today's behavior
-    # exactly (silently keeps the current ``task_state``); passing ``None``
-    # or a literal value explicitly sets it. 100% backward compatible: no
-    # existing call site passes this argument.
+    ``task_state`` is sentinel-guarded: omitted keeps the current state (so an ordinary body edit
+    can never clobber it), ``None`` clears it, a value sets it (checkbox toggles, spec §4.8).
     """
     if change_class not in _VALID_CHANGE_CLASSES:
         raise ValueError(
@@ -972,70 +827,29 @@ def commit_node(
         # facets may have changed (facet_count is a maturity input, spec §4.6).
         _recompute_maturity(conn, node_id)
 
-        # SPEC-QUESTION (T7.2): spec §4.9 says invalidation triggers on "any
-        # commit with change_class == 'major'" but does not say which module
-        # decides the effective change_class (heuristic default vs. an
-        # explicit UI/CLI override) before it reaches this function.
-        # Narrowest reading adopted here: ``commit_node`` never recomputes or
-        # second-guesses ``change_class`` -- it is a plain, already-decided
-        # argument (an explicit override IS respected simply because nothing
-        # here overrides it back), and this function's ONLY job per T7.2's
-        # Steps (3) is to trigger the already-implemented (T7.1) invalidation
-        # walk whenever that argument is literally ``"major"``, using
-        # ``facets_touched`` verbatim as the touched set (a caller modeling a
-        # node retraction -- "always major touching all facets", §4.9 -- gets
-        # this by passing every one of the node's facet ids in
-        # ``facets_touched`` alongside ``change_class="major"``; see
-        # ``kernel/commits.py``'s module docstring). Deferred import to avoid
-        # a circular import (``tms.invalidate`` imports this module); this is
-        # the T7.2-sanctioned store.py touch outside this task's own Files
-        # list (rule 0.4 recurring precedent -- see docs/spec-questions.md
-        # entry for T7.2). Called INSIDE this transaction, not after it, so
-        # the enqueued facet_break reviews are atomic with the commit itself
-        # (crash between the two would otherwise leave a major commit
-        # persisted with no corresponding stale-subscriber flag); this is
-        # safe only because ``invalidate()`` (via ``store.enqueue_review_within_transaction``)
-        # never opens its own nested ``with conn:`` -- see
-        # ``enqueue_review_within_transaction``'s docstring for why a nested transaction would
-        # silently commit early instead.
+        # SPEC-QUESTION (T7.2): §4.9 triggers invalidation on "any commit with change_class ==
+        # 'major'" but does not say who decides ``change_class``. Narrowest reading: it is a plain,
+        # already-decided argument, and a literal ``"major"`` runs the invalidation walk with
+        # ``facets_touched`` verbatim (a retraction passes every facet id). The import is deferred
+        # (``tms.invalidate`` imports this module). The walk runs INSIDE this transaction so its
+        # ``facet_break`` reviews are atomic with the commit; that is safe only because it uses
+        # ``enqueue_review_within_transaction`` (no nested ``with conn:``).
         if change_class == "major":
             from akasha.tms import invalidate
 
             invalidate.invalidate(conn, node_id, commit_hash, set(facets_touched))
 
-        # task T10.2c (spec §4.10a, PRD §8 story 8): evaluate the
-        # `all_subtasks_closed` trigger condition for node_id's parent
-        # supertask(s) after EVERY commit (unlike the `invalidate` block
-        # above, this is NOT gated on change_class == "major" -- closing a
-        # subtask is ordinarily a "patch" commit that only flips
-        # task_state, per spec §4.10a's own wording, "after every commit
-        # touching the node or its children"; gating this on major would
-        # mean it never fires in practice). Scope-narrowed to
-        # `all_subtasks_closed` only (see docs/build-plan.md T10.2c "Scope
-        # narrowing"): `facet_interface_changed` is already live above *as*
-        # this same invalidate() call (spec §4.10 says so explicitly --
-        # calling `triggers.evaluate()` wholesale here would double-fire
-        # it), `evidence_retracted` is covered by T7.2b's delete path, and
-        # `recheck_after` has no persisted schedule (out of scope). Deferred
-        # import for the same reason as `invalidate` above (avoids a
-        # store.py <-> tms/triggers.py import cycle).
-        #
-        # Deliberately does NOT call `triggers.evaluate()` or its private
-        # `_act_all_subtasks_closed` action: both call the standalone,
-        # transactional `store.enqueue_review`, which opens its own nested
-        # `with conn:` and would prematurely commit this still-open
-        # transaction (the same T7.2 gotcha `invalidate()` above avoids by
-        # using `enqueue_review_within_transaction`). Instead this block
-        # reuses only `triggers.CONDITIONS["all_subtasks_closed"]` (the
-        # pure, side-effect-free condition function) and
-        # `triggers.TriggerContext`, then performs the enqueue itself via
-        # `enqueue_review_within_transaction`, mirroring
-        # `_act_all_subtasks_closed`'s own idempotence gate
-        # (`find_open_reviews(node_id=..., cause_kind="subtasks_closed")`)
-        # so re-committing an already-fully-closed supertask's subtask
-        # never enqueues a duplicate. Never writes `task_state` itself --
-        # flagging for human review is the only action, per spec §4.10/§9
-        # story 8.
+        # Evaluate the ``all_subtasks_closed`` trigger for the parent supertask(s) after EVERY
+        # commit (spec §4.10a; closing a subtask is an ordinary "patch", so this is not gated on
+        # ``major``). Only that condition is evaluated here: ``facet_interface_changed`` is the
+        # ``invalidate`` call above, ``evidence_retracted`` is the delete path, and
+        # ``recheck_after`` has no schedule. ``triggers.evaluate()`` and its action are NOT called:
+        # they use the standalone ``enqueue_review``, whose nested ``with conn:`` would commit this
+        # still-open transaction. Instead this reuses the pure ``triggers.CONDITIONS`` entry and
+        # ``TriggerContext`` and enqueues via ``enqueue_review_within_transaction``, with the same
+        # idempotence gate (an open ``subtasks_closed`` review for the node) so re-committing never
+        # duplicates. Flagging a human is the only action; ``task_state`` is never written (spec
+        # §4.10, §9 story 8). Deferred import: cycle.
         from akasha.tms import triggers
 
         for parent_edge in find_live_edges(conn, dst=node_id, edge_type="composes"):
@@ -1121,19 +935,9 @@ _SQLITE_MAX_VARS = 500
 
 
 def get_nodes_bulk(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, Node]:
-    """Batch-fetch multiple nodes at HEAD (read-only; rule 0.4 completion).
-
-    Same result as calling :func:`get_node` (with ``as_of=None``) once per
-    id, except in O(ceil(n/500)) round trips instead of O(n) -- added to fix
-    a real N+1 query pattern found profiling ``sync/reconcile.py``'s
-    ``hub_state_for`` against spec §6.2's E20 5,000-block perf case (each
-    ``get_node`` call is 2 round trips: ``nodes`` then ``objects`` by hash;
-    5,000 blocks meant 10,000 round trips for one reconcile cycle). Unknown
-    ids are silently OMITTED from the result (never raises
-    ``NodeNotFoundError``) -- callers that need per-id not-found semantics
-    should check membership, matching how ``hub_state_for`` already treated
-    a lookup miss before this helper existed (fell back to the skeleton
-    block, never propagated the exception past that call site).
+    """Batch-fetch nodes at HEAD (read-only): ``get_node`` semantics in O(n/500) round trips
+    instead of 2n (the N+1 pattern found profiling E20's 5,000-block case). Unknown ids are
+    omitted, never raised.
     """
     if not node_ids:
         return {}
@@ -1232,18 +1036,10 @@ def history(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]]:
 
 
 def get_commit_snapshot(conn: sqlite3.Connection, commit_hash: str) -> dict[str, Any]:
-    """Read-only: decode one commit's ``{body, facets, task_state}`` content (task T5.5).
+    """Read-only: decode one commit's ``{body, facets, task_state}``.
 
-    Added outside this task's own Files list (rule 0.4 recurring precedent,
-    same as the other store.py touches above) -- ``sync/reconcile.py``'s
-    conflict-branch handler (and its tests) need to read back the body a
-    branch commit carries WITHOUT moving ``nodes.head_hash`` or otherwise
-    treating the branch as the node's current state, which ``get_node``
-    cannot express (it only ever resolves to the current head or an
-    as-of-time commit reachable from it). Raises ``NodeNotFoundError`` if
-    ``commit_hash`` has no matching ``commits`` row (reusing the existing
-    "unknown id" exception rather than inventing a new one for this
-    read-only lookup).
+    Reads a conflict-branch commit's content without treating it as the node's current state (which
+    ``get_node`` cannot express). Raises ``NodeNotFoundError`` for an unknown commit hash.
     """
     row = conn.execute("SELECT object_hash FROM commits WHERE hash=?", (commit_hash,)).fetchone()
     if row is None:
@@ -1289,14 +1085,10 @@ def node_versions(conn: sqlite3.Connection, node_id: str) -> list[dict[str, Any]
 
 
 def get_maturity(conn: sqlite3.Connection, node_id: str) -> str:
-    """Return node_id's current persisted maturity stage (read-only, spec §4.6).
+    """Return node_id's persisted maturity stage (read-only, spec §4.6).
 
-    Maturity is derived state kept on the ``nodes`` row (not versioned by
-    commits, so the ``Node`` model does not carry it), refreshed by
-    ``_recompute_maturity`` on every mutation that can change its inputs.
-    The API's ``GET /nodes/{id}`` reports "node + maturity" (spec §4.11), so
-    it needs this alongside the ``Node`` body. Raises ``NodeNotFoundError``
-    if node_id is unknown.
+    Maturity is derived state on the ``nodes`` row, refreshed by ``_recompute_maturity``; ``Node``
+    does not carry it. Raises ``NodeNotFoundError``.
     """
     row = conn.execute("SELECT maturity FROM nodes WHERE id=?", (node_id,)).fetchone()
     if row is None:
@@ -1305,15 +1097,10 @@ def get_maturity(conn: sqlite3.Connection, node_id: str) -> str:
 
 
 def vet_node(conn: sqlite3.Connection, node_id: str) -> Node:
-    """Mark node_id vetted (S4) and recompute its maturity (spec §4.6, §4.11 ``/vet``).
+    """Mark node_id vetted (S4) and recompute its maturity in the same transaction (spec §4.6,
+    §4.11).
 
-    The ``POST /nodes/{id}/vet`` endpoint (T4.4) is human-only (∅). Sets
-    ``nodes.vetted=1`` and recomputes maturity in the SAME transaction (M1
-    close follow-up: "vet endpoint must recompute maturity in-txn"), so the
-    returned node reflects the new stage (S4 per ``maturity.derive``'s
-    ``vetted`` rule). Idempotent: vetting an already-vetted node is a no-op
-    re-write. Raises ``NodeNotFoundError`` if node_id is unknown. All writes
-    route through this store function (rule 0.4).
+    Human-only at the API. Idempotent. Raises ``NodeNotFoundError``.
     """
     now = _now()
     with conn:
@@ -1356,48 +1143,19 @@ def mint_facet_from_span(
     author: str,
     message: str = "",
 ) -> Facet:
-    """Mint a brand-new facet on node_id from a highlighted span (task T7.7, spec §4.2).
+    """Mint a new facet on node_id from a highlighted span (T7.7, spec §4.2) and return it.
 
-    Invariant: reads node_id's current head content (raises
-    ``NodeNotFoundError`` if unknown — same exception ``commit_node``
-    raises, propagated from it below), mints a fresh ``facet_id`` via the
-    same id8 scheme every other id in the system uses (``ids.mint()``,
-    spec §4.1) -- reusing the CLI's ``_parse_facets`` precedent
-    (``cli/main.py``): a facet_id is minted client/server-side with no DB
-    collision check, since (unlike ``nodes``/``edges``/``tokens``/
-    ``review_queue``) there is no standalone facets table to check
-    uniqueness against -- facets live only inside a node's versioned
-    object blob (module docstring above). Appends one new ``Facet`` (with
-    ``version=1``, a brand-new facet has never had an interface break) to
-    node_id's current facet list and commits it via ``commit_node`` with
-    ``change_class="minor"`` and ``facets_touched=[new_facet_id]``.
+    The facet id is a fresh id8 (facets live only inside the node's object blob, so there is no
+    table to check collisions against). It is appended at ``version=1`` and committed via
+    ``commit_node`` with ``change_class="minor"`` and ``facets_touched=[new_id]``: a brand-new v1
+    facet is neither removed, renamed nor bumped, so ``major`` would spuriously flag every live
+    inbound justification edge (§4.9).
 
-    ``change_class="minor"`` (never ``"major"``) is not a judgment call:
-    spec §4.9's invalidation-trigger heuristic fires on ``major`` iff a
-    facet was "removed/renamed" or an existing facet's ``version`` was
-    "bumped" -- a brand-new v1 facet is neither, and a ``major`` commit
-    here would spuriously flag every other live inbound justification
-    edge on node_id (a ``'*'``-bound one, or a ``composes`` edge) even
-    though nothing they depend on changed (spec §4.9 ``invalidate``).
+    # SPEC-QUESTION (T7.7): ``Facet.name`` must be unique per node but a span supplies no name.
+    # Narrowest, collision-free reading: ``name = facet_id``. See docs/spec-questions.md T7.7.
 
-    # SPEC-QUESTION (T7.7): spec §4.2's ``Facet.name`` is a "short label,
-    # unique per node", but facets-from-spans capture (§T7.7 step 1) only
-    # supplies ``facet_span`` (the highlighted text) -- no name field.
-    # Narrowest, collision-free reading used here: ``name = facet_id``
-    # (the id8 is unique by construction, unlike the span text, which may
-    # repeat). See docs/spec-questions.md entry for T7.7.
-
-    Not atomic with a subsequent ``create_edge`` call (the caller's own
-    transaction; this function opens and closes its own via
-    ``commit_node``): if the caller mints a facet here and then
-    ``create_edge`` fails (e.g. an edge-model validation error unrelated
-    to the facet_binding itself), the minted facet is NOT rolled back --
-    it remains a harmless, unbound extra facet on node_id, never a
-    dangling reference (spec §4.5 has no cross-node atomic-commit
-    primitive to compose the two writes into a single transaction).
-
-    Returns the newly-minted ``Facet``. Raises ``NodeNotFoundError`` if
-    node_id does not exist.
+    Not atomic with a following ``create_edge``: if that fails the facet stays as a harmless
+    unbound extra (§4.5 has no cross-node atomic primitive). Raises ``NodeNotFoundError``.
     """
     node = get_node(conn, node_id)
     facet_id = ids.mint()
@@ -1424,21 +1182,12 @@ def create_edge(
     mode: str = "track",
     pinned_commit: str | None = None,
 ) -> Edge:
-    """Create a new live edge from src to dst (spec §4.5, §4.2).
+    """Create a live edge src -> dst (spec §4.5, §4.2) in one transaction.
 
-    Invariant: validates the ``facet_binding`` rule by constructing the
-    ``Edge`` pydantic model (spec §4.2's ``_check_facet_binding`` validator
-    — reused here verbatim, not reimplemented): justification edge types
-    ({supports, contradicts, depends_on, derived_from, cites}) require
-    ``facet_binding`` to be a facet_id or ``"*"``; ``None`` is only legal
-    for composes/redirects_to. Raises ``pydantic.ValidationError`` (a
-    ``ValueError`` subclass) and writes nothing if the rule is violated.
-    On success: mints a fresh edge id (retrying on ``edges.id`` collision,
-    bound 10 attempts, then raising ``IdMintError`` — spec §4.1) and
-    inserts exactly one new ``edges`` row with ``created_at`` set and
-    ``retracted_at`` NULL (live) — all inside a single transaction. Also
-    recomputes and persists ``dst``'s maturity in the same transaction
-    (spec §4.6), since a new live inbound edge is a maturity input.
+    The ``Edge`` model validates ``facet_binding`` (justification types need a facet id or ``"*"``;
+    ``None`` only for composes/redirects_to): ``pydantic.ValidationError``, nothing written,
+    otherwise. Mints an edge id (bound 10 retries, then ``IdMintError``) and recomputes ``dst``'s
+    maturity.
     """
     now = _now()
     with conn:
@@ -1476,19 +1225,11 @@ def create_edge(
 
 
 def retract_edge(conn: sqlite3.Connection, edge_id: str) -> None:
-    """Retract a live edge by setting ``retracted_at`` (spec §4.5).
+    """Retract a live edge by setting ``retracted_at`` (spec §4.5); the row is never deleted
+    (§4.4).
 
-    Invariant: never ``DELETE``s the ``edges`` row (append-only discipline,
-    spec §4.4) — sets ``retracted_at`` to now instead, which excludes the
-    edge from ``neighborhood`` (whose queries filter on
-    ``retracted_at IS NULL``) while leaving it visible to any caller that
-    reads the raw table for history. Raises ``EdgeNotFoundError`` if
-    edge_id does not exist. A second retraction on an already-retracted
-    edge just re-sets ``retracted_at`` to a later timestamp (not rejected
-    as a no-op). Also recomputes and persists the retracted edge's
-    ``dst``'s maturity in the same transaction (spec §4.6), since losing a
-    live inbound edge is a maturity input change. All inside a single
-    transaction.
+    ``neighborhood`` and ``find_live_edges`` skip it. Re-retracting just re-stamps. Recomputes
+    ``dst``'s maturity in the same transaction. Raises ``EdgeNotFoundError``.
     """
     now = _now()
     with conn:
@@ -1507,20 +1248,8 @@ def find_live_edges(
     dst: str | None = None,
     edge_type: str | None = None,
 ) -> list[Edge]:
-    """Read-only: every live edge (``retracted_at IS NULL``) matching the given filters.
-
-    # design note (T5.4, fable-reviewed, human-decided 2026-07-12, rule 0.4):
-    # added outside T5.4's own Files list, same recurring precedent as the
-    # store.py touches in T4.2/T4.4/T4.5/T4.6/T5.1 — the reconcile pipeline's
-    # ``reparented`` op needs to locate the specific live ``composes`` edge
-    # from a task's OLD parent before retracting it and creating the new
-    # one, and no existing store function exposes a filtered edge lookup.
-    #
-    # All filters are optional and ANDed together; omitting all three
-    # returns every live edge (rarely useful, but not rejected — the
-    # caller's problem). Uses the same ``retracted_at IS NULL`` semantics
-    # and row shape as ``neighborhood``/``_edge_row_to_model`` (no new
-    # query pattern invented).
+    """Read-only: every live edge (``retracted_at IS NULL``) matching the optional ANDed filters
+    (``src``, ``dst``, ``edge_type``); no filter returns all live edges.
     """
     clauses = ["retracted_at IS NULL"]
     params: list[Any] = []
@@ -1543,19 +1272,10 @@ def find_live_edges(
 
 
 def neighborhood(conn: sqlite3.Connection, node_id: str, hops: int = 1) -> dict[str, Any]:
-    """Return the live subgraph reachable from node_id within ``hops`` steps (spec §4.5).
+    """Live subgraph within ``hops`` steps of node_id, both edge directions (spec §4.5).
 
-    Invariant: read-only; only ever considers live edges
-    (``retracted_at IS NULL``), queried via the partial indexes
-    ``ix_edges_src``/``ix_edges_dst`` (spec §4.4) by selecting on ``src=?``
-    and ``dst=?`` respectively (both directions, since a node's
-    neighborhood includes edges pointing either into or out of it).
-    Performs a breadth-first expansion for ``hops`` rounds starting from
-    ``node_id``; a retracted edge is never traversed and never appears in
-    the result. Returns ``{"node_ids": [...], "edges": [...]}`` where
-    ``node_ids`` includes ``node_id`` itself and every node reached within
-    ``hops`` steps, and ``edges`` is every distinct live edge seen along
-    the way (as ``Edge`` models), deduplicated by id.
+    Read-only breadth-first expansion over live edges only. Returns ``{"node_ids": [...], "edges":
+    [...]}``: node_id itself plus every node reached, and each distinct live ``Edge`` seen.
     """
     visited_nodes: set[str] = {node_id}
     frontier: set[str] = {node_id}
@@ -1597,20 +1317,11 @@ _FTS5_TERM_RE = re.compile(r"[A-Za-z0-9]+")
 def _fts5_safe_match_query(q: str) -> str | None:
     """Tokenize ``q`` to alphanumeric terms and rebuild a syntax-safe FTS5 MATCH string.
 
-    build-plan T9.7: a raw user query string passed straight to ``MATCH``
-    lets FTS5's own query-syntax characters (a bare ``-`` prefix, embedded
-    ``"``, bareword ``AND``/``OR``/``NOT``/``NEAR``, ``:``/``(``/``)``)
-    reach FTS5's expression parser, which 500s (``sqlite3.OperationalError``)
-    on plenty of everyday input -- reproduced with the single hyphenated
-    word ``"already-tracked"``. Splitting to alphanumeric-only terms and
-    double-quoting each one (terms are alnum-only by construction, so no
-    embedded-quote escaping is ever needed) strips every syntax character
-    before it reaches the parser; space-joining (not ``OR``-joining, unlike
-    ``find_contradiction_candidates``'s heuristic) preserves this
-    function's existing implicit-AND-of-barewords behavior for ordinary
-    multi-word queries. Returns ``None`` for a query with no alphanumeric
-    terms at all (pure punctuation/whitespace) so the caller can skip
-    issuing a MATCH -- an empty MATCH string is itself a syntax error.
+    A raw query reaches FTS5's expression parser, which 500s on everyday input (a bare ``-``,
+    ``"``, ``AND``/``OR``/``NOT``/``NEAR``, ``:``, parentheses; T9.7 reproduced it with
+    "already-tracked"). Alphanumeric terms are double-quoted (no escaping needed) and space-joined
+    (implicit AND). Returns ``None`` when there are no terms, since an empty MATCH is itself a
+    syntax error.
     """
     terms = _FTS5_TERM_RE.findall(q)
     if not terms:
@@ -1619,24 +1330,11 @@ def _fts5_safe_match_query(q: str) -> str | None:
 
 
 def search(conn: sqlite3.Connection, q: str) -> list[Node]:
-    """Full-text search over node bodies via ``nodes_fts`` (spec §4.5, §4.4).
+    """Full-text search over node bodies via ``nodes_fts`` (spec §4.5, §4.4), best match first.
 
-    Invariant: read-only; issues one FTS ``MATCH`` query against the
-    ``nodes_fts`` virtual table (columns ``id UNINDEXED, body``, kept in
-    sync with every node's current head body by ``create_node``/
-    ``commit_node``), ranked by FTS5's built-in relevance (``rank``).
-    Returns each matching node's current head content (via ``get_node``),
-    best match first. A node whose current body no longer matches ``q``
-    (because it was edited after the FTS row was last synced) is never
-    returned, since ``nodes_fts`` is always kept current.
-
-    ``q`` is never passed to ``MATCH`` raw -- see
-    :func:`_fts5_safe_match_query` (build-plan T9.7: a raw query string
-    containing FTS5 syntax characters, e.g. a hyphenated word, previously
-    500'd). A query with no alphanumeric terms (including non-ASCII-only
-    queries -- a known, narrower-than-ideal limitation shared with
-    ``find_contradiction_candidates``'s identical tokenization, not
-    reinvented here) returns ``[]`` rather than issuing a MATCH at all.
+    Read-only; ranked by FTS5 ``rank``; returns each match's head content. ``q`` goes through
+    ``_fts5_safe_match_query``; a query with no ASCII alphanumeric terms returns ``[]`` (a known
+    limitation shared with ``find_contradiction_candidates``).
     """
     match_query = _fts5_safe_match_query(q)
     if match_query is None:
@@ -1654,55 +1352,20 @@ def find_contradiction_candidates(
     *,
     limit: int = 5,
 ) -> list[dict[str, Any]]:
-    """Read-only: exact/near-duplicate LIVE claim candidates for a just-created claim.
+    """Read-only: exact/near-duplicate LIVE claim candidates for a just-created claim (spec §4.11,
+    PRD §8 story 2). A non-LLM FTS5 heuristic over the existing ``nodes_fts`` index: no new table,
+    embedding or model (PRD §5).
 
-    Non-LLM FTS5 heuristic backing "Contradiction surfacing at capture"
-    (spec §4.11, PRD §8 story 2, T10.2b fable ruling, added outside this
-    task's own Files list per the T9.2/T10.2 rule-0.4 recurring precedent —
-    ``routes/nodes.py``'s human ``POST /nodes`` 201 path needs a read-only
-    lookup and no existing store function exposes one). Reuses the
-    EXISTING ``nodes_fts`` index verbatim — no new table, index, embedding,
-    or model call (PRD §5 F-list: the truth path stays machine-free).
+    ``body`` is canonicalized and tokenized to alphanumeric terms, FTS5-quoted and OR-joined (no
+    terms: ``[]`` without a MATCH, which would raise on raw punctuation/operators). Matches are
+    live claims except ``node_id`` itself, ranked by bm25 with a byte-equal canonical body always
+    first (a spec guarantee bm25 alone does not give), capped at ``limit`` (default 5). Each result
+    is ``{node_id, body, created_at, evidence}`` where ``evidence`` lists the ``{node_id, body}``
+    of the candidate's live ``cites`` destinations.
 
-    ``body`` is canonicalized here (this function's own responsibility,
-    mirroring every other store.py entry point that canonicalizes on the
-    way in) and tokenized to alphanumeric terms; each term is FTS5-quoted
-    (double-quoted — terms are alnum-only by construction, so no
-    embedded-quote escaping is ever needed) and OR-joined into one MATCH
-    query. An empty term set (e.g. a body of only punctuation/whitespace)
-    issues no MATCH at all and returns ``[]`` immediately — this is the
-    documented defense against FTS5 raising ``sqlite3.OperationalError`` on
-    a raw, un-tokenized body containing quotes/colons/hyphens/bareword
-    operators (AND/OR/NOT/NEAR).
-
-    Matches are filtered to live claims (``node_type='claim' AND
-    status='live'``), excluding ``node_id`` itself (the node that was just
-    created and is already present in ``nodes_fts``, inserted by
-    ``create_node`` in the same request). Ranked by FTS5 bm25 (lower score
-    = better match), with one explicit override: a byte-equal canonical
-    body (exact duplicate) is always sorted first regardless of its raw
-    bm25 score — the spec paragraph requires "a byte-equal canonical body
-    ranks first" as a hard guarantee, and bm25 alone does not guarantee
-    that for every term distribution, so exact-match is an explicit
-    primary sort key ahead of the bm25 secondary key. Capped at ``limit``
-    (default 5, per spec).
-
-    Each returned dict is ``{node_id, body, created_at, evidence}`` where
-    ``evidence`` is every ``{node_id, body}`` of the candidate's live
-    ``cites``-edge destination nodes, queried via the existing
-    ``find_live_edges`` (no new query pattern).
-
-    # SPEC-QUESTION: the spec paragraph says "evidence lists the
-    # Evidence-type dst nodes of the candidate's live cites edges" without
-    # defining "Evidence-type" against the closed NodeType enum
-    # ({entity,definition,claim,relation,proof,evidence,task}). Narrowest
-    # reading taken here: literal node_type == "evidence" only (NOT
-    # "proof", a distinct enum member) — see docs/spec-questions.md's
-    # T10.2b entry.
-
-    Strictly read-only: issues only SELECT statements (via this function
-    and the ``find_live_edges``/``get_node`` helpers it calls), no INSERT/
-    UPDATE/DELETE, no transaction, no new schema.
+    # SPEC-QUESTION: the spec says "Evidence-type dst nodes" without defining that against the
+    # NodeType enum. Narrowest reading: ``node_type == "evidence"`` only (not "proof"). See
+    # docs/spec-questions.md T10.2b.
     """
     canonical_body = canonicalize_text(body)
     terms = _FTS5_TERM_RE.findall(canonical_body)
@@ -1748,23 +1411,10 @@ def append_audit(
     action: str,
     detail: str | None = None,
 ) -> None:
-    """Append exactly one append-only row to ``audit_log`` (spec §4.4, §4.11).
+    """Append one row to ``audit_log`` (spec §4.4, §4.11); nothing else ever updates or deletes it.
 
-    ``audit_log`` is persistent SQLite state, so per build-plan rule 0.4
-    ("every mutation of persistent state goes through ``kernel/store.py``;
-    no other module writes SQLite directly") the raw INSERT lives here —
-    the API-layer audit middleware/decorator (T4.2, ``api/auth.py``) calls
-    this rather than touching SQLite itself. ``ts`` is stamped here with
-    the same ``_now()`` used by every other store write, keeping audit
-    timestamps lexically comparable with commit/edge timestamps.
-
-    Append-only: this issues a single ``INSERT`` and nothing else ever
-    ``UPDATE``s or ``DELETE``s ``audit_log``. ``token_id`` is nullable
-    (the DDL allows NULL for an unauthenticated action). The caller must
-    never pass a raw secret in ``detail`` — this layer only ever sees a
-    ``token_id`` (never the bearer secret), so no secret is available to
-    leak into the log, but ``detail`` is caller-controlled free text and
-    the caller owns keeping it secret-free (spec §4.11 step 2).
+    ``ts`` uses ``_now()`` so audit times sort with commit/edge times. ``token_id`` may be NULL.
+    The caller owns keeping ``detail`` free of secrets (this layer only ever sees a token id).
     """
     with conn:
         conn.execute(
@@ -1790,32 +1440,15 @@ def delete_node(
     redirect_to: list[str] | None = None,
     tombstone: bool = False,
 ) -> None:
-    """Delete node_id: hard-delete if S0, tombstone (+redirect) if S1+ (spec §4.5, §4.6).
+    """Delete node_id: hard-delete if S0, tombstone (+redirect) if S1+ (spec §4.5, §4.6), one
+    transaction.
 
-    Invariant: recomputes node_id's maturity first (in the same
-    transaction, so the decision uses fresh inputs). If the (possibly
-    just-recomputed) maturity is ``S0``: hard-deletes — removes node_id's
-    ``commits`` rows, then its ``nodes`` row, then every ``edges`` row with
-    ``src=node_id OR dst=node_id`` (an S0 node has no live inbound edge by
-    definition, per spec §4.6's S1 rule, but may still have outbound or
-    retracted edges — those are removed too so nothing dangles), then its
-    ``nodes_fts`` row. Does NOT touch ``objects`` rows (append-only except
-    S0 GC, spec §4.4 — orphaned objects are reclaimed by the T1.7 GC job,
-    not here).
-
-    If maturity is S1+: requires either a non-empty ``redirect_to`` (list
-    of successor node ids) or ``tombstone=True``; if neither is given,
-    raises ``NeedsRedirectError`` (``.code == "E_NEEDS_REDIRECT"``) and
-    writes/deletes nothing (the exception propagates out of the ``with
-    conn:`` block, which rolls back the maturity-recompute write too).
-    Otherwise sets ``nodes.status='tombstone'``; when ``redirect_to`` is
-    given, additionally inserts one ``redirects`` row (``old_id=node_id``,
-    JSON-encoded ``successors=redirect_to``, ``created_at``) and reassigns
-    every live inbound edge of node_id to the FIRST entry of
-    ``redirect_to`` (spec: "leave zero dangling references"), then
-    recomputes that successor's maturity (its inbound-edge set changed).
-    Raises ``NodeNotFoundError`` if node_id does not exist. All inside a
-    single transaction.
+    Maturity is recomputed first. S0: removes the node's commits, node row, every edge touching it
+    and its FTS row (objects are left for ``gc_objects``). S1+: needs a non-empty ``redirect_to``
+    or ``tombstone=True`` else ``NeedsRedirectError`` (``E_NEEDS_REDIRECT``; nothing is written);
+    sets ``status='tombstone'`` and, with ``redirect_to``, inserts a ``redirects`` row and
+    reassigns every live inbound edge to the first successor ("zero dangling references"),
+    recomputing its maturity. Raises ``NodeNotFoundError``.
     """
     now = _now()
     with conn:
@@ -1867,28 +1500,17 @@ def delete_node(
 def split_node(
     conn: sqlite3.Connection, node_id: str, parts: list[dict[str, Any]]
 ) -> dict[str, list[str]]:
-    """Split node_id into one new node per entry of ``parts`` (spec §4.5).
+    """Split node_id into one new node per entry of ``parts`` (spec §4.5), one transaction.
 
-    Invariant: ``parts`` is a non-empty list of ``create_node``-style
-    kwargs dicts (``node_type``, ``body``, optional ``facets``,
-    ``task_state``, ``author``, ``message``) — see SPEC-QUESTION below for
-    why this shape was chosen. Mints one brand-new node per part (via
-    ``_create_node_tx``, inside this function's own transaction rather
-    than nesting another ``with conn:``); inserts exactly one
-    ``redirects`` row (``old_id=node_id``, JSON-encoded
-    ``successors=[new node ids in part order]``, ``created_at``); sets
-    node_id's ``nodes.status='tombstone'``; reassigns every live inbound
-    edge that pointed at node_id to the FIRST successor so nothing dangles
-    (spec: "leave zero dangling references"); recomputes that successor's
-    maturity. Returns ``{node_id: [successor_ids...]}``. Raises
-    ``NodeNotFoundError`` if node_id does not exist, ``ValueError`` if
-    ``parts`` is empty. All inside a single transaction.
+    Each part is ``create_node``-style kwargs (``node_type``, ``body``, optional ``facets``,
+    ``task_state``, ``author``, ``message``). Inserts one ``redirects`` row, tombstones node_id and
+    reassigns its live inbound edges to the first successor, recomputing its maturity. Returns
+    ``{node_id: [successor_ids...]}``. Raises ``NodeNotFoundError`` or ``ValueError`` (empty
+    ``parts``).
 
-    # SPEC-QUESTION (T1.6): spec §4.5 lists ``split_node(id, parts) ->
-    # redirect`` but never specifies the shape of ``parts``. Narrowest
-    # reading used here: a list of ``create_node``-style kwargs dicts, one
-    # brand-new node minted per entry. See docs/spec-questions.md entry
-    # for T1.6.
+    # SPEC-QUESTION (T1.6): §4.5 lists ``split_node(id, parts)`` without the shape of ``parts``.
+    # Narrowest reading: a list of ``create_node``-style kwargs dicts. See docs/spec-questions.md
+    # T1.6.
     """
     if not parts:
         raise ValueError("split_node requires a non-empty parts list")
@@ -1939,16 +1561,10 @@ def split_node(
                     "successors": successor_ids,
                 }
             ).decode("utf-8")
-            # SPEC-QUESTION (T7.6): the review_queue.cause_kind closed enum
-            # (facet_break|subtasks_closed|evidence_retracted|recheck|conflict|
-            # violation|proposal, spec mvp-spec.md sec 4.4) has no member for
-            # 'an inbound edge needs human reassignment after a split'; every
-            # existing member is unsuitable because each is already used as an
-            # idempotence-gate filter or resolution-path selector elsewhere in
-            # the codebase that this task must not touch; narrowest reading
-            # that does not silently overload a loaded existing member is to
-            # introduce a new, clearly-flagged value 'reassignment' pending a
-            # spec amendment.
+            # SPEC-QUESTION (T7.6): the closed ``review_queue.cause_kind`` enum has no member for
+            # "an inbound edge needs human reassignment after a split", and every existing member
+            # is already an idempotence filter or resolution selector elsewhere. Narrowest reading:
+            # a new flagged value ``reassignment``, pending a spec amendment.
             enqueue_review_within_transaction(
                 conn, edge_src, "reassignment", cause_ref=cause_ref
             )
@@ -1957,35 +1573,18 @@ def split_node(
 
 
 def gc_objects(conn: sqlite3.Connection) -> list[str]:
-    """Delete every ``objects`` row unreachable from any live reference (spec §4.4, §4.5).
+    """Delete every ``objects`` row no live reference reaches (spec §4.4, §4.5); return the hashes.
 
-    Invariant (binding, spec §4.5's property suite / T1.8): **GC never
-    removes a referenced object.** The REACHABLE set is computed as the
-    UNION of (a) every ``commits.object_hash`` for every row currently in
-    ``commits`` (i.e. every object still reachable via any node's DAG
-    history, S0 or S1+ alike), (b) every ``nodes.head_hash`` (a live
-    node's current head, redundant with (a) in normal operation but kept
-    as an explicit belt-and-suspenders read), and (c) every non-NULL
-    ``sync_files.base_hash`` (base snapshots). Anything in ``objects`` NOT
-    in that union is, by construction, an orphan: an object whose owning
-    node+commits were already hard-deleted by ``delete_node`` (spec §4.5:
-    S0 hard-delete removes ``commits``/``nodes`` rows but intentionally
-    leaves the ``objects`` row behind for this GC job to reclaim later).
-    Computes the reachable set and issues one ``DELETE FROM objects WHERE
-    hash NOT IN (...)`` inside a single transaction, then returns the
-    sorted list of hashes actually deleted.
+    Invariant: GC never removes a referenced object. Reachable = every ``commits.object_hash`` (S0
+    and S1+ history alike) + every ``nodes.head_hash`` + every non-NULL ``sync_files.base_hash``.
+    What is left is an orphan of an S0 hard-delete, which leaves its objects for this job. One
+    transaction.
 
-    # SPEC-QUESTION (T1.7): spec §4.5 phrases reachability as "objects
-    # unreachable from any S1+ node or base snapshot", which read literally
-    # would permit collecting an object still referenced by a live S0
-    # node's commits/head — but that would break ``get_node``/``history``
-    # for that node, directly contradicting the stronger, restated
-    # invariant "GC never removes a referenced object" (spec §4.5's
-    # property-suite line, and this task's own Goal/DoD wording). Narrowest
-    # reading that satisfies BOTH sentences: widen reachability to "every
-    # object referenced by any still-existing ``commits``/``nodes.head_hash``
-    # row (S0 or S1+) or base snapshot" rather than "S1+ heads/history"
-    # only. See docs/spec-questions.md entry for T1.7.
+    # SPEC-QUESTION (T1.7): §4.5 says "unreachable from any S1+ node or base snapshot", which
+    # read literally could collect an object a live S0 node still references and break
+    # ``get_node``, contradicting "GC never removes a referenced object". Narrowest reading
+    # satisfying both: reachable means referenced by ANY existing commit/head or base snapshot.
+    # See docs/spec-questions.md T1.7.
     """
     with conn:
         commit_hashes = {
@@ -2011,31 +1610,16 @@ def gc_objects(conn: sqlite3.Connection) -> list[str]:
 
 
 def merge_nodes(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[str]]:
-    """Merge multiple existing nodes into one surviving node (spec §4.5).
+    """Merge nodes into the first id of ``ids`` (spec §4.5), one transaction; return ``{old_id:
+    [survivor]}``.
 
-    Invariant: ``ids`` must have length >= 2. The FIRST entry of ``ids``
-    is kept as the survivor — narrowest reading, since spec §4.5 says only
-    "choose/keep a survivor" without specifying a selection algorithm (see
-    SPEC-QUESTION below); no new node is created (unlike ``split_node``).
-    For every OTHER entry (the retired nodes): inserts one ``redirects``
-    row (``old_id=that id``, JSON-encoded ``successors=[survivor]``,
-    ``created_at``); sets its ``nodes.status='tombstone'``; reassigns
-    every live inbound edge that pointed at it to the survivor (spec:
-    "leave zero dangling references"). Recomputes the survivor's maturity
-    once at the end (its inbound-edge set changed, possibly repeatedly).
-    Returns ``{old_id: [survivor] for each retired id}``. Raises
-    ``ValueError`` if ``len(ids) < 2``, ``NodeNotFoundError`` if any id
-    does not exist (checked before any write). All inside a single
-    transaction.
+    Each other node gets a ``redirects`` row, is tombstoned, and has its live inbound edges
+    reassigned to the survivor; the survivor's maturity is recomputed once. No reassignment review
+    is queued (unlike split there is one unambiguous survivor). Raises ``ValueError`` (fewer than 2
+    ids) or ``NodeNotFoundError`` (checked before any write).
 
-    Deliberately enqueues no reassignment review — unlike split, merge has
-    a single unambiguous survivor, so no inbound edge needs human
-    reassignment (narrowest reading of task T7.6).
-
-    # SPEC-QUESTION (T1.6): spec §4.5 lists ``merge_nodes(ids) ->
-    # redirect`` but never specifies survivor-selection. Narrowest
-    # reading used here: the first id in the list wins. See
-    # docs/spec-questions.md entry for T1.6.
+    # SPEC-QUESTION (T1.6): §4.5 lists ``merge_nodes(ids)`` without survivor selection. Narrowest
+    # reading: the first id wins. See docs/spec-questions.md T1.6.
     """
     if len(ids) < 2:
         raise ValueError("merge_nodes requires at least two node ids")
@@ -2068,18 +1652,10 @@ def merge_nodes(conn: sqlite3.Connection, ids: list[str]) -> dict[str, list[str]
 
 
 def resolve_redirect_chain(conn: sqlite3.Connection, node_id: str) -> str:
-    """Follow ``redirects`` transitively to the current live terminal (spec §4.5, §4.11).
+    """Follow ``redirects`` to the current live terminal id (spec §4.5, §4.11), read-only.
 
-    Invariant: starting from ``node_id``, repeatedly look up
-    ``redirects.successors`` for the current id; when a row exists, advance
-    to ``successors[0]`` (mirrors the eager-reassignment convention of
-    always following the FIRST successor by default). When no row exists,
-    the current id is the terminal/live id — return it. Multi-hop matters
-    because a node picked as a successor at one split/merge may itself be
-    split/merged again later, so a single-hop redirect lookup would resolve
-    to an already-tombstoned id. Terminates even on a pathological cycle:
-    a ``seen`` set of visited ids stops the walk (return current) rather
-    than looping forever. Read-only; never opens ``with conn:``.
+    Advances to ``successors[0]`` per hop (a successor may itself have been split or merged later)
+    and stops on a cycle via a seen set.
     """
     current = node_id
     seen: set[str] = {current}
@@ -2098,14 +1674,9 @@ def resolve_redirect_chain(conn: sqlite3.Connection, node_id: str) -> str:
 
 
 def reassign_edge(conn: sqlite3.Connection, edge_id: str, new_dst: str) -> None:
-    """Re-point one live edge's ``dst`` to ``new_dst`` (spec §4.5; task T7.6).
-
-    Invariant: the sole write path used by ``tms.review.resolve_reassignment``
-    to apply a human-chosen successor after a split (rule 0.4: only
-    ``store.py`` issues the raw ``UPDATE``). Raises ``EdgeNotFoundError`` if
-    ``edge_id`` is missing or already retracted. After the update, recomputes
-    maturity for both the old and new destinations (both nodes' inbound-edge
-    sets just changed). Own top-level transaction.
+    """Re-point one live edge's ``dst`` to ``new_dst`` (spec §4.5; T7.6): the write path for
+    ``tms.review.resolve_reassignment``. Recomputes maturity of both destinations, in its own
+    transaction. Raises ``EdgeNotFoundError`` if the edge is missing or retracted.
     """
     with conn:
         row = conn.execute(
@@ -2119,20 +1690,9 @@ def reassign_edge(conn: sqlite3.Connection, edge_id: str, new_dst: str) -> None:
         _recompute_maturity(conn, new_dst)
 
 
-# --- Tokens (task T4.5, spec §4.4 ``tokens`` DDL / §4.11 ``/tokens``) ------
-#
-# ``api/auth.py`` (T4.1) deliberately only *reads* ``tokens`` (see its module
-# docstring: "token issuance/revocation is a separate, API-layer concern that
-# belongs to T4.5's /tokens route"). Per build-plan rule 0.4 ("every mutation
-# of persistent state goes through kernel/store.py"), the actual INSERT/
-# UPDATE for token create/revoke lives here, not in ``api/routes/tokens.py``.
-# These functions never see or return a raw secret — the caller (T4.5's
-# route) hashes the secret via ``api.auth.hash_secret`` first and passes only
-# ``secret_hash`` in; ``list_tokens``/``create_token`` never select or return
-# ``secret_hash`` back out, so a raw or hashed secret can never leak through
-# this surface (spec §4.11 / build-plan T4.5 constraint: "never store or log
-# a raw secret" — the hash itself is already stored by the time it reaches
-# here, and is never re-exposed).
+# --- Tokens (spec §4.4 ``tokens`` DDL, §4.11 ``/tokens``) --- ``api/auth.py`` only reads
+# ``tokens``; creation and revocation live here (rule 0.4). No function here returns
+# ``secret_hash``: the route hashes the secret first, and it is never re-exposed.
 
 
 def create_token(
@@ -2142,16 +1702,11 @@ def create_token(
     secret_hash: str,
     rate_per_min: int | None = None,
 ) -> dict[str, Any]:
-    """Create a new ``tokens`` row and return its public fields (spec §4.4, §4.11).
+    """Create a ``tokens`` row and return its public fields (spec §4.4, §4.11).
 
-    Invariant: ``token_class`` must be ``"human"`` or ``"agent"`` (the DDL's
-    documented enum, spec §4.4 comment); raises ``ValueError`` and writes
-    nothing otherwise. Mints a fresh id8 (retrying on ``tokens.id``
-    collision, bound 10 attempts, then ``IdMintError`` — same scheme as
-    nodes/edges, spec §4.1) and inserts exactly one row with
-    ``created_at`` set and ``revoked_at`` NULL, inside a single transaction.
-    Returns ``{id, name, class, rate_per_min, created_at, revoked_at}`` —
-    deliberately omits ``secret_hash`` (never re-exposed once stored).
+    ``token_class`` must be ``"human"`` or ``"agent"`` (``ValueError`` otherwise, nothing written).
+    Mints an id8 (bound 10 retries). Returns ``{id, name, class, rate_per_min, created_at,
+    revoked_at}``, deliberately without ``secret_hash``.
     """
     if token_class not in ("human", "agent"):
         raise ValueError(f"invalid token class {token_class!r}; must be 'human' or 'agent'")
@@ -2174,14 +1729,8 @@ def create_token(
 
 
 def revoke_token(conn: sqlite3.Connection, token_id: str) -> None:
-    """Set ``revoked_at`` on token_id (spec §4.4, §4.11 ``DELETE /tokens/{id}``).
-
-    Invariant: never ``DELETE``s the ``tokens`` row (append-only discipline,
-    mirroring ``retract_edge``'s soft-retract pattern) — a revoked token's
-    audit history (``audit_log.token_id``) must remain resolvable. Raises
-    ``TokenNotFoundError`` if token_id does not exist. Re-revoking an
-    already-revoked token just re-sets ``revoked_at`` to a later timestamp
-    (not rejected as a no-op), same as ``retract_edge``.
+    """Set ``revoked_at`` on token_id (spec §4.4, §4.11); the row stays so ``audit_log.token_id``
+    still resolves. Re-revoking re-stamps. Raises ``TokenNotFoundError``.
     """
     now = _now()
     with conn:
@@ -2276,52 +1825,20 @@ def list_sync_roots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Base store support (task T5.1, spec §4.8 ``base_store.get``/``.put``,
-# §4.4 ``objects``/``sync_files.base_hash``).
+# --- Base store (spec §4.8 ``base_store.get``/``put``, §4.4 ``objects``/``sync_files.base_hash``)
+# --- ``sync/base_store.py`` keeps the last-agreed canonical bytes ("B" of the three-way
+# reconcile); the raw writes live here (rule 0.4).
 #
-# ``sync/base_store.py`` is the last-agreed-canonical-bytes snapshot used as
-# the "B" input of the §4.8 three-way reconcile. Per build-plan rule 0.4
-# ("every mutation of persistent state goes through kernel/store.py") the
-# raw SQLite writes (an ``objects`` insert + a ``sync_files`` upsert) live
-# here, not in ``base_store.py``.
-#
-# SPEC-QUESTION (T5.1): build-plan T5.1's ``Files`` list only names
-# ``src/akasha/sync/base_store.py`` and its test file, omitting
-# ``kernel/store.py`` — but rule 0.4 forces the raw ``objects``/
-# ``sync_files`` writes here, same precedent as T4.2 ``append_audit``,
-# T4.4 ``vet_node``, T4.5 token helpers, T4.6 ``enqueue_review`` (all
-# resolved "rule 0.4 controls" in docs/archived-questions.md's M4 batch).
-# See docs/spec-questions.md entry for T5.1.
-#
-# SPEC-QUESTION (T5.1): spec §4.4/§4.8 don't pin down a base-snapshot
-# ``objects`` row's byte layout. Build-plan T5.1's Steps line says
-# ``put(...)`` "stores canonical bytes as an object" — narrowest literal
-# reading taken: a base snapshot is stored as the RAW canonical UTF-8
-# bytes of the file text (kind ``"base_snapshot"``), content-addressed by
-# ``object_hash`` of those raw bytes directly — NOT wrapped in a
-# canonical-JSON dict the way node snapshots are (``_insert_object``/
-# ``"node_snapshot"``). This keeps ``sync_files.base_hash`` pointing at an
-# object whose ``bytes`` column *is* exactly the last-agreed canonical
-# file text, so a future diff/patch tool can read it back without any
-# JSON unwrapping step, and it composes cleanly with ``gc_objects``
-# (T1.7), which already treats every non-NULL ``sync_files.base_hash`` as
-# a reachability root purely by hash lookup, independent of the
-# referenced object's ``kind``/content shape. See docs/spec-questions.md
-# entry for T5.1.
+# SPEC-QUESTION (T5.1): §4.4/§4.8 do not pin a base snapshot's byte layout. Narrowest reading: the
+# RAW canonical UTF-8 bytes of the file text (kind ``"base_snapshot"``), content-addressed by their
+# hash, not wrapped in canonical JSON like node snapshots. So ``sync_files.base_hash`` points at an
+# object whose ``bytes`` are exactly the agreed file text, and ``gc_objects`` needs only the hash.
+# See docs/spec-questions.md T5.1.
 
 
 def _insert_base_snapshot(conn: sqlite3.Connection, canonical_text: str, now: str) -> str:
-    """Content-addressed insert of one base snapshot's raw canonical bytes.
-
-    ``canonical_text`` must already be canonicalized (spec §4.3) by the
-    caller — this function does not canonicalize. Hash is
-    ``object_hash`` of the UTF-8 encoding of ``canonical_text`` directly
-    (not a canonical-JSON-wrapped dict; see the content-shape note above).
-    ``INSERT OR IGNORE`` mirrors ``_insert_object``'s idempotent-reinsert
-    behavior: identical canonical text always hashes identically, so a
-    repeat ``put`` of the same content is a safe no-op, never a mutation of
-    an existing row.
+    """Content-addressed insert of one base snapshot's raw canonical bytes. ``canonical_text`` must
+    already be canonical (spec §4.3). ``INSERT OR IGNORE``: re-putting identical text is a no-op.
     """
     data = canonical_text.encode("utf-8")
     obj_hash = object_hash(data)
@@ -2344,15 +1861,11 @@ def write_base_snapshot(
     path: str,
     canonical_text: str,
 ) -> str:
-    """Durably record ``canonical_text`` as ``path``'s new last-agreed base snapshot.
+    """Record ``canonical_text`` as ``path``'s last-agreed base snapshot; return its
+    ``objects.hash``.
 
-    Raises ``SyncRootNotFoundError`` if ``sync_root_id`` is not a durably
-    registered sync root (spec §4.10/T4.10 registry) — the base store must
-    never silently associate a snapshot with an unknown root. Inserts the
-    content-addressed ``objects`` row (see ``_insert_base_snapshot``) and
-    upserts ``sync_files`` keyed by ``path`` (its primary key, spec §4.4)
-    so ``base_hash`` and ``sync_root_id`` both move together, inside one
-    transaction. Returns the new base snapshot's ``objects.hash``.
+    Inserts the object and upserts ``sync_files`` (keyed by ``path``) in one transaction. Raises
+    ``SyncRootNotFoundError`` for an unregistered root.
     """
     if not sync_root_exists(conn, sync_root_id):
         raise SyncRootNotFoundError(sync_root_id)
@@ -2371,25 +1884,9 @@ def write_base_snapshot(
 
 
 def list_sync_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Read-only enumerator of every tracked ``sync_files`` row (spec §4.4).
-
-    # design note (T5.4, fable-reviewed, human-decided 2026-07-12, rule 0.4):
-    # added outside T5.4's own Files list, same recurring precedent as the
-    # other store.py touches listed above — ``sync/reconcile.py``'s
-    # ``ProjectionIndex`` (cross-file ``E_DUP_ID``/move detection, spec
-    # §4.7/§3.5's M5 follow-up) needs to enumerate every synced file's
-    # ``(path, sync_root_id, base_hash)`` to rebuild its
-    # id -> path ownership map purely from durable state (crash-safe,
-    # rebuildable). Read-only; never used to author truth, only to look up
-    # which base snapshot to re-parse per path.
-    #
-    # design note (T5.7, rule 0.4): ``last_synced_at`` added to the
-    # projected columns (the column already exists in the ``sync_files``
-    # DDL, migration 002 — this is a read-only SELECT-list widening, not a
-    # schema change) so ``GET /sync/status`` can report each file's
-    # last-synced timestamp without a second query. Purely additive;
-    # T5.4's existing callers that only read ``path``/``sync_root_id``/
-    # ``base_hash`` are unaffected.
+    """Read-only: every tracked ``sync_files`` row as ``{path, sync_root_id, base_hash,
+    last_synced_at}`` (spec §4.4). Feeds ``ProjectionIndex`` (rebuilt purely from durable state)
+    and ``/sync/status``.
     """
     rows = conn.execute(
         "SELECT path, sync_root_id, base_hash, last_synced_at "
@@ -2407,14 +1904,8 @@ def list_sync_files(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def read_base_snapshot(conn: sqlite3.Connection, sync_root_id: str, path: str) -> str | None:
-    """Return ``path``'s last-agreed canonical base text, or ``None`` if unset.
-
-    Scoped to ``sync_root_id``: a ``sync_files`` row that exists but is
-    associated with a *different* sync root (or has no ``base_hash`` yet)
-    reads as ``None``, same as a wholly fresh path — the base-store
-    association is per-root, not just per-path (spec §4.4: ``path`` is
-    globally unique as the table's primary key, but callers must still be
-    scoped to their own root to avoid cross-root leakage).
+    """``path``'s last-agreed canonical base text, or ``None`` if unset or recorded under a
+    different sync root (the association is per root, so callers never read across roots).
     """
     row = conn.execute(
         "SELECT sync_root_id, base_hash FROM sync_files WHERE path=?", (path,)
@@ -2431,19 +1922,8 @@ def read_base_snapshot(conn: sqlite3.Connection, sync_root_id: str, path: str) -
     return data.decode("utf-8")
 
 
-# ---------------------------------------------------------------------------
-# T9.2 read-only metrics aggregation helpers (spec §7, §4.11 GET /metrics).
-#
-# design note (T9.2, rule 0.4): added outside T9.2's own Files list
-# (`src/akasha/metrics.py`, `src/akasha/api/routes/health.py`,
-# `tests/unit/test_metrics.py`), same recurring precedent as the store.py
-# touches in T4.2/T4.4/T4.5/T4.6/T5.1/T5.4/T5.5/T5.7 -- every §7 counter
-# that reads persistent state must do so through this module (never a
-# parallel raw-SQL path in metrics.py), and no existing store function
-# exposes these aggregates. All functions below are pure reads: none opens
-# a `with conn:` write transaction, none mutates a row. See
-# docs/spec-questions.md (T9.2 entry) for the Files-list note.
-# ---------------------------------------------------------------------------
+# --- Read-only metrics aggregation (spec §7, §4.11 ``GET /metrics``) --- Every §7 counter that
+# reads persistent state does so here; none of these opens a write transaction.
 
 # Node types exempt from facet-coverage's denominator: `maturity.py`'s S2
 # derivation lets task/entity nodes reach S2+ on inbound-edge count alone
@@ -2458,21 +1938,12 @@ _S2_PLUS_MATURITIES: tuple[str, ...] = ("S2", "S3", "S4")
 
 
 def facet_coverage_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    """Read-only counts for the §7 ``facet_coverage`` metric (task T9.2).
+    """Read-only counts for the §7 ``facet_coverage`` metric: ``{"covered": n, "total": n}``.
 
-    Returns ``{"covered": n, "total": n}``:
-
-    * ``total`` -- every live node at maturity S2 or above, excluding the
-      task/entity types that reach S2+ without ever needing a facet (see
-      module-level note above).
-    * ``covered`` -- the subset of those with >=1 live inbound
-      justification edge (spec §4.2's ``JUSTIFICATION_EDGE_TYPES``) whose
-      ``facet_binding`` is a concrete facet id, not the ``"*"`` wildcard
-      (spec §4.2: "'*' bindings are legal but counted against the
-      facet-coverage metric").
-
-    ``metrics.py`` divides these two counts into a ratio (0.0 when
-    ``total`` is 0) -- this function only reads/aggregates, per rule 0.4.
+    ``total`` is every live node at S2+ except the task/entity types that reach S2+ without needing
+    a facet; ``covered`` is the subset with a live inbound justification edge bound to a concrete
+    facet id (a ``"*"`` binding is legal but counts against coverage, spec §4.2). ``metrics.py``
+    divides.
     """
     maturity_placeholders = ",".join("?" for _ in _S2_PLUS_MATURITIES)
     type_placeholders = ",".join("?" for _ in _FACET_COVERAGE_EXEMPT_TYPES)
@@ -2500,14 +1971,9 @@ def facet_coverage_counts(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def count_reviews_created_since(conn: sqlite3.Connection, since_iso: str) -> int:
-    """Read-only: count of ``review_queue`` rows with ``created_at >= since_iso``.
-
-    Every ``cause_kind`` counts (spec §7's ``review_inflow_7d`` is about
-    total review-queue load, not violations specifically -- see
-    ``count_violations_total`` below for the violation-only count).
-    Lexical ``>=`` comparison is safe because every ``created_at`` is
-    written by this module's own ``_now()`` (fixed-width ISO-8601, UTC,
-    microsecond precision, always ``+00:00`` offset).
+    """Read-only: count of ``review_queue`` rows (every ``cause_kind``) with ``created_at >=
+    since_iso`` (spec §7 ``review_inflow_7d``). Lexical comparison is safe: ``_now()`` timestamps
+    are fixed-width UTC.
     """
     row = conn.execute(
         "SELECT COUNT(*) FROM review_queue WHERE created_at >= ?", (since_iso,)
@@ -2584,20 +2050,9 @@ def earliest_node_created_at(conn: sqlite3.Connection) -> str | None:
     return row[0]
 
 
-# ---------------------------------------------------------------------------
-# T10.2 read-only ``GET /sync/export`` support (spec §4.11 ``unfiled_node_count``).
-#
-# design note (rule 0.4): added outside T10.2's own Files list narrowly
-# defined route/CLI files -- same recurring precedent as the T4.2/T4.4/T4.5/
-# T4.6/T9.2 store.py touches documented above. ``GET /sync/export`` needs
-# the set of every LIVE node id to diff against the ids it finds while
-# parsing every managed file's base snapshot (a caller-side computation --
-# it requires ``contract.parser.parse``, which lives outside this module,
-# same "arithmetic/derivation stays out of store.py" reasoning as
-# ``count_reviews_created_since``'s sibling helpers above). This function
-# only exposes the raw read; the set-difference against parsed anchor ids
-# is computed by the route (``api/routes/sync.py``).
-# ---------------------------------------------------------------------------
+# --- ``GET /sync/export`` support (spec §4.11 ``unfiled_node_count``) --- The route diffs the set
+# of live node ids against the anchors it parses from every base snapshot (parsing lives outside
+# this module); this only exposes the raw read.
 
 
 def list_live_node_ids(conn: sqlite3.Connection) -> set[str]:
@@ -2613,30 +2068,15 @@ def list_live_node_ids(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-# ---------------------------------------------------------------------------
-# T9.3b read-only support for age-based S0 node-retention GC (vision.md §14
-# A7: "S0 default GC retention 30 days (configurable); GC blocked at S1
-# automatically").
-#
-# design note (rule 0.4): added outside T9.3b's own Files list narrowly
-# defined scheduler/config files -- same recurring precedent as the
-# T4.2/T4.4/T4.5/T4.6/T9.2/T10.2 store.py touches documented above. This
-# function only exposes the raw read (which S0 nodes are old enough to be
-# eligible); the actual deletion still goes through the existing, unchanged
-# ``delete_node`` S0 hard-delete branch (T1.6) -- no new write path.
-# ---------------------------------------------------------------------------
+# --- Age-based S0 retention GC (vision.md §14 A7) --- Only the read of which S0 nodes are old
+# enough; deletion still goes through ``delete_node``.
 
 
 def list_expired_s0_node_ids(conn: sqlite3.Connection, older_than_iso: str) -> list[str]:
-    """Read-only: ids of live S0 nodes created before ``older_than_iso``.
+    """Read-only: ids of live S0 nodes created before ``older_than_iso``, oldest first.
 
-    Filters ``maturity='S0' AND status='live' AND created_at < ?`` exactly
-    -- an S1+ node is NEVER eligible for age-based deletion regardless of
-    age (vision.md §14 A7: "GC blocked at S1 automatically"), and a
-    tombstoned node has nothing left to age-delete. ``older_than_iso`` must
-    be a lexically-sortable ISO 8601 string in the same fixed-width format
-    ``_now()`` produces (``created_at`` is stored in that format), so plain
-    string comparison is correct. Ordered by ``created_at`` for determinism.
+    An S1+ node is never eligible whatever its age ("GC blocked at S1", vision.md §14 A7).
+    ``older_than_iso`` must use ``_now()``'s fixed-width format so string comparison is correct.
     """
     rows = conn.execute(
         "SELECT id FROM nodes WHERE maturity='S0' AND status='live' AND created_at < ? "

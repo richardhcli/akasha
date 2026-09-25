@@ -1,23 +1,13 @@
-"""§7 metrics: counters + RSS/CPU sampling (build-plan task T9.2).
+"""§7 metrics: counters and RSS/CPU sampling behind ``GET /metrics`` (spec §4.11).
 
-Implements every §7 counter (``facet_coverage``, ``review_inflow_7d``,
-``review_resolved_7d``, ``inflow_variance_30d``, ``violation_rate``,
-``auto_repairs{class}``, ``crossing_rate``, ``rss_bytes``, ``idle_cpu_pct``,
-``sync_cycle_ms{p50,p95}``) via :func:`compute_metrics`, the pure(ish)
-snapshot function ``api/routes/metrics.py`` (spec §4.11 ``GET /metrics``)
-serializes to JSON. Every DB read goes through ``kernel/store.py`` (rule
-0.4) via the read-only aggregation helpers added there for this task (see
-that module's "T9.2 read-only metrics aggregation helpers" section) --
-this module never issues SQL of its own.
+:func:`compute_metrics` builds the snapshot (``facet_coverage``, ``review_inflow_7d``,
+``review_resolved_7d``, ``inflow_variance_30d``, ``violation_rate``, ``auto_repairs{class}``,
+``crossing_rate``, ``rss_bytes``, ``idle_cpu_pct``, ``sync_cycle_ms{p50,p95}``). Every DB read goes
+through ``kernel/store.py`` helpers (rule 0.4); this module issues no SQL.
 
-# ``violation_rate``, ``auto_repairs{class}``, and ``sync_cycle_ms{p50,p95}``
-# are live-wired as of build-plan task T9.2c: ``sync/reconcile.py``'s
-# ``Reconciler.on_change`` calls ``record_sync_cycle_ms``/``record_auto_repair``
-# below on every real cycle (timing via a ``try/finally`` covering every exit
-# path; repair codes recorded only when a certain-repair is actually, silently
-# applied -- never when the same repair routes to review under a conservative
-# root). Before T9.2c these three metrics read all-zero/empty in every real
-# daemon; see docs/archived-questions.md's T9.2 entry for the full history.
+``violation_rate``, ``auto_repairs`` and ``sync_cycle_ms`` are fed live by ``Reconciler``
+(``record_sync_cycle_ms`` on every cycle, ``record_auto_repair`` only when a repair is actually
+applied silently, never when a conservative root routes it to review).
 """
 
 from __future__ import annotations
@@ -57,16 +47,11 @@ def _iso(dt: datetime) -> str:
 
 
 class _CycleRecorder:
-    """Process-local, in-memory recorder for sync-cycle timing + auto-repair counts.
+    """Process-local, in-memory recorder of sync-cycle timings and auto-repair counts.
 
-    Deliberately NOT backed by SQLite (rule 0.4 governs persistent
-    *application* state; these are process-lifetime operational samples,
-    the same category as ``rss_bytes``/``idle_cpu_pct`` below, not durable
-    truth) and deliberately NOT wired to a live producer yet -- see the
-    module-level SPEC-QUESTION. Thread-safe (a lock guards both
-    collections): a future wiring would call ``record_cycle``/
-    ``record_repair`` from the sync watcher's thread while the API server
-    reads a snapshot from a request-handling thread.
+    Not in SQLite: these are process-lifetime operational samples like ``rss_bytes``, not durable
+    truth (rule 0.4 covers application state). A lock guards both collections: the watcher thread
+    records while a request thread reads a snapshot.
     """
 
     def __init__(self) -> None:
@@ -146,14 +131,11 @@ def _percentile(samples: list[float], pct: float) -> float:
 
 
 def _population_variance(values: list[int]) -> float:
-    """Population variance (divide by N, not N-1).
+    """Population variance (divide by N).
 
-    # SPEC-QUESTION (T9.2): spec §7 names ``inflow_variance_30d`` but does
-    # not say population vs. sample variance. Narrowest reading: the
-    # 30-day window is treated as a complete, bounded population (every
-    # calendar day in the window, zero-filled -- see ``_daily_counts``),
-    # not a sample drawn from a larger population, so population variance
-    # (N divisor) is used. See docs/spec-questions.md.
+    # SPEC-QUESTION (T9.2): §7 names ``inflow_variance_30d`` without population vs. sample.
+    # Narrowest reading: the zero-filled 30-day window (``_daily_counts``) is a complete
+    # population. See docs/spec-questions.md.
     """
     if not values:
         return 0.0
@@ -164,13 +146,8 @@ def _population_variance(values: list[int]) -> float:
 def _daily_counts(
     timestamps: list[str], window_start: datetime, window_end: datetime
 ) -> list[int]:
-    """Zero-filled per-(UTC)-calendar-day counts of ``timestamps`` across the window.
-
-    Every calendar day between ``window_start`` and ``window_end``
-    (inclusive) gets an entry, including days with zero events --
-    counting only *observed* days would silently drop quiet days from
-    the variance calculation instead of counting them as 0, understating
-    how bursty the inflow really is.
+    """Zero-filled per-UTC-day counts of ``timestamps`` across the inclusive window. Quiet days
+    count as 0; dropping them would understate how bursty the inflow is.
     """
     buckets: dict[str, int] = {}
     for ts in timestamps:
@@ -186,24 +163,12 @@ def _daily_counts(
 
 
 def _sample_rss_bytes() -> int:
-    """Current resident-set size of this process, in bytes.
+    """Current resident-set size of this process in bytes (stdlib only; no ``psutil`` dependency).
 
-    Tiered stdlib-only fallback (no new dependency -- pyproject.toml has
-    no existing RSS/CPU library, and the task's own narrowest-reading
-    preference is stdlib when "reasonably available" over adding a new
-    dependency like ``psutil``):
-
-    1. Linux: parse ``/proc/self/status``'s ``VmRSS`` line (kB -> bytes)
-       -- the CURRENT (not peak) RSS, matching this metric's own name.
-    2. Windows (no ``resource`` module at all): ``ctypes`` +
-       ``psapi.GetProcessMemoryInfo``'s ``WorkingSetSize`` (the Windows
-       analogue of current RSS).
-    3. Other POSIX (e.g. macOS/BSD, no ``/proc``): ``resource.getrusage``'s
-       ``ru_maxrss`` -- PEAK, not current, RSS (the closest stdlib proxy
-       available without ``/proc``); already bytes on macOS/BSD.
-    4. Any failure: 0 -- this endpoint must never fail a request just
-       because sampling didn't work on some platform; the spec's DoD only
-       requires RSS to be "sampled", not perfect on every OS.
+    Linux: ``VmRSS`` from ``/proc/self/status``. Windows: ``GetProcessMemoryInfo``'s
+    ``WorkingSetSize`` via ``ctypes``. Other POSIX: ``ru_maxrss`` (PEAK, the closest stdlib proxy;
+    already bytes on macOS/BSD). Any failure gives 0: the endpoint must never fail because sampling
+    did.
     """
     try:
         if sys.platform.startswith("linux"):
@@ -224,33 +189,14 @@ def _sample_rss_bytes() -> int:
 
 @functools.lru_cache(maxsize=1)
 def _windows_memory_api() -> tuple[Any, Any, type[ctypes.Structure]]:  # pragma: no cover
-    """One-time (cached) Win32 ``GetProcessMemoryInfo`` binding setup.
+    """One-time (cached) setup of the Win32 ``GetProcessMemoryInfo`` binding.
 
-    D2 fix (build-plan debug entry): this used to run -- and mutate the
-    *shared, module-level* ``kernel32``/``psapi`` DLL objects' ``argtypes``/
-    ``restype`` -- on every single ``_sample_rss_bytes_windows`` call. Two
-    threads calling it at once (e.g. concurrent ``GET /v1/metrics``
-    requests, dispatched through uvicorn's request threadpool) could race:
-    one thread's in-flight call sees the other thread's reassigned
-    ``argtypes`` mid-call, producing
-    ``ctypes.ArgumentError: argument 2: TypeError: expected
-    LP__ProcessMemoryCounters instance instead of pointer to
-    _ProcessMemoryCounters``. ``functools.lru_cache`` makes this setup run
-    (at most, modulo an untroublesome first-call race -- see below) once
-    per process: the DLL handles and their ``argtypes``/``restype`` are
-    computed a single time and never mutated again, so steady-state calls
-    only ever *read* already-configured, immutable-in-practice function
-    metadata. (Two threads racing to populate the cache on the very first
-    call could redundantly run this setup twice, but that's idempotent --
-    it only assigns the same values -- unlike the per-call reassignment
-    this replaces.)
-
-    Mirrors daemon.py's ``_acquire_windows``/``_acquire_posix`` guard:
-    typeshed's ``ctypes.windll``/``WinDLL`` member types only resolve fully
-    under Windows, so pyright run on a non-Windows pythonPlatform (e.g.
-    ubuntu-latest CI) reports ``reportUnknownMemberType`` on every dynamic
-    attribute below unless this early guard makes the rest of the function
-    provably unreachable there.
+    D2: this used to reassign the shared ``kernel32``/``psapi`` ``argtypes``/``restype`` on every
+    call, so two concurrent ``GET /v1/metrics`` requests could race and raise
+    ``ctypes.ArgumentError``. The ``lru_cache`` makes the setup run once (a first-call race just
+    repeats the same assignments). The early guard mirrors ``daemon.py``'s: typeshed's ``windll``
+    types only resolve under Windows, so without it pyright on another platform reports unknown
+    members.
     """
     if sys.platform != "win32":
         raise AssertionError("_windows_memory_api called on a non-Windows platform")
@@ -317,17 +263,10 @@ def _process_cpu_seconds() -> float:
 
 
 def _sample_idle_cpu_pct() -> float:
-    """This process's CPU utilization (%) since the previous sample.
-
-    ``idle_cpu_pct`` (spec §7; M9 DoD: "idle CPU ~= 0%") is the daemon's
-    OWN CPU usage while otherwise idle, not system-wide CPU -- a single
-    instantaneous read cannot express a rate, so this keeps
-    ``(wall_time, process_cpu_seconds)`` from the previous call in
-    module-level state and reports the delta ratio. The FIRST call in a
-    process's lifetime (no prior sample) has no delta to report and
-    returns 0.0 (documented "no data yet", not a real 0%-idle claim).
-    Clamped to ``[0, 100]`` since measurement noise across a very short
-    interval could otherwise nudge the ratio a hair outside that range.
+    """This process's CPU utilization (%) since the previous sample: ``idle_cpu_pct`` (spec §7) is
+    the daemon's own usage while idle, not system-wide. A rate needs two samples, so the previous
+    ``(wall_time, cpu_seconds)`` is module state; the first call returns 0.0 ("no data yet").
+    Clamped to [0, 100] against short-interval noise.
     """
     global _last_cpu_sample
     now_wall = time.monotonic()
@@ -379,13 +318,10 @@ def _inflow_variance_30d(conn: sqlite3.Connection) -> float:
 
 
 def _crossing_rate(conn: sqlite3.Connection) -> float:
-    """Nodes created ÷ day, since the earliest node this daemon ever minted (spec §7).
+    """Nodes created per day since the earliest node minted (spec §7).
 
-    # design note (T9.2): the spec gives the formula but not the window;
-    # narrowest reading is "since inception" (the daemon's own minting
-    # history), not a fixed trailing window like the review metrics get
-    # (those are explicitly suffixed ``_7d``/``_30d`` in the spec text;
-    # ``crossing_rate`` carries no such suffix).
+    # design note (T9.2): the spec gives the formula but no window; narrowest reading is "since
+    # inception", since only the review metrics carry a ``_7d``/``_30d`` suffix.
     """
     total = store.count_nodes_created_since(conn)
     if total == 0:

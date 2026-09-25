@@ -1,52 +1,20 @@
-"""Reconcile pipeline: the §4.8 per-file three-way merge (build-plan task T5.4).
+"""Reconcile pipeline: the §4.8 per-file three-way merge.
 
-This is the algorithmic core of the sync engine — the ``on_change(path)``
-pipeline that reconciles a managed vault file's current text (``V``) against
-the last-agreed base (``B``) and the hub's current projection (``H``),
-applying certain-repairs, computing ops keyed by anchor id, resolving
-per-node conflicts, and writing back a canonical, converged file.
+``Reconciler.on_change(path)`` reconciles a file's current text (V) against the last-agreed base
+(B) and the hub's projection (H): certain repairs, ops keyed by anchor id, per-node conflict
+resolution, canonical write-back, plus mirror propagation to every other file holding a changed
+anchor.
 
-Design provenance
-------------------
-An architecture review (the ``fable`` model) resolved every ambiguity this
-task's own spec section (§4.8, plus §4.3/§4.5/§4.6/§4.7) left open; those
-resolutions were HUMAN-DECIDED on 2026-07-12 (aligned with fable) and are
-implemented here as-is, marked inline with
-``# design note (T5.4, fable-reviewed, human-decided 2026-07-12): ...``
-rather than as open ``SPEC-QUESTION`` markers — they are not up for
-re-litigation.
+Layout: (1) ``Op`` / ``DiffOutcome`` / ``ReconcileReviewItem`` result shapes; (2) the pure,
+zero-I/O layer ``apply_repairs`` / ``diff_blocks`` / ``_compute_ops``; (3) ``ProjectionIndex``, the
+rebuildable id -> owning-paths map (cross-file moves, mirrors); (4) the store-facing primitives
+``hub_state_for`` / ``hub_changed_since`` / ``kernel_apply`` (every write goes through
+``kernel/store.py``, rule 0.4); (5) ``Reconciler`` (root resolution, the staged cycle, conflict
+seam, echo-recorded write-back); (6) ``discover_untracked_files`` / ``reconcile_all`` /
+``project_node_change`` for startup, rescan and hub-side edits.
 
-Module layout (mirrors the fable implementation order)
---------------------------------------------------------
-1. ``Op`` / ``DiffOutcome`` / ``ReconcileReviewItem`` — pure pydantic result
-   shapes.
-2. ``apply_repairs`` / ``diff_blocks`` / ``_compute_ops`` — the pure,
-   zero-I/O layer (no DB, no filesystem): given already-parsed
-   :class:`~akasha.contract.parser.BlockSet` values and a pure
-   maturity/projection lookup, compute the ops table. This is the bulk of
-   the unit-test surface.
-3. ``ProjectionIndex`` — an in-memory, rebuildable id -> set-of-owning-paths
-   map used for cross-file move detection and, since M19, for mirrors (the
-   same anchor live in several files, spec §4.7 "Mirrors"); it began as the
-   M3 T3.5/T3.6 follow-up's cross-file ``E_DUP_ID`` detector.
-4. ``hub_state_for`` / ``hub_changed_since`` / ``kernel_apply`` — the
-   store-facing (I/O) primitives. Every write goes through
-   ``kernel/store.py`` (rule 0.4); this module never touches SQLite
-   directly.
-5. ``Reconciler`` — the wiring class: sync-root resolution, the full
-   ``on_change`` pipeline in spec §4.8's pseudocode order, conflict
-   persistence (a swappable seam for T5.5), pause&diff persistence, and
-   canonical write-back with echo recording.
-6. ``discover_untracked_files`` (build-plan T11.3) — filesystem discovery
-   for files that exist on disk under a registered sync root but have no
-   ``sync_files`` row yet; wired into both ``reconcile_all`` (below) and
-   ``routes/sync.py``'s ``sync_rescan``.
-
-Note on wiring: this task does not wire ``Reconciler`` into the live
-``Watcher``/daemon — that lands with T5.6. ``Reconciler.on_change`` has the
-exact ``Callable[[str], None]`` shape ``sync.watcher.Watcher``'s
-``on_cycle`` parameter expects (see that module's docstring), so T5.6 only
-needs to construct a ``Reconciler`` and pass its bound ``on_change`` method.
+Ambiguities in §4.8 were resolved by the T5.4 architecture review (human-decided 2026-07-12) and
+are marked inline as ``# design note``; they are not open SPEC-QUESTIONs.
 """
 
 from __future__ import annotations
@@ -109,14 +77,9 @@ JOIN_CLOCK_SLACK_SECONDS = 300.0
 # call site).
 PARAGRAPH_NODE_TYPE: Literal["claim"] = "claim"
 
-# design note (T5.4, fable-reviewed, human-decided 2026-07-12) -- DECIDED
-# gap #2: the change_class used for every sync-authored commit_node call.
-# "patch" is the least-invalidating class (spec §4.9's invalidation walk
-# only triggers on "major"), appropriate for a vault edit that is not yet
-# heuristically classified. This constant is a classifier SEAM: M7/T7.2
-# ("change-class heuristic + wiring into commit") replaces it with a real
-# heuristic call; nothing else in this module should be changed to adopt
-# that later.
+# design note (T5.4): the change class of every sync-authored commit. "patch" is the least
+# invalidating (§4.9 only walks on "major"); this constant is the seam for a real classifier
+# (T7.2).
 SYNC_CHANGE_CLASS: Literal["patch"] = "patch"
 
 # The reserved author literal for every sync-originated store write (spec
@@ -129,34 +92,19 @@ SYNC_AUTHOR = "sync"
 
 
 class Op(BaseModel):
-    """One reconcile-pipeline operation, keyed by anchor id (spec §4.8).
+    """One reconcile operation keyed by anchor id (spec §4.8).
 
-    ``kind`` is one of the six spec §4.8 op kinds:
-    modified | created | deleted | moved | checkbox_toggled | reparented.
+    ``kind`` is modified | created | deleted | moved | checkbox_toggled | reparented.
+    ``vault_block`` / ``base_block`` are the parsed blocks on each side (``None`` where they cannot
+    exist). ``new_request`` is set for a ``created`` op from a ``^tm-new`` marker; a cross-file
+    adopt sets ``node_id`` instead.
 
-    ``vault_block``/``base_block`` are the parsed :class:`Block` on each
-    side (``None`` where not applicable — e.g. ``base_block`` is always
-    ``None`` for a ``created`` op, ``vault_block`` is always ``None`` for a
-    ``deleted`` op). ``new_request`` is set only for a ``created`` op
-    sourced from a literal ``^tm-new`` marker (as opposed to a cross-file
-    adopted anchor, spec §7's E04, which sets ``node_id`` instead).
-
-    ``parent_id`` is a deliberate, minimal extension beyond the four core
-    fields fable's design lists verbatim
-    (``Op(kind, node_id, vault_block, base_block, new_request)``): spec
-    point 4 requires a freshly-minted `^tm-new` task to wire a
-    ``composes(parent->child)`` edge "if a parent task at its depth"
-    exists, but nothing else in the pipeline carries that parent id
-    forward from ops-computation time (where the full document order is
-    available) to apply time (``kernel_apply``, which only sees one ``Op``
-    at a time). ``Op`` is this module's own in-memory pipeline type (not a
-    persisted schema), so this is a documented, justified addition, not an
-    invented schema/endpoint/grammar element.
-
-    ``mirror`` (build-plan T19.3, spec §4.7 "Mirrors") marks a ``created``
-    op whose anchor is ALREADY live in another file: this file is joining
-    an existing node as a mirror, not adopting a moved one. It is only
-    ever ``True`` on such an op; every other op leaves it ``False``.
+    ``parent_id`` carries the ``composes`` parent of a new task from ops-computation (full document
+    order) to apply time, where ``kernel_apply`` sees one op at a time. ``mirror`` marks a
+    ``created`` op whose anchor is already live in another file: this file is joining a node, not
+    adopting a moved one. ``adopt_unknown`` marks a ``created`` op for a well-formed anchor the hub
+    has never seen (a reset or second hub over an existing vault): the node is created UNDER THAT
+    ID so transclusion links survive instead of splitting (M20-G).
     """
 
     kind: Literal["modified", "created", "deleted", "moved", "checkbox_toggled", "reparented"]
@@ -170,27 +118,11 @@ class Op(BaseModel):
 
 
 class ReconcileReviewItem(BaseModel):
-    """A reconcile-level review annotation not expressible via ``linter.ViolationCode``.
+    """A reconcile-level review annotation outside ``linter.ViolationCode``.
 
-    ``linter.py`` (not in this task's Files list) freezes ``ViolationCode``
-    to the five §4.7 codes; cross-file classification (spec §7 -- the M3
-    T3.5/T3.6 follow-up logged against M5) needs two findings that fall
-    outside that closed set:
-
-    - an EOL anchor whose id is syntactically valid (checksum passes) but
-      corresponds to no node the kernel has ever heard of ("unknown
-      anchor" -- distinct from ``E_ID_CHECKSUM``, which is a checksum
-      *failure*), and
-    - a cross-file ``E_DUP_ID`` (the SAME anchor id live in two different
-      managed files at once -- distinct from single-file ``E_DUP_ID``,
-      which ``linter.py`` already detects). **No longer emitted** since
-      build-plan T19.3: the same anchor in several files is a mirror
-      (spec §4.7 "Mirrors"), not a violation.
-
-    ``code`` is a free-form string (not the frozen ``ViolationCode``
-    Literal) since these are reconcile-level findings, persisted via
-    ``store.enqueue_review``'s free-text ``cause_ref`` JSON, never
-    round-tripped back through ``linter.LintResult``.
+    ``code`` is free-form and persisted through ``store.enqueue_review``'s ``cause_ref`` JSON.
+    Nothing emits one today: an unknown anchor is adopted (M20-G) and a cross-file duplicate is a
+    mirror (T19.3); the type stays as the seam ``extra_review_items`` flows through.
     """
 
     id: str | None
@@ -212,19 +144,11 @@ class DiffOutcome(BaseModel):
 
 
 def apply_repairs(text: str, repairs: list[Repair]) -> str:
-    """Apply every certain-repair (spec §4.7) to ``text``, returning the result.
+    """Apply every certain repair (spec §4.7) to ``text`` and return the result.
 
-    Pure string transform: splits ``text`` on ``"\\n"`` (matching
-    ``contract.parser``'s line-number convention -- ``Repair.line_no`` is
-    1-indexed into the full file including front matter), and for each
-    repair whose recorded ``before`` still matches the line at
-    ``line_no - 1`` verbatim, replaces it with ``after``. A repair whose
-    ``before`` no longer matches (e.g. two repairs computed against the
-    same stale snapshot happen to target overlapping content) is skipped
-    rather than guessed -- this should not happen in practice since
-    ``linter.lint`` computes every repair against the SAME vault text, but
-    defends against ever corrupting a line the repair wasn't actually
-    computed for.
+    A repair whose recorded ``before`` no longer matches its line (``line_no`` is 1-indexed) is
+    skipped rather than guessed; ``lint`` computes all repairs against one text, so that should not
+    happen.
     """
     if not repairs:
         return text
@@ -240,40 +164,16 @@ def apply_repairs(text: str, repairs: list[Repair]) -> str:
 
 
 def _stable_order_ids(b_order: list[str], v_order: list[str]) -> set[str]:
-    """Return the STABLE (non-moved) id set -- an O(n log n) replacement for the old O(n*m) LCS DP.
+    """The STABLE (non-moved) id set in O(n log n), replacing the O(n*m) LCS that blew E20's budget
+    (T5.8-1: ~15 s for 5,000 blocks vs the <2 s spec limit).
 
-    Fixes the E20 5,000-block perf bug (build-plan T5.8-1, fable-reviewed,
-    human-decided 2026-07-12): the previous ``_lcs_ids`` helper (an O(n*m)
-    longest-common-subsequence DP, now removed -- its exact behavior is
-    preserved as the ``_lcs_oracle`` reference function in
-    ``tests/unit/sync/test_reconcile.py``, Hypothesis-verified against this
-    function) ran over the ~5,000 *stable* common ids EVERY reconcile
-    cycle, even when nothing moved (~15s wall time vs spec §6.2's <2s
-    budget). ``b_order``/``v_order`` are both filtered to the SAME id set
-    (``stable_ids ⊆ common``, see ``_compute_ops``), i.e. permutations of
-    one another -- so their longest-common-subsequence is exactly their
-    longest INCREASING subsequence (LIS) once ``v_order`` is remapped
-    through each id's position in ``b_order``. This function is REQUIRED
-    to return the exact same set the old LCS DP would (verified by the
-    Hypothesis oracle test against random permutations) since the
-    moved-op set it drives is pinned byte-identical by golden fixtures
-    (E03/E17).
-
-    Fast path: if the two orders are already identical (the common case --
-    nothing moved), every id is trivially stable, O(n) with zero DP/LIS
-    work at all.
-
-    General case: O(n log n) patience-sort LIS over
-    ``seq = [pos_in_b[x] for x in v_order]``, reconstructed GREEDILY FROM
-    THE LEFT to match ``_lcs_ids``'s own left-to-right tie-break (which
-    advances both cursors, i.e. matches each id at its EARLIEST possible
-    position in ``v_order``): compute ``s_len[i]`` = length of the longest
-    strictly-increasing subsequence of ``seq`` STARTING at index ``i``
-    (via one reverse patience pass over ``seq`` reversed, tracking pile
-    tops), then greedily take ``v_order[i]`` left-to-right whenever
-    ``s_len[i] == need`` (the longest remaining suffix length still
-    available) AND ``seq[i] > last`` (strictly after the previously taken
-    element), decrementing ``need`` and updating ``last`` each time taken.
+    ``b_order`` and ``v_order`` are permutations of one id set, so their longest common subsequence
+    is the longest increasing subsequence of ``v_order`` remapped through ``b_order`` positions. It
+    must return exactly the set the old DP did (a Hypothesis oracle in ``test_reconcile.py`` checks
+    this): golden fixtures pin the moved ops (E03/E17). Fast path: identical orders mean everything
+    is stable. General case: patience-sort LIS, reconstructed greedily from the left to match the
+    old left-to-right tie-break: ``s_len[i]`` is the longest increasing subsequence starting at
+    ``i``, then ``v_order[i]`` is taken whenever ``s_len[i] == need`` and ``seq[i] > last``.
     """
     if b_order == v_order:
         return set(b_order)
@@ -284,15 +184,9 @@ def _stable_order_ids(b_order: list[str], v_order: list[str]) -> set[str]:
     if n == 0:
         return set()
 
-    # s_len[i] = length of the longest strictly-increasing subsequence of
-    # ``seq`` STARTING at index i. Computed with one right-to-left patience
-    # pass over the NEGATED values: scanning i from n-1 down to 0 while
-    # patience-sorting -seq[i] is exactly the standard "LIS ending here"
-    # algorithm run on the reversed, negated sequence, which is equivalent
-    # (by the reversal+negation duality) to "LIS starting here" on the
-    # original sequence read forward. ``tails`` is kept sorted ascending
-    # (the standard patience-sort invariant); it is never read back for its
-    # own values, only its length/insertion-position.
+    # ``s_len[i]`` = longest strictly-increasing subsequence of ``seq`` starting at i: the standard
+    # "LIS ending here" patience pass run right-to-left over the negated values. ``tails`` stays
+    # sorted ascending; only its length and insertion positions are used.
     s_len = [0] * n
     tails: list[int] = []
     for i in range(n - 1, -1, -1):
@@ -325,27 +219,14 @@ def _stable_order_ids(b_order: list[str], v_order: list[str]) -> set[str]:
 
 
 class ProjectionIndex:
-    """In-memory, rebuildable ``node_id -> owning path`` map (spec §7 / M5 follow-up).
+    """In-memory, rebuildable ``node_id -> owning paths`` map (spec §7, §4.7 "Mirrors").
 
-    Built purely from durable state (``store.list_sync_files`` + each
-    file's base snapshot) -- never from a live vault read -- so it is
-    crash-safe and rebuildable at any time via :meth:`build`. Updated
-    incrementally by the ``Reconciler`` after every successful reconcile
-    cycle (:meth:`update`, called with the freshly-written ``H2``'s block
-    ids), so it always reflects each file's state AS OF ITS OWN last
-    reconcile -- not necessarily its live-on-disk bytes at this exact
-    instant if that file hasn't been reconciled yet this "wave". Multi-cycle
-    race hardening (two files whose independent watcher events race each
-    other) is explicitly T5.8's battery, not this task's.
-
-    Mirrors (build-plan T19.2, spec §4.7 "Mirrors"): the same anchor may
-    be live in several files, so a node has a *set* of owning paths
-    (:meth:`owners`). No table backs this -- membership is derived from
-    every file's base snapshot exactly as before, so a node in two files
-    was always durably recorded; only this in-memory view changed.
-    :meth:`owner` keeps its original single-path meaning (the most
-    recently updated path still holding the id) for callers that predate
-    mirrors.
+    Built from durable state only (``store.list_sync_files`` + each base snapshot), so it is
+    crash-safe and rebuildable via :meth:`build`. The ``Reconciler`` updates it after every cycle
+    (:meth:`update`), so it reflects each file as of its own last reconcile; :meth:`refresh` learns
+    files another instance reconciled. A node has a *set* of owners (:meth:`owners`); no table
+    backs it. :meth:`owner` keeps the pre-mirror meaning: the most recently updated path still
+    holding the id.
     """
 
     def __init__(self) -> None:
@@ -371,12 +252,11 @@ class ProjectionIndex:
     def refresh(self, conn: sqlite3.Connection) -> None:
         """Re-sync with the database: learn files this instance never reconciled itself.
 
-        Debug-plan D13: a long-lived index (the daemon's watcher) is built once, at start-up,
-        when no vault is registered yet; the vault is then reconciled by a throwaway
-        ``Reconciler`` (``POST /v1/sync/rescan``), whose ``update`` calls land in its own,
-        discarded index. Without this, an edit typed into a COPY could not find the original
-        as an owner and never reached it. Only files whose stored base hash differs from the
-        one this index last read are re-parsed, so a quiet cycle costs one small query.
+        The daemon's long-lived index is built at start-up, before any vault exists, and the vault
+        is then reconciled by a throwaway ``Reconciler`` (``POST /v1/sync/rescan``) whose updates
+        are discarded (D13): an edit typed into a copy could not find the original as an owner.
+        Only files whose stored base hash differs from the last one read are re-parsed, so a quiet
+        cycle costs one small query.
         """
         seen: set[str] = set()
         for row in store.list_sync_files(conn):
@@ -404,17 +284,11 @@ class ProjectionIndex:
         return frozenset(self._owners.get(node_id, ()))
 
     def update(self, path: str, block_ids: set[str], *, base_hash: str | None = None) -> None:
-        """Record that ``path``'s base snapshot now contains exactly ``block_ids``.
+        """Record that ``path``'s base snapshot (stored under ``base_hash``, which lets
+        :meth:`refresh` skip untouched files) contains exactly ``block_ids``.
 
-        ``base_hash`` is the ``sync_files.base_hash`` that snapshot was stored under; it lets
-        :meth:`refresh` skip files nobody else has touched.
-
-        Any id ``path`` previously held but no longer contains is removed
-        from that id's owner set (an empty set is deleted outright). Every
-        id in ``block_ids`` is added to ``path``'s ownership; :meth:`owner`
-        keeps its "most recently reconciled path wins" meaning, falling
-        back to a remaining holder (lowest path, deterministic) when the
-        last writer lets go of an id another file still holds.
+        Ids the path no longer holds are dropped from their owner sets; :meth:`owner` falls back to
+        the lowest remaining holder when the last writer lets go of an id another file still holds.
         """
         previous = self._by_path.get(path, set())
         for stale_id in previous - block_ids:
@@ -440,13 +314,9 @@ class ProjectionIndex:
 
 
 def _new_request_parent(blocks_v: BlockSet, nr: NewRequest) -> str | None:
-    """Nearest shallower REAL (already-anchored) task before ``nr`` in doc order.
-
-    Mirrors ``contract.parser``'s own ``_parent_for_depth`` stack algorithm,
-    applied only over already-anchored task blocks (never another
-    still-unminted ``^tm-new`` sibling in the same cycle -- see the
-    ``Op.parent_id`` docstring for why that narrower case is left
-    unresolved here, a documented limitation).
+    """Nearest shallower already-anchored task before ``nr`` in document order (the ``composes``
+    parent for a new task). Another unminted ``^tm-new`` sibling in the same cycle is never a
+    parent: a documented limitation.
     """
     if nr.shape != "task" or nr.depth == 0:
         return None
@@ -476,28 +346,11 @@ def _compute_ops(
 ) -> tuple[list[Op], list[ReconcileReviewItem]]:
     """Compute the ops table for ``blocks_v`` against ``blocks_b`` (spec §4.8/§7).
 
-    ``blocks_v`` is the (already parsed) V' the ops are computed against --
-    the caller decides whether that's post-repair or raw, keeping this
-    function itself repair-agnostic. See module docstring detection rules
-    (verbatim from the fable design) for the full per-kind semantics.
-
-    ``anchor_elsewhere`` (build-plan T5.8-3, fable-reviewed, human-decided
-    2026-07-13) is an OPTIONAL zero-I/O-from-this-function's-perspective
-    callable: given a base-only id about to be hard-deleted, it returns the
-    path of another currently-tracked ``*.md`` file (within the same sync
-    root) whose LIVE on-disk bytes right now contain a managed block with
-    that exact anchor id, or ``None`` if no such file exists. This is PROOF
-    (not a guess) of a move-in-flight for an S0 node -- the ``ProjectionIndex``
-    ``owner`` check just above only catches a move that the OTHER file has
-    already reconciled at least once; ``anchor_elsewhere`` additionally
-    catches the "natural causality" ordering where the source file's cycle
-    runs BEFORE the destination file has ever been reconciled (so
-    ``projection.owner`` is still ``None`` or stale). Defaulting to ``None``
-    preserves this function's exact prior behavior (every existing pure
-    unit test and golden fixture, including E06's single-file delete-s0
-    case, passes unchanged since a one-file sync root has no "elsewhere" to
-    find anyway). See ``Reconciler``'s real implementation for the on-disk
-    scan this callable wraps.
+    ``blocks_v`` is the vault side the caller chose (post-repair or raw); this function is
+    repair-agnostic. ``anchor_elsewhere(id)`` (T5.8-3) returns another tracked file in the same
+    root whose LIVE bytes hold a managed block with that id, or ``None``: proof of a move in flight
+    for an S0 node, catching the case where the source file's cycle runs before the destination was
+    ever reconciled (``projection.owner`` still empty). Omitted, no delete is withheld.
     """
     ops: list[Op] = []
     extra_review: list[ReconcileReviewItem] = []
@@ -636,17 +489,10 @@ def _compute_ops(
             # mirror of a node that lives on elsewhere. Silent either way:
             # no data loss, and never a hub delete while any file shows it.
             continue
-        # design note (T5.8-3, fable-reviewed, human-decided 2026-07-13):
-        # withhold the hard-delete (instead of the ``owner`` check above,
-        # which only catches a move the OTHER file has already reconciled)
-        # iff a live managed block with this exact anchor id can be PROVEN
-        # to exist RIGHT NOW in another *.md file under the same sync root
-        # -- concrete evidence of a move-in-flight, never a guess. Silence
-        # here mirrors the cross-file move-out branch above: the
-        # destination's own upcoming cycle adopts the id via the existing
-        # created/adopt machinery, and this cycle's base_store.put/
-        # projection.update below vacate this file's ownership so that
-        # adopt lands on an unowned id.
+        # design note (T5.8-3): withhold the hard delete iff a live block with this exact id can be
+        # PROVEN to exist right now in another file of the same root: a move in flight, never a
+        # guess. The destination's own cycle adopts the id; this cycle's ``projection.update``
+        # vacates this file's ownership so that adopt lands on an unowned id.
         if anchor_elsewhere is not None:
             loc = anchor_elsewhere(node_id)
             if loc is not None and loc != current_path:
@@ -667,13 +513,9 @@ def _without_mirror_removals(
 ) -> LintResult:
     """Drop ``E_DELETED_S1`` findings for blocks another file still holds (T19.3).
 
-    ``linter.lint`` sees one file at a time, so an S1+ block that vanished
-    from this file reads as a deletion. If another file still holds the same
-    anchor (a mirror), this file merely stopped showing a node that lives
-    on -- not a deletion, so neither a violation nor a review item. Removal
-    from the LAST file still surfaces ``E_DELETED_S1`` exactly as before.
-    Dropped before ``pause_and_diff`` counts violations, so it cannot push a
-    file over the 25% storm threshold.
+    ``linter.lint`` sees one file, so a vanished S1+ block reads as a deletion; if a mirror still
+    holds the anchor, this file merely stopped showing a node that lives on. Removal from the LAST
+    file still surfaces ``E_DELETED_S1``.
     """
 
     def is_mirror_removal(code: str, node_id: str | None) -> bool:
@@ -704,22 +546,12 @@ def diff_blocks(
     current_path: str,
     anchor_elsewhere: Callable[[str], str | None] | None = None,
 ) -> DiffOutcome:
-    """Lint, certain-repair, and diff one file's parsed blocks (spec §4.8).
+    """Lint, certain-repair and diff one file's parsed blocks (spec §4.8), zero I/O.
 
-    Zero-I/O: ``maturity`` and ``projection`` are pure lookups (a callable/
-    mapping and an already-built :class:`ProjectionIndex`, respectively) --
-    this function itself never touches the DB or filesystem. Calls
-    ``linter.lint`` internally (never re-derives violations), applies every
-    certain-repair to a working copy of ``vault_text`` (``apply_repairs``),
-    re-parses the repaired text as V', and computes ops against V'
-    (``_compute_ops``). ``anchor_elsewhere`` is forwarded verbatim to
-    ``_compute_ops`` -- see that function's docstring; defaulting to
-    ``None`` preserves this function's exact prior behavior too.
-
-    Partition invariant: an anchor id appears in EITHER ``ops`` OR
-    ``lint.review_items``/``extra_review_items``, never both -- ids
-    withheld by an open/unrepaired violation (``E_DELETED_S1``, unknown
-    anchor, cross-file ``E_DUP_ID``, ...) never reach ``ops``.
+    ``maturity`` and ``projection`` are pure lookups. Calls ``linter.lint``, applies its repairs to
+    a working copy of ``vault_text``, re-parses that as V' and computes the ops against it.
+    ``anchor_elsewhere`` is forwarded to ``_compute_ops``. An anchor appears in ``ops`` OR in the
+    review items, never both: ids withheld by an open violation never reach ``ops``.
     """
     lint_result = _without_mirror_removals(
         linter.lint(blocks_b, blocks_v, vault_text, maturity), projection, current_path
@@ -751,18 +583,9 @@ def diff_blocks(
 def _body_line(body: str) -> str:
     """The single-line content a canonical node ``body`` contributes to the grammar.
 
-    ``kernel.canonical.canonicalize_text`` (spec §4.3) guarantees EXACTLY
-    one trailing newline on every canonical body, including a genuinely
-    single-line paragraph/task body (e.g. ``"Original text"`` is stored as
-    ``"Original text\\n"``). The line-oriented contract grammar (§4.7) never
-    includes that mandatory trailing newline in a ``Block.text`` capture, so
-    every hub<->vault body comparison/substitution in this module strips it
-    first via this helper -- without it, EVERY single-line body would
-    spuriously look "different"/"unprojectable" (a trailing ``"\\n"`` is
-    technically ``"a newline in the body"``) even when nothing changed.
-    A body with genuine embedded newlines (multi-paragraph) still has an
-    internal ``"\\n"`` after stripping the trailing one, and is correctly
-    flagged unprojectable by :func:`hub_state_for`.
+    Canonical bodies end in exactly one newline that ``Block.text`` never includes, so every
+    hub/vault comparison strips it; a body with an internal newline stays multi-line (unprojectable
+    for a whole-line block, see :func:`hub_state_for`).
     """
     return body.rstrip("\n")
 
@@ -826,13 +649,9 @@ def hub_state_for(
 
 
 def hub_changed_since(conn: sqlite3.Connection, base_block: Block, node_id: str) -> bool:
-    """True iff the hub's current head diverges from ``base_block`` (spec §4.8).
-
-    Content-based, per fable's design: compares CURRENT
-    ``store.get_node(node_id)`` body/task_state against ``base_block``'s
-    recorded text/state (the vault-parsed snapshot as of the last agreed
-    base). A hub edit-then-revert within the same cycle therefore reads as
-    "unchanged" -- accepted and documented, not a bug.
+    """True iff the hub's head diverges from ``base_block`` (spec §4.8): compares the current body
+    and task_state with the base block's recorded text and state. A hub edit reverted within one
+    cycle reads as unchanged; accepted.
     """
     node = store.get_node(conn, node_id)
     if _body_line(node.body) != base_block.text:
@@ -1019,29 +838,14 @@ def kernel_apply(conn: sqlite3.Connection, op: Op, *, author: str = SYNC_AUTHOR)
 
 
 def conflict_branch_handler(conn: sqlite3.Connection, op: Op, path: str) -> None:
-    """Real T5.5 conflict handling: branch the vault version + enqueue one review.
+    """Conflict handling (T5.5): branch the vault version and enqueue one review; nothing is lost.
 
-    A both-sides-edit conflict loses nothing on either side: the hub head
-    already keeps whatever won the file this cycle (the mainline
-    ``commit_node``/no-op that ran earlier this same ``on_change`` pass,
-    before this handler is ever invoked -- ``head_hash`` is NOT touched
-    here), and the vault's divergent version is ADDITIONALLY recorded as a
-    non-head branch commit on the SAME node's DAG
-    (``store.record_conflict_branch``), parented on the node's current head
-    commit (the deterministic fork anchor -- see that function's docstring
-    and the logged SPEC-QUESTION on fork-point provenance). Exactly one
-    ``cause_kind="conflict"`` review is enqueued per distinct conflict,
-    deduplicated via ``store.find_open_reviews`` against the deterministic
-    ``cause_ref`` bytes (replay-safe for T5.6's crash recovery -- a
-    completed cycle re-run hits both the ``record_conflict_branch`` and the
-    enqueue dedup gate and performs zero additional writes).
-
-    A ``deleted``-op conflict (``op.vault_block is None`` -- the vault
-    removed the anchor while the hub concurrently edited it) has nothing to
-    branch: the hub head is already the sole remaining body for that node,
-    so this enqueues a review WITHOUT recording a branch commit (documented
-    SPEC-QUESTION: a vault-delete + hub-edit conflict gets a review but no
-    branch commit -- there is no second version to preserve).
+    The hub head already holds whatever won the file this cycle; the vault's divergent version is
+    additionally recorded as a non-head branch commit (``store.record_conflict_branch``, parented
+    on the current head). One ``conflict`` review per distinct conflict, deduplicated against the
+    deterministic ``cause_ref`` via ``find_open_reviews``, so a crash replay writes nothing more. A
+    ``deleted`` op (the vault removed the anchor while the hub edited it) has no second version to
+    branch: it gets a review without a branch commit (SPEC-QUESTION).
     """
     branch_commit: str | None = None
     if op.node_id is not None and op.vault_block is not None:
@@ -1079,22 +883,11 @@ def conflict_branch_handler(conn: sqlite3.Connection, op: Op, path: str) -> None
 
 @dataclass
 class Reconciler:
-    """The full §4.8 ``on_change(path)`` pipeline, wired to a live store + origin.
+    """The §4.8 ``on_change(path)`` pipeline wired to a live store and origin tracker.
 
-    Public API (T5.5/T5.6/T5.7 wiring contract)
-    ---------------------------------------------
-    - ``Reconciler(conn, origin, *, conflict_handler=conflict_branch_handler, projection=None)``
-    - ``on_change(path: str) -> None`` -- the exact ``Callable[[str], None]``
-      shape ``sync.watcher.Watcher``'s ``on_cycle`` parameter expects
-      (T5.6 wires ``watcher = Watcher(conn, reconciler.on_change, ...)``).
-    - ``conflict_handler`` is a swappable seam
-      (``Callable[[sqlite3.Connection, Op, str], None]``): defaults to
-      ``conflict_branch_handler`` (task T5.5 -- branches the vault version
-      onto the node's commit DAG + enqueues one ``cause_kind="conflict"``
-      review), reused verbatim without touching this pipeline at all.
-    - ``projection`` defaults to a freshly ``ProjectionIndex.build(conn)``
-      if omitted; callers that want to share one long-lived index across
-      many ``Reconciler`` instances (unusual) may pass their own.
+    ``on_change(path)`` has the ``Callable[[str], None]`` shape ``Watcher`` expects.
+    ``conflict_handler`` is a swappable seam (default :func:`conflict_branch_handler`).
+    ``projection`` defaults to a fresh ``ProjectionIndex.build(conn)``.
     """
 
     conn: sqlite3.Connection
@@ -1133,13 +926,10 @@ class Reconciler:
         return best
 
     def resolve_sync_root(self, path: str) -> dict[str, Any] | None:
-        """Longest-prefix match ``path`` against every durable sync root (spec §4.4/§4.8).
+        """Longest-prefix match of ``path`` against the durable sync roots (spec §4.4/§4.8).
 
-        NFC-normalizes and absolutizes both sides before comparing. Roots
-        are cached; a miss triggers exactly one forced refresh (a sync
-        root registered after this ``Reconciler`` was constructed/last
-        cached is picked up on the very next unmatched path) before giving
-        up.
+        Both sides are NFC-normalized and absolutized. Roots are cached; a miss forces one refresh
+        (a root registered after the last cache load is picked up on the next unmatched path).
         """
         normalized = self._normalize(path)
         match = self._match_root(normalized, self._load_roots())
@@ -1150,20 +940,12 @@ class Reconciler:
     # -- write-back ----------------------------------------------------------
 
     def write_if_diff(self, path: str, text: str) -> bool:
-        """Write ``text`` (already canonical) to ``path`` iff it differs; record the write.
+        """Write ``text`` (already canonical) to ``path`` iff it differs; return whether it wrote.
 
-        Returns ``True`` iff a write happened. Atomic (temp file +
-        ``os.replace``). Records ``(path, object_hash(text))`` via
-        ``self.origin`` for EVERY write this method performs, including a
-        ``^tm-new`` rewrite -- "origin-tagged, not an echo" (spec §4.7).
-
-        build-plan T9.1: both the pre-write existence read and the
-        ``os.replace`` rename are wrapped in :func:`retry_with_backoff` --
-        this is the spec's own named write-back primitive (§4.8's
-        ``write_if_diff(path, H)``/``write_if_diff(path, H2)``), i.e. the
-        actual OS-level file write this task's "locking retry" targets. A
-        transient Windows sharing-violation/lock-violation/AV-held-handle
-        error on either call is retried with backoff before giving up.
+        Atomic (temp file + ``os.replace``); the read and the rename are wrapped in
+        :func:`retry_with_backoff` for transient Windows lock/AV errors (T9.1). Every write is
+        recorded via ``self.origin``, a ``^tm-new`` rewrite included: "origin-tagged, not an echo"
+        (spec §4.7).
         """
         target = Path(path)
         current: str | None = None
@@ -1188,24 +970,13 @@ class Reconciler:
 
     @staticmethod
     def _make_anchor_elsewhere(root_path: str, current_path: str) -> Callable[[str], str | None]:
-        """Build the real ``anchor_elsewhere`` callable for one ``on_change`` cycle.
+        """Build the ``anchor_elsewhere`` callable for one cycle (never cached across cycles).
 
-        Fresh per call (files can change between cycles -- never cached
-        across cycles). Scoped to ``root_path`` ONLY (ids are unique per
-        sync root, spec §4.7 -- scanning across roots would be an identity
-        guess). The directory walk + each candidate file's bytes are read
-        AT MOST ONCE per cycle no matter how many disappearing ids are
-        queried (the ``cache`` dict below is populated lazily on the first
-        call and reused for every subsequent id this same cycle); each
-        candidate is only ``parse``d (the more expensive confirm step) once
-        it is actually string-prefiltered as a live candidate for SOME
-        queried id, and that parse is itself cached per file too.
-
-        For each id: substring-prefilter (``contract_anchor(node_id) in
-        text``) every OTHER ``*.md`` file's raw bytes under ``root_path``,
-        then confirm via ``parse(canonicalize_text(text))`` that the id is a
-        genuine EOL managed anchor (not fenced/mid-line/unmanaged) before
-        trusting it. Returns the first matching file's path, else ``None``.
+        Scoped to ``root_path`` (ids are unique per root, §4.7). The walk and each file's bytes are
+        read at most once per cycle, however many ids are queried; a file is parsed only after a
+        substring prefilter (``contract_anchor(id) in text``) and that parse is cached, to confirm
+        a genuine managed anchor (not fenced or mid-line). Returns the first matching file's path,
+        else ``None``.
         """
         cache: dict[str, tuple[str, BlockSet | None]] = {}
         walked = False
@@ -1242,21 +1013,13 @@ class Reconciler:
     def on_change(self, path: str) -> None:
         """The §4.8 ``on_change(path)`` pipeline for ``path``, plus mirror propagation.
 
-        Runs :meth:`_cycle` for ``path``. If that cycle COMMITTED a node's
-        text or checkbox, every OTHER file that holds the same anchor (a
-        mirror, spec §4.7 "Mirrors" / build-plan T19.4) is then brought up
-        to date by running the same three-way :meth:`_cycle` on it -- never
-        a blind write of the hub render, so that file's own other edits
-        survive. Those own edits are the one thing a propagated cycle can
-        itself COMMIT (debug-plan D12: two files each edited, on different
-        mirrored lines, inside one debounce window); each such node is relayed
-        to ITS other owners, so both edits reach every file. A hub-to-file
-        write-back commits nothing and is never relayed, so there is no
-        ping-pong, and the fan-out is capped as a runaway guard. A mirror
-        that vanished from disk is skipped, and a failure in one mirror is
-        logged and never fails the source file's already-completed cycle nor
-        stops the other mirrors; a mirror left stale that way is healed by its
-        next event or the startup reconcile (§4.8, idempotent).
+        Runs :meth:`_cycle`; if it committed a node's text or checkbox, every other file holding
+        that anchor is brought up to date by the same three-way cycle (never a blind write, so its
+        other edits survive). What such a propagated cycle itself commits (that file's own pending
+        edit to another mirrored line: D12, M19-D) is relayed to that node's other owners. A
+        hub-to-file write-back commits nothing and is never relayed, so there is no ping-pong;
+        fan-out is capped. A vanished mirror is skipped; a failing one is logged without failing
+        the source cycle, and heals on its next event or the startup reconcile.
         """
         committed = self._cycle(path)
         if not committed:
@@ -1301,18 +1064,13 @@ class Reconciler:
                     relay.append((other, own_edits))
 
     def _cycle(self, path: str) -> set[str]:
-        """One §4.8 ``on_change(path)`` cycle for ``path`` ONLY (no propagation).
+        """One §4.8 cycle for ``path`` ONLY (no propagation), in stages: read, quiet/hub-only
+        shortcut, parse + lint + repair + diff, repair routing, per-op conflict resolution,
+        canonical write-back + ``base_store.put`` + projection update.
 
-        Follows the spec pseudocode verbatim, in order: quiet shortcut,
-        hub-only shortcut, parse+lint+repair+diff, pause&diff (zero
-        writes), conservative-profile repair routing, per-op conflict
-        resolution, canonical write-back + base_store.put + projection
-        update.
-
-        Returns the ids of nodes whose text/checkbox this cycle COMMITTED
-        to the hub (empty for a quiet/hub-only/paused cycle, and for ops
-        that were conflicted or already convergent) -- the set
-        :meth:`on_change` fans out to the node's other owning files.
+        Returns the ids of nodes whose text/checkbox this cycle COMMITTED (empty for quiet,
+        hub-only, conflicted or already-convergent ops): what :meth:`on_change` fans out to the
+        other owners.
         """
         root = self._cycle_root(path)
         if root is None:
@@ -1320,16 +1078,9 @@ class Reconciler:
         assert self.projection is not None
         self.projection.refresh(self.conn)  # D13: learn files another Reconciler reconciled
 
-        # design note (T9.2c): timing starts here, after the unregistered
-        # sync-root guard above -- an event for a path with no registered
-        # sync root does zero reconciliation and is not a "sync cycle" for
-        # §7's violation_rate denominator (both this task's build-plan Steps
-        # and its spec-questions.md registration enumerate exactly the four
-        # exit paths covered by the try/finally below -- quiet, hub-only,
-        # pause&diff, and normal completion -- and omit the guard above).
-        # ``finally`` also covers an exception mid-cycle (e.g. a genuinely
-        # registered file vanishing under ``retry_with_backoff``): that is
-        # still a real attempted cycle and must count.
+        # design note (T9.2c): timing starts after the unregistered-root guard (an event outside
+        # any root is not a §7 "sync cycle"); ``finally`` also counts a cycle that raises mid-way
+        # (e.g. a file vanishing under ``retry_with_backoff``).
         cycle_start = time.monotonic()
         try:
             return self._run_cycle(path, root)
@@ -1473,14 +1224,9 @@ class Reconciler:
             for repair in outcome.lint.repairs:
                 metrics.record_auto_repair(repair.code)
             return outcome.ops, outcome.extra_review_items, outcome.repaired_text
-        # design note (T5.4, fable-reviewed, human-decided 2026-07-12):
-        # a conservative sync root (cloud-synced path, T5.3) never
-        # applies certain-repairs silently -- route them to review
-        # instead, one documented boolean branch. Ops are recomputed
-        # against the RAW (unrepaired) vault blocks.
-        #
-        # design note (T9.2c): these repairs were routed to review,
-        # not applied -- metrics.record_auto_repair must NOT fire here.
+        # design note (T5.4/T9.2c): a conservative root (cloud-synced path) never applies certain
+        # repairs silently; they are routed to review, ops are recomputed against the RAW vault
+        # blocks, and ``record_auto_repair`` must not fire.
         for repair in outcome.lint.repairs:
             store.enqueue_review(
                 self.conn,
@@ -1638,13 +1384,12 @@ class Reconciler:
     def _classify_join(
         self, op: Op, changed_at: float | None
     ) -> Literal["quiet", "stale", "newer", "conflict"]:
-        """Decide a mirror join whose text differs from the hub's (M20-D, in this order).
+        """Decide a mirror join whose text differs from the hub's (M20-D), in this order.
 
-        ``quiet``: the same as the hub head. ``stale``: equal to an EARLIER version in the node's
-        history (an old copy pasted back; file times cannot see this: yesterday's text saved now
-        has a fresh time). ``newer``: text the hub has never held, in a file changed after the hub
-        head's commit. ``conflict``: text the hub has never held, but the hub head is newer or the
-        file time is unreliable.
+        ``quiet``: same as the hub head. ``stale``: equal to an EARLIER version in the node's
+        history (file times cannot see this: yesterday's text saved now has a fresh time).
+        ``newer``: text the hub never held, in a file changed after the hub head's commit.
+        ``conflict``: never-held text but the hub head is newer, or the file time is unreliable.
         """
         assert op.node_id is not None and op.vault_block is not None
         vb = op.vault_block
@@ -1698,27 +1443,12 @@ class Reconciler:
 
 
 def discover_untracked_files(conn: sqlite3.Connection) -> list[str]:
-    """Paths that exist on disk under a registered sync root but have no ``sync_files`` row yet.
+    """Paths under a registered sync root that have no ``sync_files`` row yet.
 
-    Closes the gap T11.1 empirically reproduced and logged in
-    ``docs/spec-questions.md``: ``POST /v1/sync/roots`` is a pure DB upsert
-    with no filesystem walk (spec §4.10), so a root registered against a
-    directory that already contains real ``.md`` files never gets those
-    files' paths into ``sync_files`` on its own -- nothing has ever called
-    ``Reconciler.on_change`` on them. Spec §4.8's startup line ("run
-    ``on_change`` for every managed file") does not limit "managed" to
-    rows already durably tracked; the narrowest reading that matches the
-    prose is to also walk each registered root's directory for files it
-    has never seen.
-
-    Walks every ``store.list_sync_roots`` row's directory for ``*.md`` files
-    (skipping what the root's ``.tmignore`` deny-list excludes, T18.10b --
-    ``watcher.iter_tracked_markdown``) and returns every absolute path not
-    already present in ``{f["path"] for f in store.list_sync_files(conn)}``.
-    A root directory that doesn't (yet) exist on disk is skipped rather
-    than raising (registering a root ahead of creating its directory is
-    not itself an error this helper needs to surface). Read-only: this
-    function performs no writes and calls no ``store.py`` write helper.
+    ``POST /v1/sync/roots`` only inserts a row (spec §4.10), so files already in the folder would
+    never be reconciled; §4.8's "run ``on_change`` for every managed file" is read to include them
+    (T11.1). Skips what the root's ``.tmignore`` excludes (``watcher.iter_tracked_markdown``) and a
+    root directory that does not exist yet. Read-only.
     """
     known = {f["path"] for f in store.list_sync_files(conn)}
     discovered: list[str] = []
@@ -1745,42 +1475,17 @@ def reconcile_all(
     *,
     projection: ProjectionIndex | None = None,
 ) -> dict[str, int]:
-    """Reconcile every tracked managed file once; the daemon-startup entry point (spec §4.8).
+    """Reconcile every tracked file once: the daemon-startup entry point (spec §4.8), also crash
+    recovery.
 
-    Spec §4.8: "Startup: run ``on_change`` for every managed file
-    (idempotent -- this is also crash recovery)." Because ``Reconciler.on_change``
-    is already fully idempotent (content-addressed ``objects``, the quiet/
-    hub-only shortcuts of T5.4, and the conflict-branch dedup gate of
-    T5.5), a crash at ANY point mid-``on_change`` -- before a commit, after a
-    commit but before the canonical write-back, after the write-back but
-    before ``base_store.put`` -- is recovered from purely by re-running this
-    same pipeline on restart: whatever partial state survived the crash is
-    exactly the ``(V, B, H)`` triple a fresh ``on_change`` call re-derives
-    from durable state (the vault file on disk, ``base_store``, and the
-    hub), so it converges to the same stable canonical result a clean run
-    would have produced, with no anchor/block ever silently dropped. This
-    function does not re-implement any reconcile logic -- it only
-    constructs one shared ``Reconciler``/``ProjectionIndex`` pair and drives
-    ``.on_change`` over every ``store.list_sync_files`` path.
-
-    ``origin`` defaults to a fresh, empty :class:`~akasha.sync.origin.OriginTracker`
-    when omitted -- a startup/rescan run has no live filesystem watcher to
-    share echo-suppression state with (T5.6 wires the daemon's long-lived
-    watcher+reconciler pair separately in ``daemon.serve``), and every write
-    this function performs is idempotent regardless, so an unsuppressed
-    echo at worst causes one redundant (still idempotent, zero-diff) watcher
-    cycle later, never incorrect state.
-
-    A ``sync_files`` row whose file has since vanished from disk (deleted
-    or moved away while the daemon was down) is *skipped and counted*, not
-    a crash -- one missing file must not abort convergence of every other
-    managed file (same resilience as T5.7's ``POST /sync/rescan``, which
-    this function is the shared, reusable core of).
-
-    Returns a small summary dict: ``files_reconciled`` (successfully ran
-    ``on_change``), ``files_missing`` (tracked path no longer exists on
-    disk), ``reviews_open`` (total open review-queue rows after this pass,
-    across every ``cause_kind``).
+    ``on_change`` is idempotent (content-addressed objects, the quiet/hub-only shortcuts, the
+    conflict-branch dedup), so a crash at any point is recovered by re-running the pipeline:
+    whatever survived is exactly the (V, B, H) triple a fresh call re-derives. This only drives one
+    shared ``Reconciler`` over ``store.list_sync_files``. ``origin`` defaults to a fresh tracker (a
+    startup or rescan run shares no echo state with the watcher; an unsuppressed echo costs one
+    idempotent zero-diff cycle). A row whose file vanished is skipped and counted (one missing file
+    must not stop the rest; ``POST /sync/rescan`` shares this). Returns ``files_reconciled``,
+    ``files_missing`` and ``reviews_open``.
     """
     if origin is None:
         from akasha.sync.origin import OriginTracker as _OriginTracker
@@ -1821,56 +1526,17 @@ def project_node_change(
     node_ids: list[str],
     origin_tracker: OriginTracker,
 ) -> list[str]:
-    """Re-run §4.8's ``on_change`` pipeline for the managed file(s) that own ``node_ids``.
+    """Re-run ``on_change`` for the files that own ``node_ids`` after a hub-side edit
+    (T13.2/T13.3).
 
-    Reusable library-level helper (build-plan T13.2); wiring a real HTTP
-    call site into this is a later task (T13.3) so the risky wiring lands
-    separately from this logic. Closes the gap
-    ``docs/spec-questions.md``'s T13.3 entry documents: today ``on_change``
-    has exactly three production entry points (daemon startup, a live
-    filesystem watcher event, ``POST /v1/sync/rescan``) and NONE of them
-    fires after a hub-side mutation (``PATCH /nodes/{id}``, the CLI, the
-    Web UI), so §4.8's own hub-only branch (``if V == B:
-    write_if_diff(path, H)``) never runs in response to that kind of edit
-    in production -- only in a test that calls ``Reconciler.on_change``
-    directly. That entry's binding narrowest reading (read in full before
-    implementing this function) is exactly what this helper implements:
-    after a hub-side commit, run the EXISTING ``on_change`` for only the
-    managed file(s) that already project the affected node(s), sharing the
-    caller's live :class:`~akasha.sync.origin.OriginTracker` so the
-    resulting write-back is echo-suppressed exactly as a watcher-driven
-    write already is (T13.3's whole reason for taking the tracker as a
-    parameter rather than constructing its own).
-
-    Resolution order, per node id: build a fresh :class:`ProjectionIndex`
-    from durable state (:meth:`ProjectionIndex.build` -- the same
-    "rebuildable at any time" index every other production caller uses,
-    never a live vault read), look up EVERY file holding each id via
-    :meth:`ProjectionIndex.owners` (a mirrored node lives in several files,
-    spec §4.7 "Mirrors" / T19.4), and de-duplicate the resulting paths
-    (two changed nodes projected into the SAME file trigger exactly one
-    ``on_change`` call for that file, not two). A node owned by no managed
-    file (``owner`` returns ``None``) contributes no path and no work --
-    it stays unfiled, still counted by ``GET /sync/export``'s
-    ``unfiled_node_count``; this function invents no "file assignment"
-    mechanism, which would be new spec (§1/§7 rule 0.2).
-
-    For each de-duplicated path, a fresh ``Reconciler(conn,
-    origin_tracker)`` is constructed and its existing ``on_change(path)``
-    is called verbatim -- this function never re-implements or duplicates
-    any piece of the §4.8 pipeline (no second projection/diff/write-back
-    path). A path that has vanished from disk between the index build and
-    this call is not a crash -- mirrors ``reconcile_all``'s existing
-    ``FileNotFoundError`` handling exactly: the path is skipped (excluded
-    from the returned list) rather than raising, so one missing file never
-    aborts reprojection of the others.
-
-    Returns the list of paths actually reconciled (i.e. for which
-    ``on_change`` ran to completion without raising ``FileNotFoundError``),
-    in first-encountered order over ``node_ids``. Idempotent like every
-    other ``on_change`` caller: a second immediate call over the same
-    ``node_ids`` re-derives the identical ``(V, B, H)`` triple and hits the
-    quiet shortcut (``write_if_diff`` returns ``False``), a no-op.
+    The three production ``on_change`` entry points (startup, watcher, rescan) never fire after
+    ``PATCH /nodes/{id}``, the CLI or the UI, so §4.8's hub-only branch would not run in
+    production. For each id a fresh ``ProjectionIndex`` finds EVERY owning file (mirrors, T19.4);
+    paths are de-duplicated (two nodes in one file cost one call) and each gets a fresh
+    ``Reconciler(conn, origin_tracker)`` sharing the caller's tracker so the write-back is
+    echo-suppressed. A node in no file stays unfiled (no file-assignment mechanism: that would be
+    new spec). A vanished path is skipped, as in ``reconcile_all``. Returns the paths reconciled,
+    in first-encountered order; a second call is a quiet no-op.
     """
     index = ProjectionIndex.build(conn)
     paths: list[str] = []

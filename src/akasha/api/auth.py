@@ -1,65 +1,20 @@
-"""Token authentication, secret hashing, and per-token rate limiting.
+"""Token authentication, secret hashing and per-token rate limiting (spec §4.11, §4.4 ``tokens``).
 
-Task T4.1 (spec §4.11 Bearer-token auth; §4.4 ``tokens`` DDL, verbatim,
-already migrated by ``migrations/001_init.sql`` — not re-derived here):
+This module only READS ``tokens`` (issuance and revocation are ``kernel/store.py``, rule 0.4);
+looking a token up by bearer value is authentication, not a truth-bearing write. It exposes plain
+functions, not a FastAPI dependency; ``app.py`` wires ``authenticate``.
 
-    CREATE TABLE tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL,
-                          class TEXT NOT NULL,               -- human|agent
-                          secret_hash TEXT NOT NULL, rate_per_min INTEGER,
-                          created_at TEXT NOT NULL, revoked_at TEXT);
+Bearer format: ``"{token_id}.{raw_secret}"``. The table stores only ``secret_hash``; the id (an
+id8, which never contains ``"."``) makes lookup one ``SELECT ... WHERE id=?`` instead of a
+hash-and-scan. Splitting is on the FIRST ``"."``, so a secret may contain more. Token creation must
+use ``mint_secret``/``hash_secret`` so the scheme lives in one place.
 
-This module only *reads* the ``tokens`` table (never INSERT/UPDATE/DELETE
-here — build-plan rule 0.4 reserves persistent writes for
-``kernel/store.py``, and token issuance/revocation is a separate,
-API-layer concern that belongs to T4.5's ``/tokens`` route). Looking up a
-token by bearer value is authentication, not truth-bearing state
-mutation, so it is a legitimate direct read against ``sqlite3.Connection``
-here rather than a ``kernel/store.py`` addition (§4.5's documented store
-surface has no "get token by bearer value" function, and doesn't need
-one).
+Hashing: stdlib ``hashlib.sha256`` (no new dependency), compared with ``hmac.compare_digest``
+(constant time); secrets come from ``secrets.token_urlsafe`` (CSPRNG).
 
-Bearer token format
---------------------
-The ``tokens`` table stores only ``secret_hash``, never the raw secret.
-The bearer value presented over HTTP (``Authorization: Bearer <value>``)
-is therefore ``"{token_id}.{raw_secret}"`` — a single ``"."`` separates
-the token's primary-key id (spec §4.1 id8, ``[a-z2-7]{8}``, which never
-itself contains ``"."``) from an opaque raw secret. This lets lookup be an
-O(1) ``SELECT ... WHERE id=?`` rather than a hash-and-scan over every row.
-Splitting on the *first* ``"."`` is used (so a raw secret is free to
-contain further ``"."`` characters). ``T4.5``'s ``POST /tokens`` route
-(and the CLI's ``token create`` verb) must mint new tokens in this same
-``"{id}.{raw_secret}"`` shape — see ``mint_secret``/``hash_secret`` below,
-which this module exposes precisely so that future token-creation code
-reuses the same hashing scheme instead of re-deriving it.
-
-Secret hashing
----------------
-Per build-plan rule 0.5 constraints for this task (no new dependency —
-``bcrypt``/``passlib``/``argon2`` are not in ``pyproject.toml``, and this
-task's scope does not include adding one), the raw secret is hashed with
-stdlib ``hashlib.sha256`` and compared against the stored ``secret_hash``
-with ``hmac.compare_digest`` (constant-time, avoids leaking a byte-by-byte
-timing oracle on the comparison). Raw secrets are minted with
-``secrets.token_urlsafe`` (stdlib, CSPRNG) — never anything from
-``random``.
-
-Rate limiting
---------------
-``rate_per_min`` is a per-token integer column; ``NULL`` means unlimited
-(never rate-limited). The daemon is a single local process on
-``127.0.0.1`` (spec §3), so an external store (Redis etc.) would be
-overkill; this module keeps an in-process, in-memory fixed-window counter
-keyed by token id (module-level dict, one deque of call timestamps per
-token, pruned to the trailing 60-second window on each check — i.e. a
-sliding window, not a fixed-window that resets abruptly on the minute
-boundary). This state is intentionally process-local and not persisted;
-it resets on daemon restart, which is acceptable for a rate limit (not a
-truth-bearing invariant).
-
-This module exposes plain functions only — it is deliberately NOT a
-FastAPI dependency or route itself; wiring ``authenticate`` into the app
-as a dependency is T4.3's (``app.py``) job.
+Rate limiting: ``rate_per_min`` is per token, ``NULL`` means unlimited. State is an in-process dict
+of call timestamps per token, pruned to a trailing 60 s (a sliding window). It is not persisted and
+resets on restart, which is fine for a rate limit on a single local process (spec §3).
 """
 
 from __future__ import annotations
@@ -150,13 +105,8 @@ def hash_secret(raw_secret: str) -> str:
 
 
 def mint_secret() -> str:
-    """Generate a fresh, CSPRNG raw secret suitable for a new token.
-
-    Not wired to any DB write here (T4.1 is read-only re: ``tokens`` —
-    see module docstring); provided so token-minting code (T4.5's
-    ``POST /tokens``, the CLI's ``token create``) reuses the exact same
-    secret-generation scheme rather than re-deriving it, since this
-    module is the natural owner of the hashing/secret format.
+    """A fresh CSPRNG raw secret for a new token. Token-creating code (``POST /tokens``, the CLI)
+    reuses this so the secret scheme is defined once.
     """
     return secrets.token_urlsafe(32)
 
@@ -193,16 +143,10 @@ def _clock() -> float:
 def check_rate_limit(token_id: str, rate_per_min: int | None, *, now: float | None = None) -> None:
     """Record a call for ``token_id`` and raise if it exceeds ``rate_per_min``.
 
-    ``rate_per_min is None`` means unlimited: never rate-limited, and no
-    call history is recorded for it (nothing to enforce). Otherwise
-    prunes the call log to the trailing ``_RATE_WINDOW_SECONDS`` window,
-    then raises ``RateLimitExceededError`` if recording this call would
-    put the count for the window over ``rate_per_min``; a call that is
-    itself rejected as rate-limited is NOT added to the log (retrying
-    immediately after backing off should not compound the penalty).
-
-    ``now`` is an injectable clock hook (seconds) for deterministic tests;
-    defaults to ``time.monotonic()``.
+    ``None`` means unlimited: no history is kept. Otherwise the log is pruned to the trailing
+    window and ``RateLimitExceededError`` is raised if this call would exceed the budget; a
+    rejected call is NOT logged, so backing off does not compound the penalty. ``now`` is an
+    injectable clock (seconds).
     """
     if rate_per_min is None:
         return
@@ -225,24 +169,12 @@ def check_rate_limit(token_id: str, rate_per_min: int | None, *, now: float | No
 def authenticate(
     conn: sqlite3.Connection, bearer_value: str, *, now: float | None = None
 ) -> AuthContext:
-    """Authenticate an ``Authorization: Bearer <bearer_value>`` header value.
+    """Authenticate an ``Authorization: Bearer`` value against ``tokens`` (read-only).
 
-    Read-only against ``tokens`` (never writes ``tokens``/``audit_log`` —
-    see module docstring). Raises, in order of check:
-
-    - ``MalformedBearerError`` if ``bearer_value`` doesn't split into a
-      non-empty ``token_id`` and ``raw_secret``.
-    - ``UnknownTokenError`` if no ``tokens`` row has this id.
-    - ``InvalidSecretError`` if the row exists but the hashed secret
-      doesn't match ``secret_hash`` (constant-time compare).
-    - ``RevokedTokenError`` if the secret matches but ``revoked_at`` is
-      non-NULL.
-    - ``RateLimitExceededError`` if the token's ``rate_per_min`` budget
-      (sliding 60s window, see ``check_rate_limit``) is exceeded by this
-      call.
-
-    On success returns an ``AuthContext`` exposing ``token_class`` so
-    callers can branch on human vs. agent (spec §4.11).
+    Raises, in order: ``MalformedBearerError`` (no non-empty id and secret), ``UnknownTokenError``,
+    ``InvalidSecretError`` (constant-time compare), ``RevokedTokenError``,
+    ``RateLimitExceededError``. Returns an ``AuthContext`` whose ``token_class`` distinguishes
+    human from agent (spec §4.11).
     """
     token_id, raw_secret = _split_bearer(bearer_value)
 
@@ -272,14 +204,9 @@ def authenticate(
     )
 
 
-# --- Audit log (task T4.2, spec §4.4 ``audit_log`` DDL / §4.11) -------------
-#
-# Every *mutating* API action appends one ``(ts, token_id, action, detail)``
-# row to ``audit_log``; reads append nothing. This module owns the *policy*
-# (what counts as a mutation, what to record, never recording a secret); the
-# actual SQLite INSERT is delegated to ``kernel.store.append_audit`` because
-# build-plan rule 0.4 reserves all persistent writes for ``kernel/store.py``
-# (no other module writes SQLite directly).
+# --- Audit log (spec §4.4 ``audit_log``, §4.11) --- Every mutating API action appends one ``(ts,
+# token_id, action, detail)`` row; reads append nothing. This module owns the policy (what counts
+# as a mutation, never recording a secret); the INSERT is ``kernel.store.append_audit`` (rule 0.4).
 
 # HTTP methods that mutate persistent state and therefore MUST be audited
 # (spec §4.11: agent-class *mutating* endpoints; every mutation is auditable).
@@ -302,20 +229,13 @@ def record_mutation(
     *,
     detail: str | None = None,
 ) -> bool:
-    """Append one ``audit_log`` row iff ``method`` is a mutating HTTP method.
+    """Append one ``audit_log`` row iff ``method`` is a mutating HTTP method; return whether one
+    was written.
 
-    This is the primitive T4.3's FastAPI middleware/decorator wraps around
-    each request: pass the request's HTTP ``method``, a stable ``action``
-    label (e.g. ``"POST /v1/nodes"``), and the authenticated ``ctx`` (or
-    ``None`` for an unauthenticated action). Returns ``True`` if a row was
-    written, ``False`` for a read (so a read provably writes nothing —
-    T4.2 DoD).
-
-    The bearer *secret* is never in scope here (only ``ctx.token_id`` is),
-    so no secret can leak into the log; ``detail`` is caller-controlled and
-    the caller keeps it secret-free (spec §4.11 step 2). Exactly one row is
-    appended per mutating call — ``store.append_audit`` issues a single
-    append-only ``INSERT`` (T4.2 DoD: "exactly one audit row").
+    The primitive the app's middleware wraps around each request: the HTTP ``method``, a stable
+    ``action`` label (``"POST /v1/nodes"``) and the authenticated ``ctx`` (``None`` if
+    unauthenticated). Only ``ctx.token_id`` is in scope, never the secret; the caller keeps
+    ``detail`` secret-free (§4.11).
     """
     if not is_mutating_method(method):
         return False

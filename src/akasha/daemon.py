@@ -1,17 +1,8 @@
-"""Process lifecycle: structured logging (T0.6) + single-instance lock + serve (T4.9).
+"""Process lifecycle: structured logging, the single-instance lock, and serve (spec §4.12).
 
-Spec §4.12 (``akasha daemon [--config PATH]``), M4 milestone text ("single-
-instance lock; Task Scheduler XML + NSSM instructions in ``docs/``"). The
-lock file lives in the config directory under a **neutral** filename
-(build-plan rule 0.6 — the product name never appears in on-disk paths):
-``tm-daemon.lock``, matching the existing neutral ``tm-daemon`` config-dir
-name from ``config.py``.
-
-Locking is cross-platform (spec §3: Windows is the release gate) via
-``fcntl.flock`` on POSIX and ``msvcrt.locking`` on Windows, both acquired
-in **non-blocking** mode so a second instance fails fast with a typed,
-human-readable :class:`AlreadyRunningError` instead of hanging or dumping a
-traceback.
+The lock file is ``tm-daemon.lock`` in the config directory (a neutral name, rule 0.6). Locking is
+cross-platform (``fcntl.flock`` on POSIX, ``msvcrt.locking`` on Windows), non-blocking, so a second
+instance fails fast with :class:`AlreadyRunningError` instead of hanging.
 """
 
 from __future__ import annotations
@@ -73,13 +64,8 @@ def configure_logging(
     max_bytes: int = LOG_MAX_BYTES,
     backup_count: int = LOG_BACKUP_COUNT,
 ) -> logging.Logger:
-    """Configure the shared ``"akasha"`` logger with a size-rotating file handler.
-
-    ``max_bytes``/``backup_count`` (T9.3, keyword-only, defaulting to the
-    original T0.6 hardcoded values) let tests drive real rotation with a
-    tiny ``max_bytes`` instead of writing 10 MB of log lines; every existing
-    production call site (``serve`` below) is unaffected since it never
-    passes them.
+    """Configure the shared ``"akasha"`` logger with a size-rotating file handler. ``max_bytes``
+    and ``backup_count`` are keyword-only so tests can drive rotation with a tiny file.
     """
     logger = logging.getLogger("akasha")
     logger.setLevel(level)
@@ -106,42 +92,18 @@ GC_INTERVAL_SECONDS = 24 * 60 * 60
 
 
 class GcScheduler:
-    """Runs the T1.7 ``kernel.store.gc_objects`` job on a background daily tick.
+    """Runs ``kernel.store.gc_objects`` and the age-based S0 retention GC on a background daily
+    tick.
 
-    Reuses ``gc_objects(conn) -> list[str]`` verbatim (rule 0.4 -- no new
-    SQL lives here; this class only adds the *scheduling* layer M9/T9.3
-    calls for). ``gc_objects``'s own invariant -- never removes an object
-    still referenced by a commit, a node head, or a base snapshot -- is
-    unchanged by running it on a timer instead of synchronously (see
-    ``tests/unit/kernel/test_gc.py`` / T1.7).
+    Each tick (1) hard-deletes live S0 nodes older than ``s0_gc_retention_days`` through the
+    existing ``delete_node`` S0 branch (never an S1+ node: ``list_expired_s0_node_ids`` filters on
+    S0/live and ``delete_node`` re-checks maturity), then (2) runs ``gc_objects`` so the objects
+    those deletions orphaned are reclaimed in the same tick. No SQL lives here (rule 0.4).
 
-    Each tick also runs the task T9.3b age-based S0 *node* retention GC
-    (vision.md §14 A7: "S0 default GC retention 30 days (configurable); GC
-    blocked at S1 automatically") -- the archived T1.7 resolution's
-    two-step lifecycle: (1) hard-delete every live S0 node older than
-    ``s0_gc_retention_days`` via the EXISTING, unchanged ``delete_node`` S0
-    hard-delete branch (T1.6 -- no new deletion path), THEN (2) run
-    ``gc_objects`` in the SAME tick, so the objects those node deletions
-    just orphaned are reclaimed immediately rather than lagging a tick.
-    Node deletion never touches S1+ nodes: ``store.list_expired_s0_node_ids``
-    filters ``maturity='S0' AND status='live'`` exactly, and ``delete_node``
-    itself only hard-deletes when the (freshly recomputed) maturity is S0.
-
-    Each tick opens and closes its own short-lived connection to
-    ``db_path`` (mirroring ``api/deps.py::get_conn``'s per-request
-    pattern) rather than sharing ``app.state.conn`` with request handling
-    or the startup reconcile -- the docstring on ``store.connect`` warns a
-    single ``sqlite3.Connection`` is not safe under concurrent
-    cross-thread access, and WAL mode is designed for exactly this
-    "many short-lived connections" usage instead.
-
-    :meth:`start` runs one tick immediately (so a freshly (re)started
-    daemon reclaims anything orphaned since it last ran), then again every
-    ``interval_seconds`` until :meth:`stop`. ``interval_seconds`` is
-    injectable so tests can observe multiple ticks in milliseconds rather
-    than real days; :meth:`run_once` is also public so a test (or a future
-    manual "gc now" trigger) can run exactly one tick synchronously without
-    the background thread at all.
+    A tick opens its own short-lived connection (like ``api/deps.py::get_conn``): one connection
+    shared across threads is unsafe, and WAL is built for many short-lived ones. :meth:`start`
+    ticks at once, then every ``interval_seconds`` (injectable) until :meth:`stop`;
+    :meth:`run_once` runs one tick synchronously.
     """
 
     def __init__(
@@ -265,19 +227,10 @@ def _acquire_windows(handle: IO[bytes], lock_path: Path) -> None:
         raise AssertionError("_acquire_windows called on a non-Windows platform")
     import msvcrt
 
-    # msvcrt.locking locks a byte range starting at the current file
-    # position; the file must actually contain that many bytes, so ensure
-    # at least one byte exists before requesting a 1-byte non-blocking
-    # exclusive lock (LK_NBLCK).
-    #
-    # The whole sequence -- not just the locking() call -- must be inside
-    # the try: on real Windows, reading a byte range another handle already
-    # holds via msvcrt.locking (e.g. a second acquisition attempt in the
-    # same process, exercised by test_second_acquisition_fails_with_clear_
-    # typed_error) raises PermissionError from handle.read(1) itself,
-    # before locking() is ever reached. This was unreachable/unverified on
-    # a Linux dev host (msvcrt doesn't exist there) and only surfaced when
-    # actually run on Windows.
+    # ``msvcrt.locking`` locks a byte range from the current position, so the file must hold at
+    # least one byte first. The whole sequence, not just ``locking()``, must sit inside the
+    # ``try``: on Windows even ``handle.read(1)`` raises ``PermissionError`` when another handle
+    # holds the range (found only when run on Windows).
     try:
         handle.seek(0)
         if not handle.read(1):
@@ -301,13 +254,8 @@ def _release_windows(handle: IO[bytes]) -> None:
 
 @contextmanager
 def single_instance_lock(lock_path: str | Path) -> Generator[None]:
-    """Hold an exclusive, non-blocking OS-level lock on ``lock_path``.
-
-    Raises :class:`AlreadyRunningError` immediately (never blocks) if
-    another process already holds the lock. Releases the lock on context
-    exit (normal or exceptional) so a subsequent acquisition in the same
-    or another process succeeds again -- this is the "clean shutdown frees
-    the lock" behaviour required by the DoD.
+    """Hold an exclusive, non-blocking OS lock on ``lock_path``; raise :class:`AlreadyRunningError`
+    at once if another process holds it. The lock is released on exit, normal or exceptional.
     """
     lock_path = Path(lock_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,16 +297,10 @@ def _config_dir(config: Config) -> Path:
 
 
 def _watcher_content_hash(path: str) -> str:
-    """Hash a vault file's current on-disk content for echo suppression.
-
-    Matches ``Reconciler.on_change``'s own ``origin.record_write(path,
-    object_hash(text.encode("utf-8")))`` call exactly (same canonicalize-
-    then-``object_hash`` pipeline) -- a genuine daemon self-write reads
-    back byte-identical, so its hash always matches the recorded one and
-    ``OriginTracker.is_echo`` correctly drops it; a real external edit
-    produces different canonical bytes and is never suppressed. Lazy
-    imports match this module's existing deferred-import style for
-    sync-related dependencies (kept out of the CLI's other, lighter verbs).
+    """Hash a vault file's on-disk content for echo suppression, with the same canonicalize-then-
+    ``object_hash`` pipeline ``Reconciler`` records writes with: a daemon self-write reads back
+    identical and is dropped, a real external edit is not. Lazy imports keep the CLI's other verbs
+    light.
     """
     from akasha.kernel.canonical import canonicalize_text, object_hash
 
@@ -369,51 +311,19 @@ def _watcher_content_hash(path: str) -> str:
 def serve(config: Config) -> None:
     """Acquire the single-instance lock, then serve the API until shutdown.
 
-    Binds ``config.bind``/``config.port`` (default ``127.0.0.1:7433``, spec
-    §3) via uvicorn. Raises :class:`AlreadyRunningError` (uncaught here) if
-    another instance already holds the lock -- the CLI (T4.8/`cli/main.py`)
-    is responsible for catching it and mapping it to a clean exit rather
-    than a traceback.
+    Binds ``config.bind``:``config.port`` via uvicorn. :class:`AlreadyRunningError` propagates (the
+    CLI maps it to a clean exit). Inside the lock, before any request: the startup
+    ``reconcile_all`` (spec §4.8; also crash recovery), so two daemons can never reconcile one
+    vault at once. Then the :class:`GcScheduler` and the live
+    :class:`~akasha.sync.watcher.Watcher`, both stopped in the same ``finally`` as the shutdown
+    log.
 
-    Before serving any request, runs the task T5.6 startup reconcile
-    (spec §4.8: "Startup: run ``on_change`` for every managed file
-    (idempotent -- this is also crash recovery)") against the app's shared
-    connection (``app.state.conn``). This runs INSIDE the single-instance
-    lock, after it is acquired -- so two daemon processes can never
-    reconcile the same vault concurrently -- and BEFORE ``uvicorn.run``
-    starts handling requests, matching the build-plan's "on daemon start,
-    reconcile every managed file" ordering. ``sync``/``reconcile`` are
-    imported lazily here (matching this module's existing deferred-import
-    style for ``uvicorn``/``create_app``) so the CLI's other verbs stay
-    light.
-
-    Also starts the task T9.3/T9.3b :class:`GcScheduler` (background daily
-    S0-node-retention + ``gc_objects`` tick, configured with
-    ``config.s0_gc_retention_days``) right before ``uvicorn.run`` -- inside the lock, so
-    it can never race a second instance's own scheduler over the same DB --
-    and stops it in the same ``finally`` as the "daemon shutting down" log,
-    so a clean shutdown always joins the tick thread rather than leaking it.
-
-    Also starts the task T9.6 live filesystem :class:`~akasha.sync.watcher.Watcher`
-    right after the startup reconcile, so a running daemon actually reacts
-    to a vault file being edited rather than relying solely on process
-    restart or a manual ``POST /v1/sync/rescan``. Uses a fresh ``Reconciler``
-    (constructed ONCE here and held for the watcher's entire lifetime --
-    never a fresh one per event, or cross-file move tracking would silently
-    stop working) built around ``app.state.origin_tracker`` -- task T13.3:
-    THE SAME single, long-lived :class:`~akasha.sync.origin.OriginTracker`
-    instance ``api.app.create_app`` already hangs off ``app.state`` for the
-    request path's own re-projection calls (``routes/nodes.py``), never a
-    second/separate tracker -- so a write made on the request path (a
-    ``PATCH /v1/nodes/{id}`` re-projecting its managed file) is recognized
-    by THIS watcher as its own echo and never starts a second reconcile
-    cycle for the same write. Deliberately NOT the startup reconcile's
-    tracker, matching ``reconcile_all``'s own docstring rationale: "a
-    startup/rescan run has no live filesystem watcher to share
-    echo-suppression state with", and every ``on_change`` call is idempotent
-    regardless, so an unshared tracker there costs at most one redundant
-    no-op cycle, never incorrect state. Stopped in the same ``finally`` as
-    ``gc_scheduler``.
+    The watcher uses ONE ``Reconciler`` for its whole lifetime (a fresh one per event would lose
+    cross-file move tracking), built around ``app.state.origin_tracker``: the same tracker the
+    request path's re-projections write through (T13.3), so a ``PATCH /v1/nodes/{id}`` write-back
+    is recognized as an echo and starts no second cycle. The startup reconcile deliberately uses
+    its own tracker: it has no watcher to share state with, and an unsuppressed echo costs one
+    idempotent no-op cycle.
     """
     import uvicorn
 
@@ -449,14 +359,9 @@ def serve(config: Config) -> None:
             logger.info(f"startup reconcile complete: {json.dumps(summary)}")
             gc_scheduler.start()
 
-            # Task T13.3: share app.state.origin_tracker (the SAME instance
-            # routes/nodes.py's request-path re-projection writes through)
-            # rather than constructing a second, unshared tracker here.
-            # ``getattr`` with a fresh fallback keeps this robust against a
-            # stubbed/minimal ``app`` (e.g. a test double for ``create_app``
-            # that doesn't set every production attribute) without ever
-            # affecting the real, production ``create_app`` path, which
-            # always sets it (``api/app.py``).
+            # T13.3: share ``app.state.origin_tracker`` instead of building a second tracker. The
+            # ``getattr`` fallback only serves a stubbed ``app`` in tests; ``create_app`` always
+            # sets it.
             watch_origin = getattr(app.state, "origin_tracker", None) or OriginTracker()
             watch_reconciler = reconcile.Reconciler(app.state.conn, watch_origin)
             watcher = Watcher(
@@ -593,12 +498,9 @@ def _read_pid(config_dir: Path) -> int | None:
 def down(config: Config, *, timeout: float = DOWN_TIMEOUT_SECONDS) -> str:
     """Stop the detached daemon; returns ``not-running``, ``stopped`` or ``timeout``.
 
-    The single-instance lock -- which the daemon holds for exactly as long as it
-    lives -- is the source of truth for "is it running", NOT the pid file, so a
-    stale pid file (whose number may since have been reused by an unrelated
-    process) is only ever deleted, never signalled. An abrupt stop is safe by
-    design: startup reconcile is idempotent (spec §4.8) and the project already
-    survives ``kill -9``.
+    The single-instance lock, held exactly as long as the daemon lives, is the source of truth for
+    "is it running", not the pid file: a stale pid file (its number may have been reused) is
+    deleted, never signalled. An abrupt stop is safe: startup reconcile is idempotent.
     """
     config_dir = _config_dir(config)
     lock_path = config_dir / LOCK_FILE_NAME

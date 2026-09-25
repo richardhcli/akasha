@@ -1,101 +1,24 @@
-"""Filesystem watcher: 500 ms debounce + OneDrive/Dropbox cloud-path detection.
+"""Filesystem watcher: 500 ms debounce, cloud-path detection, echo suppression (spec §4.8; §6.2
+E18/E19).
 
-Task T5.3 (spec §4.8 ``on_change(path) after 500 ms debounce``; M5 milestone
-text: "watcher with debounce + cloud-path detection (warn + conservative
-profile when path is under OneDrive/Dropbox markers)"; §6.2 E18 rapid
-modify bursts ⇒ debounce, single cycle; E19 vault under simulated OneDrive
-path ⇒ warning + conservative profile).
+Three layers, each testable alone: :func:`detect_cloud_path` (a pure predicate); :class:`Debouncer`
+(pure event coalescing with an injectable window and clock: tests pass ``at=`` timestamps, never
+sleep); :class:`Watcher` (loads durable sync roots, flags cloud roots ``conservative`` with one
+WARNING on the shared ``akasha`` logger, and on ``start()`` schedules a ``watchdog`` observer built
+by an injectable ``observer_factory``). The watcher never imports ``sync.reconcile``: it calls the
+``on_cycle(path)`` callback once a path's window has passed with no further activity.
 
-Design: pure logic vs. I/O wiring
------------------------------------
-Per this task's testability requirement, the module is split into three
-independently testable layers:
+Echo suppression is optional: with an ``OriginTracker`` and a ``content_hash_fn``, an event whose
+content hash matches a recent daemon write is dropped before the debouncer.
 
-1. :func:`detect_cloud_path` — a pure predicate over a path string; no I/O.
-2. :class:`Debouncer` — pure event-coalescing logic. Both the debounce
-   window and the clock are injectable (mirrors ``api/auth.py``'s
-   ``check_rate_limit(..., now=...)`` pattern and ``sync/origin.py``'s
-   ``OriginTracker``): tests drive it with explicit timestamps via the
-   ``at=`` keyword on :meth:`Debouncer.notify`/:meth:`Debouncer.poll`,
-   never a real ``time.sleep``. It knows nothing about ``watchdog`` or
-   SQLite.
-3. :class:`Watcher` — the wiring layer. Loads durable sync roots via
-   ``kernel.store.list_sync_roots`` (T4.10), detects cloud paths per root
-   (step 3), and — only when :meth:`Watcher.start` is called — creates a
-   ``watchdog`` ``Observer`` (via an injectable ``observer_factory``, so
-   tests can substitute a spy instead of a real OS-level observer thread)
-   that feeds raw filesystem events into the ``Debouncer``.
+``detect_cloud_path`` matches OneDrive/Dropbox markers as a case-insensitive substring of a path
+SEGMENT (``OneDrive - Contoso``, ``Dropbox (Personal)``), per sync root, not per file.
 
-Reconcile routing (step 4)
-----------------------------
-T5.4's reconcile pipeline does not exist yet. The ``Watcher`` never
-imports ``sync.reconcile``; instead its constructor takes an
-``on_cycle: Callable[[str], None]`` callback invoked with the affected
-file path once its debounce window has elapsed with no further activity.
-T5.4 supplies the real callback (its ``on_change(path)`` entry point);
-until then callers (and this task's tests) pass a spy.
-
-Echo suppression (optional wiring)
-------------------------------------
-The ``Watcher`` optionally accepts a T5.2 ``OriginTracker`` plus a
-``content_hash_fn: Callable[[str], str]``. When both are supplied, a raw
-filesystem event first checks ``origin_tracker.is_echo(path, hash)``; a
-matching echo (the daemon's own recent write) is dropped before it ever
-reaches the debouncer, so it never produces a spurious reconcile cycle.
-Without a hash function/tracker (the default), every raw event is
-debounced and forwarded — echo suppression is opt-in, not required for
-this task's DoD.
-
-Cloud-path detection and the conservative profile
-----------------------------------------------------
-``detect_cloud_path`` matches on OneDrive/Dropbox markers appearing as a
-path *segment* (case-insensitive substring of a path component — e.g.
-``OneDrive``, ``OneDrive - Contoso``, ``Dropbox (Personal)`` all match),
-never on marker text that merely appears inside an unrelated component
-name, avoiding false positives such as a hub folder literally named
-``MyOneDriveDoc.md``. ``Watcher.load_roots`` runs this once per
-registered sync root's ``root_path`` (root granularity, per the
-build-plan step "Detect cloud markers in an Obsidian vault path" — a
-vault path *is* a sync root's ``root_path``, not a per-file check); a
-match logs one WARNING via the shared ``akasha`` logger (the same
-logger ``daemon.py::configure_logging`` configures — this module never
-``print``s) and sets that root's ``conservative`` flag to ``True``. The
-flag is exposed on the ``WatchedRoot`` dataclass so T5.4's reconcile
-pipeline can read it (e.g. to be more cautious about certain-repairs
-under a cloud-sync provider's own eventual-consistency window) without
-this module needing to know anything about reconcile policy.
-
-Windows locking-retry / AV-noise tolerance (build-plan T9.1)
-----------------------------------------------------------------
-:func:`is_transient_lock_error` and :func:`retry_with_backoff` live here
-(the lower dependency layer — ``sync.reconcile`` already imports
-:func:`detect_cloud_path` from this module, never the reverse) so both
-this module and ``reconcile.py`` share one classifier/backoff
-implementation. Split across the two files by WHERE the OS-level file
-I/O each layer owns actually happens:
-
-- ``reconcile.py``'s ``Reconciler.on_change``/``write_if_diff`` own the
-  actual OS-level file reads/writes (spec §4.8's ``write_if_diff`` is the
-  canonical write-back primitive) — those call sites wrap each
-  individual read/replace in :func:`retry_with_backoff` for a short,
-  tight retry budget (build-plan Step 1, "Retry-with-backoff on Windows
-  sharing-violation/locked-file errors").
-- This module's :class:`Debouncer` — the layer that actually *invokes*
-  ``on_cycle`` (a full reconcile cycle) — additionally catches a
-  transient-lock error that survives ``on_change``'s own short retry
-  budget (e.g. an AV scan that outlasts it) and RE-QUEUES the path for
-  the next debounce window instead of losing it or crashing whatever
-  drives the poll loop (build-plan Step 2, "Tolerate transient AV-held
-  handles"). See :meth:`Debouncer.poll`.
-
-Both the classifier and the backoff loop are plain Python (no
-``msvcrt``/platform import — matching this module's existing "pure logic
-vs. I/O wiring" split), so they and the ``Debouncer`` re-queue behavior
-are fully unit-testable on any host: a test constructs a fake
-``OSError`` with ``.winerror`` set to a known Windows sharing-
-violation/lock-violation/access-denied code (see
-``tests/battery/test_windows.py``) rather than requiring a real Windows
-filesystem.
+Windows lock/AV tolerance (T9.1): :func:`is_transient_lock_error` and :func:`retry_with_backoff`
+live here (``reconcile`` imports this module, never the reverse). ``reconcile`` wraps each OS read
+and rename in the retry; :meth:`Debouncer.poll` additionally re-queues a path whose cycle still
+raised a transient error after that budget. Both are plain Python, so tests fake
+``OSError.winerror`` on any host.
 """
 
 from __future__ import annotations
@@ -122,53 +45,25 @@ if TYPE_CHECKING:
 # Spec §4.8: "on_change(path) after 500 ms debounce".
 DEFAULT_DEBOUNCE_SECONDS = 0.5
 
-# Matches sync/reconcile.py's Reconciler.write_if_diff naming scheme
-# EXACTLY (`f".{target.name}.tmp-{secrets.token_hex(8)}"`) -- build-plan
-# T9.6: every real write-back the daemon makes creates-then-renames-away
-# one of these under a watched root, so a live Watcher observes it
-# constantly in normal operation, not as a rare edge case. Filtered out
-# before it ever reaches notify_event/echo-suppression/the debouncer:
-# there is nothing to reconcile about a transient temp file that is
-# usually already gone (renamed to its final name) by the time anything
-# downstream would try to read it, and it is never itself a managed
-# vault file.
+# Matches ``Reconciler.write_if_diff``'s temp-file name (``.{name}.tmp-{16 hex}``) exactly. Every
+# write-back creates and renames one under a watched root, so it is filtered before echo
+# suppression and the debouncer: it is never a vault file and is usually gone by the time anything
+# reads it (T9.6).
 _RECONCILE_TEMP_FILE_RE = re.compile(r"^\..+\.tmp-[0-9a-f]{16}$")
 
 
-# debug-plan Dx: the live watcher recursively observes EVERY filesystem
-# change under a sync root's root_path (watchdog is scheduled with
-# recursive=True over the whole tree, module-level in Watcher.start), not
-# just managed contract files. Every OTHER path into on_change is already
-# *.md-scoped: discover_untracked_files (T11.3) walks
-# ``Path(root_path).rglob("*.md")`` and reconcile_all only replays rows
-# already in ``sync_files`` (which themselves only ever entered via that
-# same *.md-scoped discovery or an earlier *.md-filtered watcher event).
-# This module's raw watchdog bridge was the one path with no such filter.
-# Found via dogfooding: opening the fixture vault in Obsidian caused
-# ``.obsidian/workspace.json`` (Obsidian's own app-state file, rewritten on
-# nearly every UI interaction -- pane focus, scroll position, ...) to be
-# forwarded straight to ``Reconciler.on_change``, which read + parsed it as
-# contract text (an empty BlockSet, since it is JSON, not markdown) and
-# permanently inserted a ``sync_files`` row for it -- polluting the Sync
-# view's "files: N" count with an Obsidian-internal file the daemon has no
-# business managing, and burning a real reconcile cycle (file read + parse
-# + hub_state_for + write-back diff) on every one of Obsidian's own saves.
-# The narrowest fix matching the existing *.md convention everywhere else
-# in this module: never forward a non-``.md`` path past the watchdog
-# boundary. Suffix compared case-insensitively since Windows paths (this
-# project's primary dogfood platform, per README) are case-insensitive.
+# D7: the recursive watcher sees EVERY change under a root, not just Markdown. Opening the vault in
+# Obsidian made ``.obsidian/workspace.json`` (rewritten on nearly every UI action) reach
+# ``on_change`` and get a permanent ``sync_files`` row. Every other path into ``on_change`` is
+# already ``*.md``-scoped, so a non-``.md`` path is never forwarded (case-insensitive suffix:
+# Windows paths are).
 def _is_managed_candidate(path: str) -> bool:
     return PurePath(path).suffix.lower() == ".md"
 
 
-# debug-plan D10: watchdog event-type strings that never represent a content
-# change -- a plain read-without-write raises exactly these on this
-# platform's inotify backend. Compared as plain strings (not
-# ``watchdog.events.EVENT_TYPE_*`` constants) to keep this module's stated
-# "no import-time dependency on watchdog beyond Watcher.start" design goal
-# (see this module's own docstring) -- these three literal values are
-# watchdog's own stable public API surface (``watchdog/events.py``), not an
-# implementation detail likely to drift.
+# D10: watchdog event types that never mean a content change (a plain read raises them on the
+# inotify backend). Plain strings, not ``watchdog.events`` constants, to keep the module free of an
+# import-time watchdog dependency; these three are watchdog's stable public values.
 _NON_CONTENT_EVENT_TYPES = frozenset({"opened", "closed", "closed_no_write"})
 
 # Case-insensitive marker substrings checked against each path *segment*
@@ -178,19 +73,10 @@ _DROPBOX_MARKER = "dropbox"
 
 
 def detect_cloud_path(path: str) -> str | None:
-    """Return ``"OneDrive"``, ``"Dropbox"``, or ``None`` for an ordinary local path.
-
-    Checks every path segment (``PurePath(path).parts``) for a
-    case-insensitive substring match against the known provider markers,
-    so both ``.../OneDrive/vault`` and ``.../OneDrive - Contoso/vault``
-    (a real OneDrive-for-Business folder-naming convention) are detected,
-    while a segment that merely contains the substring as part of an
-    unrelated word (e.g. a file literally named ``dropboxes.md``) is
-    still a match at the segment level by design — the spec only asks for
-    "OneDrive/Dropbox markers", and segment-level substring matching is
-    the narrowest reading that still catches the documented real-world
-    folder-naming variants without requiring an exact-name allowlist the
-    spec never specifies (§ narrowest reading, build-plan rule 0.2).
+    """``"OneDrive"``, ``"Dropbox"`` or ``None``: a case-insensitive substring match of the
+    provider markers against each path segment, so ``.../OneDrive - Contoso/vault`` is caught.
+    Segment-level matching is the narrowest reading of "OneDrive/Dropbox markers" that needs no
+    exact-name allowlist.
     """
     for part in PurePath(path).parts:
         lowered = part.lower()
@@ -201,34 +87,16 @@ def detect_cloud_path(path: str) -> str | None:
     return None
 
 
-# --- Windows locking-retry / AV-noise tolerance (build-plan T9.1) -----------
-#
-# See module docstring section of the same name for the reconcile.py vs.
-# watcher.py split. ``OSError.winerror`` is only ever populated by the OS on
-# win32; on POSIX no exception ever carries it, so this classifier never
-# fires on a real Linux/macOS host. Tests simulate the Windows condition by
-# constructing a plain ``OSError``/``PermissionError`` and setting
-# ``.winerror`` manually -- a normal instance attribute, settable on any
-# platform -- rather than requiring a real Windows filesystem.
-#
-# Codes covered: ERROR_ACCESS_DENIED (5, commonly surfaced when an AV
-# scanner briefly holds an exclusive handle open on a just-changed file --
-# this task's "AV noise"), ERROR_SHARING_VIOLATION (32, another process has
-# the file open without FILE_SHARE_READ/WRITE), ERROR_LOCK_VIOLATION (33, a
-# byte-range lock -- e.g. ``daemon.py``'s own ``msvcrt.locking`` -- is held
-# by another handle). This is an implementation-level mapping of the
-# build-plan's plain-English "sharing-violation/locked-file errors" text,
-# not a new schema/grammar element (build-plan rule 0.2).
+# --- Windows lock / AV-noise tolerance (T9.1) --- ``OSError.winerror`` is only set on win32, so
+# this never fires on POSIX; tests set it by hand. Codes: 5 ACCESS_DENIED (an AV scanner briefly
+# holding a handle), 32 SHARING_VIOLATION, 33 LOCK_VIOLATION (e.g. ``daemon.py``'s own
+# ``msvcrt.locking``).
 TRANSIENT_WINDOWS_LOCK_ERRORS = frozenset({5, 32, 33})
 
 
 def is_transient_lock_error(exc: BaseException) -> bool:
-    """True iff ``exc`` is an ``OSError`` carrying a transient-lock ``winerror``.
-
-    The default ``is_transient=`` predicate for :func:`retry_with_backoff`;
-    passed as a plain callable (not hardcoded into the retry loop) so a
-    caller/test can substitute a narrower or wider classification without
-    touching the loop itself.
+    """True iff ``exc`` is an ``OSError`` with a transient-lock ``winerror``: the default
+    ``is_transient`` predicate of :func:`retry_with_backoff`, injectable so callers can narrow it.
     """
     return (
         isinstance(exc, OSError)
@@ -246,17 +114,10 @@ def retry_with_backoff[T](
 ) -> T:
     """Call ``fn()``, retrying with exponential backoff while ``is_transient`` says so.
 
-    Up to ``attempts`` total calls to ``fn`` (i.e. up to ``attempts - 1``
-    retries after the first attempt); sleeps ``base_delay * 2**n`` before
-    retry number ``n`` (0-indexed) -- with the defaults: 50ms, 100ms, 200ms,
-    400ms between the 5 attempts, then the final failure is raised. An
-    exception ``is_transient`` classifies as NOT transient (e.g. a genuine
-    permission error, or the file simply missing) is re-raised immediately
-    on the very first occurrence, with no delay and no retry -- this is
-    explicitly a retry for a known-transient condition, never a generic
-    "swallow and hope" loop. ``sleep`` is injectable (defaults to
-    ``time.sleep``) so a test can assert on the exact backoff schedule
-    without a real wall-clock wait.
+    At most ``attempts`` calls, sleeping ``base_delay * 2**n`` before retry n (defaults: 50, 100,
+    200, 400 ms), then the last failure is raised. A non-transient exception is re-raised at once:
+    this is a retry for a known-transient condition, not "swallow and hope". ``sleep`` is
+    injectable.
     """
     if sleep is None:
         sleep = time.sleep
@@ -327,13 +188,8 @@ def iter_tracked_markdown(root_path: str, patterns: list[str]) -> list[str]:
 
 @dataclass
 class WatchedRoot:
-    """One durable sync root (T4.10 ``sync_roots`` row) plus watcher-local state.
-
-    ``conservative`` is process-local, runtime-only state (not a
-    ``sync_roots`` column — no migration needed for this task): it is
-    recomputed from ``root_path`` every time :meth:`Watcher.load_roots`
-    runs, exactly like ``sync/origin.py``'s in-memory bookkeeping is
-    intentionally non-persistent (see that module's docstring).
+    """One durable sync root plus watcher-local state. ``conservative`` is runtime-only (recomputed
+    from ``root_path`` by :meth:`Watcher.load_roots`), not a column.
     """
 
     id: str
@@ -346,12 +202,8 @@ class WatchedRoot:
 
 
 class _Scheduler(Protocol):
-    """Minimal surface of a ``watchdog`` ``BaseObserver`` this module needs.
-
-    Declared as a ``Protocol`` (rather than importing ``watchdog.observers
-    .api.BaseObserver`` directly for the type) so :class:`Watcher`'s
-    ``observer_factory`` can be swapped for a lightweight test spy without
-    that spy needing to subclass a real ``watchdog`` class.
+    """The slice of a ``watchdog`` ``BaseObserver`` this module uses, as a Protocol so tests can
+    inject a spy without subclassing a watchdog class.
     """
 
     def schedule(
@@ -366,37 +218,18 @@ class _Scheduler(Protocol):
 
 
 class Debouncer:
-    """Coalesces a burst of raw per-path events into one call per quiet window.
+    """Coalesces bursts of raw per-path events into one call per quiet window (trailing-edge
+    debounce).
 
-    Poll-based (not ``threading.Timer``-based) by design: :meth:`notify`
-    only records "this path had an event at time T"; :meth:`poll` is the
-    single place a cycle actually fires, and it fires for every pending
-    path whose *most recent* event is at least ``debounce_seconds`` in
-    the past (i.e. no further events arrived during the window — a
-    classic trailing-edge debounce, not a fixed-delay one-shot). This
-    keeps the whole class free of real threads/timers/sleeps, so a test
-    can call :meth:`notify` and :meth:`poll` with explicit ``at=``
-    timestamps and get fully deterministic results (mirrors
-    ``api/auth.py``'s ``check_rate_limit(..., now=...)`` injectable-clock
-    pattern). :class:`Watcher` drives a real :meth:`poll` loop from a
-    background thread in production (see :meth:`Watcher.start`); tests
-    never need that thread.
+    Poll-based, with no threads or timers: :meth:`notify` records "event at time T"; :meth:`poll`
+    fires every pending path whose latest event is at least ``debounce_seconds`` old, and only then
+    clears the record, so a burst after a fire starts a fresh window and its own later cycle.
+    :class:`Watcher` drives ``poll`` from a background thread; tests call it with explicit ``at=``
+    timestamps.
 
-    Because the record for a path is only cleared once it actually fires
-    in :meth:`poll`, a fresh burst of events arriving *after* a fire is
-    treated as a brand-new window producing its own, later cycle — the
-    debounce resets rather than being a one-shot per path.
-
-    AV-noise tolerance (build-plan T9.1, module docstring section of the
-    same name): if invoking ``on_cycle`` itself raises a transient
-    Windows lock/AV-hold error (:func:`is_transient_lock_error`) — i.e.
-    one that survived ``on_cycle``'s OWN short retry budget (``reconcile
-    .py``'s ``retry_with_backoff`` calls around its OS-level reads/
-    writes) — :meth:`poll` catches it, logs a warning, and RE-QUEUES the
-    path with a fresh debounce window starting now, rather than losing
-    the path or propagating the exception out of the poll loop. A
-    non-transient exception is never swallowed; it propagates exactly as
-    before this task.
+    AV tolerance (T9.1): if ``on_cycle`` raises a transient lock error that outlasted its own
+    retries, :meth:`poll` logs a warning and re-queues the path with a fresh window. Any other
+    exception propagates.
     """
 
     def __init__(
@@ -422,14 +255,8 @@ class Debouncer:
             self._pending[path] = current
 
     def poll(self, *, at: float | None = None) -> list[str]:
-        """Fire ``on_cycle`` for every path whose window has quietly elapsed.
-
-        Returns the list of paths that successfully fired ``on_cycle``
-        this call (empty if none are ready yet), purely as a convenience
-        for assertions in tests — production callers (:class:`Watcher`'s
-        poll loop) can ignore it. A path re-queued after a transient
-        lock/AV-hold error (see class docstring) is NOT included — it
-        did not successfully complete this call.
+        """Fire ``on_cycle`` for every path whose window has elapsed; return the paths that fired
+        successfully (a convenience for tests; a re-queued path is not included).
         """
         current = self._current_time(at)
         with self._lock:
@@ -471,86 +298,38 @@ def _monotonic() -> float:
 
 
 class _WatchdogEventHandler:
-    """Bridges raw ``watchdog`` filesystem events into ``Watcher.notify_event``.
-
-    Kept as a tiny, untyped-against-watchdog-internals adapter (duck-typed
-    ``on_any_event(event)``, the method ``watchdog.events
-    .FileSystemEventHandler`` dispatches every event kind to) rather than
-    subclassing ``FileSystemEventHandler`` directly, so this module's pure
-    logic above never has an import-time dependency on ``watchdog``
-    beyond :meth:`Watcher.start`, matching the "pure logic testable
-    without it" design goal.
+    """Bridges raw ``watchdog`` events into ``Watcher.notify_event``: a duck-typed adapter rather
+    than a ``FileSystemEventHandler`` subclass, so the pure logic above has no import-time watchdog
+    dependency.
     """
 
     def __init__(self, watcher: Watcher) -> None:
         self._watcher = watcher
 
     def dispatch(self, event: Any) -> None:
-        """The REAL entry point a ``watchdog`` observer thread calls (build-plan
-        T9.6 fix): ``watchdog.observers.api``'s dispatch loop calls
-        ``handler.dispatch(event)``, never ``on_any_event`` directly --
-        that name only gets called BY ``FileSystemEventHandler.dispatch``'s
-        own implementation. Since this class was never a
-        ``FileSystemEventHandler`` subclass (see the class docstring's
-        "no import-time dependency on watchdog" rationale), it never had a
-        ``dispatch`` method at all -- a real ``Observer`` crashed with
-        ``AttributeError: '_WatchdogEventHandler' object has no attribute
-        'dispatch'`` on the very first genuine filesystem event, silently
-        undetected because every existing test drove ``on_any_event``
-        directly via a spy observer, never a real ``watchdog`` dispatch
-        loop. Only ``on_any_event`` is implemented here (unlike the real
-        ``FileSystemEventHandler.dispatch``, which also calls a per-type
-        ``on_created``/``on_modified``/... method) since this class routes
-        every event kind through the one method uniformly.
+        """The method a real ``watchdog`` observer thread calls (T9.6 fix): its dispatch loop
+        invokes ``handler.dispatch(event)``, never ``on_any_event``. Without it a real ``Observer``
+        died on the first genuine event, undetected because every test drove ``on_any_event``
+        through a spy. Every event kind goes through ``on_any_event``.
         """
         self.on_any_event(event)
 
     def on_any_event(self, event: Any) -> None:
         """Route a real ``watchdog`` event's path(s) to the debounce pipeline.
 
-        Normalizes through ``str(PurePath(...))`` (build-plan T9.6, found
-        via a real live-daemon manual check, not any automated test):
-        a raw OS-reported event path mixes separators with the registered
-        ``root_path`` in a way ``Path.rglob``-based discovery
-        (``reconcile.discover_untracked_files``, T11.3) never produces for
-        the SAME physical file -- e.g. a root registered as
-        ``"C:/Users/.../vault"`` (forward slashes, exactly as a client's
-        JSON ``POST /v1/sync/roots`` body supplied it) plus a Windows
-        ``ReadDirectoryChangesW``-reported filename joined with a
-        backslash yields ``"C:/Users/.../vault\\note.md"`` -- a different
-        string than discovery's all-native-separator
-        ``"C:\\Users\\...\\vault\\note.md"`` for the identical file.
-        ``sync_files.path`` is keyed on this literal string, so the
-        mismatch silently double-tracked (and double-reconciled) the same
-        file under two rows the first time this was live-tested. ``str(
-        PurePath(p))`` renders both forms identically (native separators,
-        matching what ``discover_untracked_files`` already produces),
-        closing the mismatch at the one place both path sources converge.
+        Paths are normalized through ``str(PurePath(...))`` (T9.6, found live): a root registered
+        as ``"C:/Users/x/vault"`` plus a ``ReadDirectoryChangesW`` name joined with a backslash
+        gave ``"C:/Users/x/vault\\note.md"``, a different string than discovery's all-native form
+        for the same file. ``sync_files.path`` is keyed on that string, so the file was
+        double-tracked.
         """
         if getattr(event, "is_directory", False):
             return
-        # debug-plan D10: a plain file *read* (no content change) still
-        # raises a watchdog event on this platform's inotify backend --
-        # ``event_type`` "opened"/"closed"/"closed_no_write", never
-        # "created"/"modified"/"moved"/"deleted". Forwarding those to
-        # ``notify_event`` was not just pointless extra debounce/reconcile
-        # work (the AV-noise class T9.1 already tolerates) -- it was a
-        # genuine self-sustaining feedback loop: ``notify_event``'s own
-        # echo-suppression reads the file via ``content_hash_fn`` (a plain
-        # ``Path.read_text``) to compute its hash, that read raises its own
-        # open+close-no-write event under the SAME recursively-scheduled
-        # observer, which re-enters ``on_any_event`` -> ``notify_event`` ->
-        # another read -> another event, forever. Confirmed live: a real
-        # edit under this loop never reconciled at all, because every fresh
-        # "opened" event kept re-arming the debounce window before it could
-        # elapse (`tests/integration/test_watcher_wiring.py::
-        # test_live_edit_is_reconciled_with_no_manual_rescan`, previously
-        # timing out after 5s with zero files reconciled). Only these three
-        # non-content event types are excluded here -- every event type this
-        # module already handles (created/modified/moved/deleted) is
-        # unaffected, and a genuine external editor write still raises a
-        # "modified"/"created" event on top of the harmless open/close pair
-        # it also raises, so this never suppresses a real edit.
+        # D10: a plain file read still raises "opened"/"closed"/"closed_no_write" on this inotify
+        # backend. Forwarding them was a self-sustaining loop: echo suppression reads the file to
+        # hash it, that read raises its own open/close events, which re-enter ``notify_event``,
+        # forever; every event re-armed the debounce, so a real edit never reconciled. Only these
+        # three are dropped; a genuine write still raises "modified"/"created" alongside them.
         if getattr(event, "event_type", None) in _NON_CONTENT_EVENT_TYPES:
             return
         src_path = str(PurePath(str(event.src_path)))
@@ -579,64 +358,18 @@ def _default_observer_factory() -> _Scheduler:
 
 @dataclass
 class Watcher:
-    """Loads durable sync roots, watches them, and debounces raw FS events.
+    """Loads durable sync roots, watches them, and debounces raw filesystem events.
 
-    Constructor / public API (T5.4 wiring contract)
-    ---------------------------------------------------
-    ``Watcher(conn, on_cycle, *, debounce_seconds=0.5, now=None,
-    origin_tracker=None, content_hash_fn=None,
-    observer_factory=<real watchdog Observer>, logger=None)``
+    ``Watcher(conn, on_cycle, *, debounce_seconds=0.5, now=None, origin_tracker=None,
+    content_hash_fn=None, observer_factory=<watchdog Observer>, logger=None)``. ``conn`` is only
+    read (``store.list_sync_roots``). ``on_cycle(path)`` is the reconcile seam. ``origin_tracker``
+    and ``content_hash_fn`` enable echo suppression only when both are given. ``logger`` defaults
+    to ``akasha``.
 
-    - ``conn``: an open ``sqlite3.Connection`` (read-only use here — only
-      ``kernel.store.list_sync_roots`` is called; no writes, per rule
-      0.4).
-    - ``on_cycle: Callable[[str], None]`` — **the T5.4 reconcile-routing
-      seam.** Called with exactly one file path once that path's 500 ms
-      debounce window has elapsed with no further activity. T5.4 passes
-      its real ``reconcile.on_change`` (or an equivalent adapter);
-      nothing in this module imports ``sync.reconcile``.
-    - ``debounce_seconds`` / ``now``: forwarded to the internal
-      :class:`Debouncer` — see its docstring for the injectable-clock
-      testing contract. ``logger`` is also forwarded to it (build-plan
-      T9.1's AV-noise re-queue warning).
-    - ``origin_tracker`` (T5.2 ``OriginTracker``) + ``content_hash_fn``:
-      optional echo suppression — see module docstring. Both must be
-      supplied together to take effect; either omitted disables
-      suppression (every raw event is debounced and forwarded).
-    - ``observer_factory``: zero-arg callable returning a ``watchdog``
-      ``BaseObserver``-shaped object (``schedule``/``start``/``stop``/
-      ``join``); defaults to a real ``watchdog.observers.Observer``.
-      Overridable so tests can inject a spy instead of a real OS watcher
-      thread.
-    - ``logger``: defaults to ``logging.getLogger("akasha")`` — the same
-      logger ``daemon.py::configure_logging`` sets handlers on, so the
-      E19 cloud-path warning lands wherever the daemon's other logs do.
-
-    Public methods
-    ----------------
-    - ``load_roots() -> list[WatchedRoot]`` — (re)reads
-      ``store.list_sync_roots``, runs :func:`detect_cloud_path` against
-      each ``root_path`` (logging + flagging ``conservative`` on a
-      match), and returns the resulting :class:`WatchedRoot` list. Safe
-      to call without ever starting a real observer (pure DB read + pure
-      predicate) — this is what T5.3's tests exercise for E19.
-    - ``roots -> dict[str, WatchedRoot]`` (property) — the most recently
-      loaded roots, keyed by sync-root id.
-    - ``start() -> None`` — calls ``load_roots()`` if not already loaded,
-      creates an observer via ``observer_factory``, schedules a watch
-      (``recursive=True``) on every root's ``root_path``, and starts it.
-    - ``stop() -> None`` — stops and joins the observer, if one is
-      running.
-    - ``notify_event(path, *, at=None) -> None`` — feed one raw
-      filesystem-change path into the pipeline (applies echo suppression
-      if wired, then forwards to the internal ``Debouncer``). Called by
-      the internal ``watchdog`` handler in production; tests call it
-      directly to simulate raw FS events without a real observer thread.
-    - ``poll(*, at=None) -> list[str]`` — drives the debounce window
-      check; returns the list of paths whose ``on_cycle`` fired this
-      call. Production runs this from a background thread started
-      alongside the observer; tests call it directly with explicit
-      ``at=`` timestamps for deterministic E18 assertions.
+    ``load_roots()`` re-reads the roots and flags cloud paths (no observer needed; E19 tests use
+    it); ``roots`` maps sync-root id to :class:`WatchedRoot`; ``start()`` / ``stop()`` run the
+    observer and the poll thread; ``notify_event(path, at=)`` feeds one raw event (tests simulate
+    FS events with it); ``poll(at=)`` fires elapsed windows.
     """
 
     conn: sqlite3.Connection
@@ -647,16 +380,9 @@ class Watcher:
     content_hash_fn: Callable[[str], str] | None = None
     observer_factory: Callable[[], _Scheduler] = field(default=_default_observer_factory)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("akasha"))
-    # build-plan T9.6: this class's own docstring (see Debouncer's, "Watcher
-    # drives a real poll loop from a background thread in production (see
-    # Watcher.start)") always claimed start() owns this, but until T9.6 the
-    # code never actually did -- poll() existed and was fully tested, but
-    # nothing production called it on a timer, so no debounced event ever
-    # fired in a real running daemon. Fixed by actually spawning the thread
-    # this docstring already promised. Default chosen so a real event fires
-    # within roughly one debounce window of going quiet (5x/window), not
-    # exposed as a Watcher(...) kwarg beyond this since no caller has needed
-    # to tune it yet -- lower this if a future test needs tighter latency.
+    # T9.6: ``start()`` owns the poll thread that fires debounced events (before, nothing called
+    # ``poll()`` on a timer, so no event ever fired in a real daemon). The interval is 5x the
+    # window's worth of latency at most; not a kwarg since no caller has needed to tune it.
     poll_interval_seconds: float = 0.1
 
     def __post_init__(self) -> None:
@@ -713,30 +439,16 @@ class Watcher:
         return list(self._roots.values())
 
     def watch_new_roots(self, rows: Sequence[Mapping[str, Any]] | None = None) -> None:
-        """Pick up any sync root registered AFTER :meth:`start` already ran
-        (build-plan T9.6): :meth:`load_roots` used to run exactly once,
-        inside ``start()`` -- a root registered via ``POST /v1/sync/roots``
-        after the daemon is already serving (the realistic common case:
-        registering a vault is normally the very next thing a human does
-        once the daemon is up, not something that happens before it starts)
-        would otherwise never be watched for the rest of the process's
-        life, no matter how long it kept running. Called from the same
-        poll loop that already drives debounce -- ``list_sync_roots`` is a
-        small, cheap query (a handful of rows, no vault content), so a
-        separate timer/cadence is not worth the added complexity. A no-op
-        (zero new roots) is the overwhelmingly common case per tick.
+        """Watch any sync root registered AFTER :meth:`start` (T9.6; ``load_roots`` used to run
+        once).
 
-        Also called synchronously by ``POST /v1/sync/roots`` before it
-        responds (debug-plan D11): the poll loop alone left a window of up to
-        one tick in which a file written right after registration was neither
-        in the caller's follow-up rescan nor seen by any filesystem event, and
-        was lost until the daemon restarted. Watching first and scanning second
-        closes it -- anything written earlier is found by the scan, anything
-        later raises an event.
-
-        ``rows`` are the registered roots as the CALLER read them: the request thread passes
-        rows read on its own per-request connection, so it never touches ``self.conn``, which
-        the poll thread's reconcile cycles are using. Omitted (the poll loop), they are read here.
+        Called every poll tick (one cheap query; zero new roots is the common case) and
+        synchronously by ``POST /v1/sync/roots`` before it responds (D11): the tick alone left a
+        window in which a file written right after registration was neither in the caller's rescan
+        nor seen by an event, and was lost until restart. Watch first, scan second: anything
+        earlier is found by the scan, anything later raises an event. ``rows`` are the roots as the
+        CALLER read them: the request thread passes rows from its own connection so it never
+        touches ``self.conn``, which the poll thread's cycles use.
         """
         if self._observer is None or self._handler is None:
             return
@@ -755,13 +467,8 @@ class Watcher:
                     raise
 
     def start(self) -> None:
-        """Start watching every loaded (or freshly-loaded) sync root's ``root_path``.
-
-        Also starts the background poll thread that actually fires
-        ``on_cycle`` once a path's debounce window elapses (build-plan
-        T9.6) -- without it, raw events would accumulate in the debouncer
-        forever and nothing would ever reconcile. No-op if already started
-        (idempotent, matching ``GcScheduler.start``'s convention).
+        """Start watching every sync root's ``root_path`` and the poll thread that fires
+        ``on_cycle`` (T9.6); idempotent.
         """
         if self._poll_thread is not None:
             return
@@ -782,12 +489,9 @@ class Watcher:
         self._poll_thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
-        """Stop the poll thread first (no more new cycles fire), then the observer.
-
-        Any path still inside an unexpired debounce window at shutdown
-        simply does not fire this run -- the daemon's own startup
-        ``reconcile_all`` (T5.6) picks it up on next launch regardless,
-        same as any other missed-while-down edit.
+        """Stop the poll thread first (no new cycles), then the observer. A path inside an
+        unexpired window does not fire; the next startup ``reconcile_all`` picks it up like any
+        edit made while down.
         """
         self._poll_stop_event.set()
         if self._poll_thread is not None:
@@ -834,12 +538,9 @@ class Watcher:
         return root is None or not path_is_ignored(path, root.root_path, root.ignore_patterns)
 
     def on_tmignore_event(self, path: str) -> None:
-        """A root's `.tmignore` changed: reload its patterns, then rescan that root.
-
-        The rescan is expressed through the existing seam: every non-ignored
-        Markdown file under the root is fed to the debouncer, so a file the edit
-        just un-ignored is adopted and one it ignored is left alone. Reconcile
-        is idempotent, so a redundant cycle is a zero-diff no-op.
+        """A root's ``.tmignore`` changed: reload its patterns and rescan the root through the
+        debouncer, so a file just un-ignored is adopted and one just ignored is left alone
+        (reconcile is idempotent).
         """
         for root in list(self._roots.values()):
             if PurePath(path) != PurePath(root.root_path) / TMIGNORE_NAME:
@@ -851,27 +552,12 @@ class Watcher:
     def notify_event(self, path: str, *, at: float | None = None) -> None:
         """Feed one raw filesystem-change ``path`` into the debounce pipeline.
 
-        Applies echo suppression first (step: drop events matching a
-        recent daemon write) when both ``origin_tracker`` and
-        ``content_hash_fn`` are configured; otherwise every event is
-        forwarded straight to the debouncer.
-
-        This runs on ``watchdog``'s OWN internal dispatch thread (build-plan
-        T9.6), not this class's poll thread -- there is no backstop above
-        it the way ``_poll_loop`` backstops ``poll()``, so an uncaught
-        exception here would kill the real ``Observer``'s dispatch loop
-        outright (silently, from the daemon's perspective: the watcher
-        object still exists, it just never reacts to another filesystem
-        event again). ``content_hash_fn`` reads the file to hash it, and a
-        real filesystem races this constantly even outside the known
-        write-back-temp-file case this module already filters (an external
-        editor's own atomic-save temp file, a file deleted between the
-        event firing and this call, ...): if the read fails, we cannot
-        prove this was an echo, so the safe default is to NOT suppress it
-        -- forward to the debouncer like any other real event (worst case:
-        one extra idempotent, zero-diff reconcile cycle later; on_change's
-        own retry_with_backoff/T9.1 tolerance handles a still-transient
-        condition by the time it actually fires).
+        With echo suppression wired, an event matching a recent daemon write is dropped. This runs
+        on watchdog's own dispatch thread with no backstop, so an uncaught exception would silently
+        kill the observer for good. ``content_hash_fn`` reads the file and can race the filesystem
+        (an editor's atomic-save temp file, a file deleted after the event); if the read fails we
+        cannot prove an echo, so the event is forwarded (worst case: one idempotent zero-diff
+        cycle).
         """
         if self.origin_tracker is not None and self.content_hash_fn is not None:
             try:

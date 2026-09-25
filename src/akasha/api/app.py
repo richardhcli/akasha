@@ -1,21 +1,10 @@
-"""FastAPI application factory + unauthenticated ``/health`` (task T4.3).
+"""FastAPI application factory and the unauthenticated ``/health`` (spec §4.11, §3).
 
-Spec §4.11 (``GET /health``: liveness, version, contract version, *no auth*),
-§3 (the daemon binds ``127.0.0.1`` only), §8 (``schemas.py`` is the
-re-exportable schema surface — see ``api/schemas.py``).
-
-``create_app`` is a *factory* (not a module-level singleton) so tests can
-build an app per-case and T4.9's daemon lifecycle can construct it with a
-loaded ``Config``. The factory does not itself open a socket; binding to
-``config.bind`` (default ``127.0.0.1``) happens when T4.9 hands this app to
-uvicorn. The intended bind address is stored on ``app.state.config`` so the
-serving layer (and this task's test) reads a single source of truth rather
-than re-deriving the localhost invariant.
-
-Rebrand invariant (build-plan rule 0.6): the product name must never appear
-in an on-disk format, and the served OpenAPI JSON is snapshotted to
-``docs/api-snapshot/openapi.json`` (T4.7), so the app ``title`` uses the
-neutral ``tm-daemon`` prefix, never the product name.
+``create_app`` is a factory, not a singleton, so each test builds its own app and the daemon builds
+one from a loaded ``Config``. It opens no socket: the bind address (default ``127.0.0.1``, §3) is
+kept on ``app.state.config`` for the serving layer. The app ``title`` uses the neutral
+``tm-daemon`` prefix, never the product name, because the OpenAPI JSON is snapshotted to
+``docs/api-snapshot/openapi.json`` (rule 0.6).
 """
 
 from __future__ import annotations
@@ -42,26 +31,17 @@ _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 _STATIC_DIR = _UI_DIR / "static"
 _TEMPLATES_DIR = _UI_DIR / "templates"
 
-# CORS allow-list (debug-plan D4, spec-questions.md D4): spec §4.11/§3 say
-# nothing about CORS -- narrowest reading is to allow exactly the Obsidian
-# desktop app's fixed Electron origin (empirically observed:
-# `app://obsidian.md`, plugin-obsidian/'s only browser-embedded client),
-# never a wildcard. This daemon carries bearer tokens; wildcard-plus-any-origin
-# would weaken the localhost-only posture spec §3 establishes for no
-# documented reason. The web UI itself (ui/templates + ui/static/app.js) never
-# needs this list -- it's always same-origin against the daemon that serves
-# it, so it was never blocked by CORS in the first place.
+# CORS allow-list (D4): the spec is silent, so allow exactly the Obsidian desktop app's Electron
+# origin (``app://obsidian.md``, the plugin's only browser-embedded client), never a wildcard: this
+# daemon carries bearer tokens and §3 establishes a localhost-only posture. The web UI is
+# same-origin, so it never needs the list.
 _CORS_ALLOWED_ORIGINS = ["app://obsidian.md"]
 
 
 def app_version() -> str:
-    """Installed package version (``pyproject`` ``version``), or a marker.
-
-    Read from installed distribution metadata rather than hard-coded so the
-    reported version can never silently drift from ``pyproject.toml``. The
-    ``PackageNotFoundError`` fallback only fires if ``akasha`` isn't installed
-    as a distribution (not the case under ``uv``/CI), so it's excluded from
-    coverage.
+    """Installed package version, read from distribution metadata so it cannot drift from
+    ``pyproject.toml``. The ``PackageNotFoundError`` fallback only fires if ``akasha`` is not
+    installed as a distribution.
     """
     try:
         return _pkg_version("akasha")
@@ -70,18 +50,12 @@ def app_version() -> str:
 
 
 def create_app(config: Config | None = None, conn: sqlite3.Connection | None = None) -> FastAPI:
-    """Build the daemon's FastAPI app, wiring ``/health`` and the ``/v1`` routes.
+    """Build the daemon's FastAPI app: ``/health`` plus the ``/v1`` routes.
 
-    ``config`` defaults to ``load_config()`` (per-OS default location); the
-    resolved ``Config`` is stashed on ``app.state.config`` so the serving
-    layer binds ``config.bind`` (``127.0.0.1`` by default, spec §3).
-
-    ``conn`` is the single shared WAL connection the routes use
-    (``app.state.conn``). Tests inject a migrated tmp-file connection; when
-    omitted, the factory opens ``config.db_path`` (default
-    ``tm-daemon/store.db``) with ``check_same_thread=False`` and runs
-    migrations. All SQLite writes still route through ``kernel/store.py``
-    (rule 0.4).
+    ``config`` defaults to ``load_config()`` and is stored on ``app.state.config``. ``conn`` is the
+    shared WAL connection (``app.state.conn``): tests inject a migrated one, otherwise the factory
+    opens ``config.db_path`` with ``check_same_thread=False`` and migrates. Writes still go through
+    ``kernel/store.py`` (rule 0.4).
     """
     cfg = config if config is not None else load_config()
 

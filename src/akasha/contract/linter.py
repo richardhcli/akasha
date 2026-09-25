@@ -1,28 +1,22 @@
-"""Contract linter: violation codes + certain-repair (build-plan T3.5, spec §4.7).
+"""Contract linter: violation detection and structured repairs (spec §4.7). Pure: no DB or file
+I/O.
 
-Pure functions only — no DB or filesystem I/O. Callers pass already-parsed
-:class:`~akasha.contract.parser.BlockSet` values, raw vault text, and a
-maturity lookup (callable or mapping). Repairs are structured, undoable
-records; this module never mutates files.
+Callers pass parsed :class:`~akasha.contract.parser.BlockSet` values, the raw text and a maturity
+lookup. Nothing is ever paused (M20-G): each finding is repaired on the spot, or the line gets a
+new node; only a deleted S1+ node needs a human. PRD F13 forbids re-attaching a damaged line to its
+old node by similarity, so "change the ID" is the fallback wherever identity is ambiguous.
 
-Violation codes (spec §4.7, resolution per M20-G: a file is never paused; every finding
-is resolved on the spot -- repaired, or the line gets a new node -- and only a deleted
-S1+ node needs a human):
+* ``E_ID_CHECKSUM``: an EOL anchor failing ``ids.is_valid``. A line byte-identical to a base block
+  gets that block's id back; otherwise its anchor becomes ``^tm-new``.
+* ``E_DUP_ID``: an anchor twice in one file. The copy byte-identical to base (else the first) keeps
+  the id; the others become ``^tm-new``.
+* ``E_LOST_ANCHOR``: a base block's text found (fuzzy >= 0.9) without its anchor. Byte-identical
+  except the anchor: re-insert it. Otherwise the line becomes a new node and the old one follows the
+  delete rules.
+* ``E_DELETED_S1``: a base block gone (or replaced by a new node) at maturity S1+: the only review.
 
-* ``E_ID_CHECKSUM`` — EOL anchor whose id fails ``kernel.ids.validate`` → the line's
-  anchor is replaced by ``^tm-new`` (a new node)
-* ``E_DUP_ID`` — same anchor id appears 2+ times in one file / BlockSet → the copy
-  byte-identical to base (else the first copy) keeps the id; every other copy is
-  replaced by ``^tm-new``
-* ``E_LOST_ANCHOR`` — base block text found in vault (fuzzy ≥ 0.9) without an anchor →
-  byte-identical except the anchor: re-insert it; otherwise the line becomes a new node
-  (``^tm-new`` appended) and the old node follows the ordinary delete rules
-* ``E_DELETED_S1`` — base block gone from vault (or replaced by a new node) and maturity
-  is S1+ → the only review item; nothing is deleted
-
-Every repair is structured and undoable (``before``/``after`` per line); this module never
-mutates files. PRD F13 forbids re-attaching a damaged line to its old node by similarity,
-so "changing the ID" -- a new node -- is the fallback wherever identity is ambiguous.
+Spans get the analogous repairs (a duplicate id, an exactly-intact span whose ``{tm-id}`` was
+deleted). Repairs are line-level ``before``/``after`` records, so they are undoable.
 """
 
 from __future__ import annotations
@@ -224,17 +218,15 @@ def _detect_dup_id(
     vault_lines: Sequence[tuple[int, str]],
     base: BlockSet,
 ) -> tuple[list[Violation], list[Repair]]:
-    """Same EOL anchor id twice+ in one file → one copy keeps the id, the rest are new nodes.
+    """Same EOL anchor id twice or more in one file: one copy keeps the id, the rest become new
+    nodes.
 
-    The keeper is the first copy byte-identical to base, else (no base block, or no copy
-    identical to it) simply the first copy in document order: deterministic, never a
-    similarity guess (PRD F13). Every other copy is proposed for ``^tm-new``.
+    The keeper is the first copy byte-identical to base, else simply the first in document order:
+    deterministic, never a similarity guess (PRD F13). Others are proposed for ``^tm-new``.
 
-    # SPEC-QUESTION (narrowest reading, see docs/spec-questions.md):
-    # §4.7 says E_DUP_ID is "same anchor twice in vault (copy without cut)"
-    # without stating whether the scope is one file or the whole vault.
-    # Narrowest reading: one BlockSet / one file (the unit this linter
-    # receives). The same anchor in different files is a mirror (M19).
+    # SPEC-QUESTION: §4.7 says E_DUP_ID is "same anchor twice in vault (copy without cut)"
+    # without the scope. Narrowest reading: one file (the unit this linter sees). The same anchor
+    # in different files is a mirror (M19).
     """
     by_id: dict[str, list[tuple[int, str]]] = {}
     for line_no, line in vault_lines:
@@ -492,27 +484,13 @@ def lint(
     file_text: str,
     maturity: MaturityLookup | None = None,
 ) -> LintResult:
-    """Detect §4.7 contract violations and emit certain-repair / review records.
+    """Detect §4.7 violations and emit repairs and review records.
 
-    Parameters
-    ----------
-    base:
-        Last-agreed :class:`BlockSet` (may be empty).
-    current:
-        Current :class:`BlockSet` from ``parse(file_text)``.
-    file_text:
-        Raw file text (needed because ``BlockSet.blocks`` collapses
-        duplicate ids and drops unanchored lines).
-    maturity:
-        Callable ``id -> Maturity | None`` or ``Mapping[str, Maturity]`` used
-        for ``E_DELETED_S1``. Defaults to "all unknown" (no ``E_DELETED_S1``).
-
-    Returns
-    -------
-    LintResult
-        ``violations`` lists every finding; ``repairs`` holds every resolution (re-insert an
-        anchor, or give the line a new node via ``^tm-new``; M20-G); ``review_items`` holds
-        only ``E_DELETED_S1``.
+    ``base`` is the last-agreed :class:`BlockSet`, ``current`` the parse of ``file_text`` (needed
+    because ``blocks`` collapses duplicate ids and drops unanchored lines). ``maturity`` is a
+    callable or mapping ``id -> Maturity | None`` for ``E_DELETED_S1`` (default: all unknown).
+    Returns a :class:`LintResult`: ``violations`` lists every finding, ``repairs`` every resolution
+    (re-insert an anchor, or a new node via ``^tm-new``), ``review_items`` only ``E_DELETED_S1``.
     """
     if maturity is None:
         maturity = {}
