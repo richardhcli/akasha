@@ -590,6 +590,11 @@ def _body_line(body: str) -> str:
     return body.rstrip("\n")
 
 
+def _queue_violation(conn: sqlite3.Connection, node_id: str | None, **fields: Any) -> None:
+    """Queue one ``violation`` review whose ``cause_ref`` is the canonical JSON of ``fields``."""
+    store.enqueue_review(conn, node_id, "violation", cause_ref=canonical_json(fields).decode())
+
+
 def hub_state_for(
     conn: sqlite3.Connection,
     structure: BlockSet,
@@ -621,21 +626,16 @@ def hub_state_for(
         text = _body_line(body)
         if "\n" in text and block.kind != "span":
             if not read_only:
-                store.enqueue_review(
+                _queue_violation(
                     conn,
                     node_id,
-                    "violation",
-                    cause_ref=canonical_json(
-                        {
-                            "code": "E_UNPROJECTABLE_BODY",
-                            "path": path,
-                            "id": node_id,
-                            "message": (
-                                "hub body contains a newline; the line-oriented contract "
-                                "grammar cannot project it -- base text kept for this block"
-                            ),
-                        }
-                    ).decode(),
+                    code="E_UNPROJECTABLE_BODY",
+                    path=path,
+                    id=node_id,
+                    message=(
+                        "hub body contains a newline; the line-oriented contract grammar cannot "
+                        "project it -- base text kept for this block"
+                    ),
                 )
             new_blocks[node_id] = block
         elif block.text == text and (block.kind != "task" or block.task_state == task_state):
@@ -1228,20 +1228,15 @@ class Reconciler:
         # repairs silently; they are routed to review, ops are recomputed against the RAW vault
         # blocks, and ``record_auto_repair`` must not fire.
         for repair in outcome.lint.repairs:
-            store.enqueue_review(
+            _queue_violation(
                 self.conn,
                 repair.id,
-                "violation",
-                cause_ref=canonical_json(
-                    {
-                        "path": path,
-                        "code": repair.code,
-                        "action": repair.action,
-                        "line_no": repair.line_no,
-                        "before": repair.before,
-                        "after": repair.after,
-                    }
-                ).decode(),
+                path=path,
+                code=repair.code,
+                action=repair.action,
+                line_no=repair.line_no,
+                before=repair.before,
+                after=repair.after,
             )
         assert self.projection is not None
         ops, extra_review = _compute_ops(
@@ -1259,33 +1254,14 @@ class Reconciler:
         self, path: str, outcome: DiffOutcome, extra_review: list[ReconcileReviewItem]
     ) -> None:
         """Queue every lint review item and every reconcile-level finding for a human."""
-        for item in outcome.lint.review_items:
-            store.enqueue_review(
+        for item in (*outcome.lint.review_items, *extra_review):
+            _queue_violation(
                 self.conn,
                 item.id,
-                "violation",
-                cause_ref=canonical_json(
-                    {
-                        "path": path,
-                        "code": item.code,
-                        "line_nos": item.line_nos,
-                        "message": item.message,
-                    }
-                ).decode(),
-            )
-        for extra in extra_review:
-            store.enqueue_review(
-                self.conn,
-                extra.id,
-                "violation",
-                cause_ref=canonical_json(
-                    {
-                        "path": path,
-                        "code": extra.code,
-                        "line_nos": extra.line_nos,
-                        "message": extra.message,
-                    }
-                ).decode(),
+                path=path,
+                code=item.code,
+                line_nos=item.line_nos,
+                message=item.message,
             )
 
     def _apply_ops(

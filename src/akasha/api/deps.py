@@ -1,24 +1,14 @@
-"""Shared FastAPI dependencies + the standard error envelope (task T4.4).
+"""Shared FastAPI dependencies and the standard error envelope.
 
-Approved app plumbing (see task-status T4.4 note): ``get_conn`` hands each
-request a WAL ``sqlite3`` connection. In production it opens a FRESH connection
-per request (spec §3 / SPEC-QUESTION T8.5b / vision F14 — a single connection
-shared across the ASGI threadpool corrupts reads under concurrency); test/
-embedded callers that inject one via ``create_app(conn=...)`` keep the shared
-``app.state.conn`` (``db_path is None`` branch) and drive the app sequentially.
-``require_auth``
-wraps ``auth.authenticate`` (T4.1) and records the audit row for every
-mutating request (T4.2); ``require_human`` enforces the human-only (∅)
-endpoints (spec §4.11). Every failure is rendered through the spec §4.11
-envelope ``{"error": {"code", "message", "detail"}}`` by
-``register_error_handlers`` — this module is a leaf (imports only auth/store),
-so ``app.py`` and ``routes/*`` can both depend on it without a cycle.
-
-``mutation_gate`` (task T4.6) is the shared cross-cutting dependency that
-rewrites agent-class mutations on non-∅ endpoints into ``review_queue``
-proposals instead of letting them mutate (spec §4.11: "agent-class tokens:
-mutating endpoints are rewritten into proposals... unless the endpoint is
-marked ∅"); ∅ endpoints never call it — they use ``require_human`` instead.
+``get_conn`` gives each request a WAL connection: a FRESH one per request in production (spec §3,
+SPEC-QUESTION T8.5b, vision F14: one connection shared across the ASGI threadpool corrupts reads),
+while callers that inject one via ``create_app(conn=...)`` keep the shared ``app.state.conn``.
+``require_auth`` wraps ``auth.authenticate`` and audits every mutating request (T4.2);
+``require_human`` enforces the human-only (∅) endpoints (§4.11). Every failure is rendered through
+the §4.11 envelope ``{"error": {"code", "message", "detail"}}`` by ``register_error_handlers``.
+``mutation_gate`` (T4.6) rewrites agent-class mutations on non-∅ endpoints into ``review_queue``
+proposals; ∅ endpoints use ``require_human`` instead. A leaf module (imports only auth/store), so
+``app.py`` and ``routes/*`` can both depend on it.
 """
 
 from __future__ import annotations
@@ -91,14 +81,10 @@ def register_error_handlers(app: FastAPI) -> None:
 
 
 def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
-    """Yield the DB connection for one request (WAL; see app.py / SPEC-QUESTION T8.5b).
-
-    Production (``app.state.db_path`` set): open a FRESH connection per request
-    and close it when the request ends. WAL permits concurrent readers + one
-    writer, so the Web UI's parallel ``fetch()``es are served safely — a single
-    ``sqlite3.Connection`` shared across the ASGI threadpool corrupts reads under
-    concurrent access. Test/embedded injection (``db_path is None``): yield the
-    shared, migrated connection (those callers drive the app sequentially).
+    """Yield the DB connection for one request. Production (``app.state.db_path`` set): a fresh WAL
+    connection, closed when the request ends (concurrent readers plus one writer are safe; a shared
+    connection is not). Injected (``db_path is None``): the shared migrated connection, driven
+    sequentially.
     """
     db_path = getattr(request.app.state, "db_path", None)
     if db_path is None:
@@ -114,13 +100,9 @@ def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
 def require_auth(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> auth.AuthContext:
-    """Authenticate the Bearer token; audit the request if it mutates.
-
-    Maps every ``auth.AuthError`` to the standard envelope: rate-limit →
-    429, everything else (malformed / unknown / bad secret / revoked) → 401.
-    On success, records exactly one ``audit_log`` row for a mutating HTTP
-    method (T4.2 ``record_mutation`` no-ops for reads), then returns the
-    ``AuthContext`` so routes can branch on ``token_class`` (human vs agent).
+    """Authenticate the Bearer token and audit the request if it mutates. Every ``auth.AuthError``
+    maps to the standard envelope: rate limit -> 429, anything else -> 401. Returns the
+    ``AuthContext`` so routes can branch on ``token_class``.
     """
     header = request.headers.get("authorization")
     parts = header.split(None, 1) if header else []
@@ -153,33 +135,19 @@ def mutation_gate(
     node_id: str | None,
     payload: Any = None,
 ) -> dict[str, Any] | None:
-    """Agent-token proposal rewrite for non-∅ mutating endpoints (task T4.6, spec §4.11).
+    """Agent-token proposal rewrite for non-∅ mutating endpoints (T4.6, spec §4.11).
 
-    Call this from every non-∅ mutating route (``POST/PATCH/DELETE /nodes``,
-    ``POST/DELETE /edges``) BEFORE performing the real ``kernel/store.py``
-    mutation:
+    Call it from every non-∅ mutating route BEFORE the real store mutation. A human token returns
+    ``None`` and the caller mutates as usual. An agent token does NOT mutate: it enqueues one
+    ``review_queue`` row (``cause_kind="proposal"``, via ``store.enqueue_review``) recording the
+    would-be request (method, path, JSON body) as canonical JSON, and returns that row for the
+    route to render as its response.
 
-    * **Human tokens** — returns ``None``; the caller proceeds to mutate as
-      normal (unchanged behavior).
-    * **Agent tokens** — does NOT mutate. Instead enqueues exactly one
-      ``review_queue`` row with ``cause_kind="proposal"`` via
-      ``kernel/store.py``'s ``enqueue_review`` (rule 0.4 — the raw INSERT
-      lives in ``store.py``, never here), recording the would-be request
-      (HTTP method, path, JSON body) as canonical JSON (spec §4.3
-      ``canonical_json``; never pickle/eval) in ``cause_ref``. Returns that
-      review row so the caller renders it as the response instead of the
-      normal mutation response (routes use this to short-circuit before
-      calling the mutating ``store`` function).
-
-    ``node_id`` becomes the review item's affected node for a route targeting
-    an existing node/edge (edge proposals use ``dst``). For ``POST /nodes``,
-    pass ``None``: an unapproved proposal does not reserve a node identity;
-    the review row id correlates it until T7.5 mints the real node on approval.
-
-    Never call this from a ∅ (human-only) endpoint — those depend on
-    ``require_human`` instead, which rejects agent tokens outright (403
-    ``E_HUMAN_ONLY``) rather than proposalizing them (spec §4.11 intro:
-    "...unless the endpoint is marked ∅").
+    ``node_id`` is the affected node for a route on an existing node or edge (edge proposals use
+    ``dst``). For ``POST /nodes`` pass ``None``: an unapproved proposal reserves no identity, and
+    the review id correlates it until T7.5 mints the node on approval. Never call it from a ∅
+    endpoint: those use ``require_human``, which rejects agent tokens outright (403
+    ``E_HUMAN_ONLY``).
     """
     if ctx.token_class != "agent":
         return None

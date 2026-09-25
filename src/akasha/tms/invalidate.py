@@ -1,31 +1,18 @@
 """Interface-break invalidation walk (spec §4.9).
 
-Trigger: any commit with ``change_class == "major"``. This module only
-implements the walk itself -- classifying a commit as major (or minor) is
-the caller's job (T7.2, ``kernel/commits.py::default_change_class`` +
-``kernel/store.py::commit_node``'s wiring); ``invalidate`` just honors
-whatever ``touched`` set of facet ids it is handed. Node retraction
-("major touching all facets") is likewise a caller concern: the caller
-passes ``touched`` equal to the full set of the retracted node's facet
-ids (see ``test_all_facets_touched_flags_every_bound_subscriber`` below).
+Trigger: any commit with ``change_class == "major"``. This module is only the walk: classifying a
+commit (``kernel/commits.py::default_change_class``) and wiring (``store.commit_node``) are the
+caller's, and ``invalidate`` honors whatever ``touched`` facet-id set it is handed. Node retraction
+("major touching all facets") is likewise the caller passing the node's full facet set.
 
-Transaction discipline (task T7.2): ``invalidate()`` opens no ``with
-conn:`` block of its own and enqueues reviews via
-``store.enqueue_review_within_transaction`` (the transaction-less body of
-``store.enqueue_review``), NOT the public, self-committing
-``store.enqueue_review``. This is deliberate: ``store.commit_node`` calls
-``invalidate()`` from INSIDE its own ``with conn:`` block so the
-facet_break reviews it enqueues are atomic with the triggering commit;
-sqlite3's ``with conn:`` commits on every block exit (not just the
-outermost one), so a nested transactional call would silently commit the
-caller's still-pending writes early. Callers that invoke ``invalidate()``
-on its own (e.g. this module's unit tests) are responsible for wrapping
-it in their own ``with conn:`` if they need the enqueued reviews to be
-durably committed -- mirrors the same invariant ``kernel/store.py``
-already documents for its own transaction-less helpers (``_insert_commit``,
-``_recompute_maturity``, ``enqueue_review_within_transaction``).
+Transaction discipline: ``invalidate()`` opens no ``with conn:`` and enqueues through
+``store.enqueue_review_within_transaction``, not the self-committing ``enqueue_review``.
+``commit_node`` calls it INSIDE its own transaction so the ``facet_break`` reviews are atomic with
+the commit, and sqlite3's ``with conn:`` commits on every block exit, so a nested transactional
+call would commit the caller's pending writes early. A standalone caller (a unit test) wraps it in
+its own ``with conn:`` if the reviews must be durable.
 
-Implements exactly the §4.9 pseudocode::
+Exactly the §4.9 pseudocode::
 
     def invalidate(node_id, commit, touched: set[facet_id]):
         subs = edges where dst == node_id and retracted_at is null and mode == 'track'
@@ -51,18 +38,12 @@ _SUBSCRIBER_EDGE_TYPES = JUSTIFICATION_EDGE_TYPES | {"composes"}
 def _composes_touched_facet(edge: Edge, touched: set[str]) -> bool:
     """Whole-node ``composes`` subscription predicate.
 
-    # SPEC-QUESTION: §4.9's pseudocode calls `composes_touched_facet(edge,
-    # touched)` but never defines it anywhere in the spec. The predicate's
-    # first two clauses (`facet_binding in touched` / `facet_binding ==
-    # '*'`) already cover every `composes` edge with a specific or
-    # wildcard facet binding, so this third clause can only add coverage
-    # for a `composes` edge with `facet_binding IS NULL` (a whole-node
-    # composition with no facet binding at all). Narrowest reading
-    # adopted here: such a whole-node `composes` edge is considered
-    # touched by ANY non-empty `touched` set (i.e. any interface break on
-    # the target, not tied to a specific facet, is relevant to a plain
-    # "this node is part of that node" subscription). Logged in
-    # docs/spec-questions.md under task T7.1.
+    # SPEC-QUESTION (T7.1): §4.9 calls ``composes_touched_facet(edge, touched)`` but never
+    # defines it. The first two clauses (a bound facet in ``touched``, or ``'*'``) already cover
+    # every ``composes`` edge with a facet binding, so this only adds ``composes`` edges with
+    # ``facet_binding IS NULL``. Narrowest reading: such a whole-node edge is touched by ANY
+    # non-empty ``touched`` set (any interface break on the target matters to "this node is part
+    # of that node"). See docs/spec-questions.md T7.1.
     """
     return edge.facet_binding is None and len(touched) > 0
 
@@ -77,19 +58,12 @@ def invalidate(
 ) -> list[dict[str, Any]]:
     """Walk live subscriber edges into ``node_id`` and flag stale subscribers (spec §4.9).
 
-    Selects every live (``retracted_at IS NULL``), ``mode == 'track'`` edge
-    whose ``dst`` is ``node_id`` and whose ``edge_type`` is a justification
-    type or ``composes``, and whose ``facet_binding`` is either one of the
-    ``touched`` facet ids, the wildcard ``'*'``, or (composes edges only)
-    satisfies ``_composes_touched_facet``. For each matching edge's ``src``,
-    enqueues a ``facet_break`` review unless ``src`` already has an open
-    ``facet_break`` review (the non-transitive damper -- a node already
-    flagged stale is not re-flagged by a further downstream break).
-
-    Returns the list of newly-enqueued review rows (as returned by
-    ``store.enqueue_review_within_transaction``); an unaffected call
-    returns ``[]``. Opens no transaction of its own -- see the module
-    docstring's "Transaction discipline" note.
+    Selects live (``retracted_at IS NULL``), ``mode == 'track'`` edges into ``node_id`` of a
+    justification type or ``composes`` whose ``facet_binding`` is a ``touched`` id, ``'*'``, or
+    (composes only) satisfies ``_composes_touched_facet``. For each ``src`` it enqueues a
+    ``facet_break`` review unless ``src`` already has an open one (the non-transitive damper).
+    Returns the new review rows (``[]`` if unaffected). Opens no transaction; see the module
+    docstring.
     """
     live_edges = store.find_live_edges(conn, dst=node_id)
     subs = [

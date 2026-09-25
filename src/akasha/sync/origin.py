@@ -1,54 +1,20 @@
-"""Origin / echo-suppression: daemon-write tracking for the §4.8 watcher.
+"""Origin / echo suppression: tracking the daemon's own writes for the §4.8 watcher.
 
-Spec §4.8: "Echo suppression: writes performed by the daemon record
-``(path, hash)`` in ``origin.py``; a watcher event whose content hash
-matches a recorded write is dropped." This closes the write-then-watch
-loop: T5.4's reconcile pipeline performs a canonical write-back
-(``write_if_diff``) to a managed file, which the OS filesystem watcher
-(T5.3) will observe as its own filesystem-change event a few milliseconds
-later; without this module that event would re-trigger a reconcile of a
-change the daemon itself already applied.
+Spec §4.8: writes the daemon performs record ``(path, hash)`` here, and a watcher event whose
+content hash matches a recorded write is dropped. This closes the write-then-watch loop: the
+canonical write-back (``write_if_diff``) is observed by the filesystem watcher a few milliseconds
+later and would otherwise re-trigger a reconcile of a change the daemon already applied.
 
-This module is deliberately **process-local, in-memory, non-persistent**
-— NOT a ``kernel/store.py`` concern (build-plan rule 0.4 governs
-*truth-bearing* SQLite writes; echo-suppression bookkeeping is transient
-operational state, exactly like ``api/auth.py``'s in-process rate-limit
-call log: it resets on daemon restart, which is fine, since a restart
-also means the watcher's observer thread restarts and has no stale
-events to reconcile against). No SQLite, no ``pickle``/``eval``/``exec``.
+Process-local, in-memory, non-persistent, and not a ``kernel/store.py`` concern (rule 0.4 covers
+truth-bearing writes; like ``api/auth.py``'s rate-limit log this resets on restart, which restarts
+the observer too). ``hash`` is an opaque string: callers pass the canonical content hash they
+already computed.
 
-``hash`` here is an opaque string — this module never computes a content
-hash itself; callers (T5.4's write-back, T5.3's watcher reading the new
-file bytes) pass whatever canonical content hash they already computed
-(spec §4.3 canonicalization + §4.4 ``objects.hash`` scheme).
-
-Bounded memory
----------------
-Two independent bounds keep ``_pending`` from growing without limit if a
-recorded write never echoes back (e.g. the watcher never fires — file
-deleted externally before the FS event lands, or the platform watcher
-misses an event):
-
-- **Count bound** (``max_pending``, default 256): the oldest record is
-  evicted once the pending queue would exceed this size. 256 comfortably
-  covers a large multi-file reconcile burst (§6.2's scripted battery
-  scenarios) without keeping unbounded history.
-- **Age bound** (``ttl_seconds``, default 30.0): a record older than this
-  is evicted (lazily, on the next ``record_write``/``is_echo`` call)
-  regardless of count pressure. 30s is generously longer than the §4.8
-  500ms debounce window plus OS-level FS-event latency (cloud-sync
-  providers per M5's cloud-path detection can add real delay), so a
-  genuine echo is never missed, while a write that never echoes doesn't
-  linger indefinitely.
-
-The clock is injectable (``now`` parameter, defaulting to
-``time.monotonic()``) so tests are deterministic — mirrors
-``api/auth.py``'s ``check_rate_limit(..., now=...)`` pattern.
-
-Thread-safety: the watcher (T5.3) may call ``is_echo`` from a
-``watchdog`` observer thread while the daemon's reconcile pipeline
-(T5.4) calls ``record_write`` from its own thread/task. A single
-``threading.Lock`` around the shared queue makes both operations safe to
+Bounded memory, in case a recorded write never echoes back (a file deleted before the event lands,
+a missed platform event): ``max_pending`` (default 256) evicts the oldest record; ``ttl_seconds``
+(default 30.0, well past the 500 ms debounce plus cloud-sync latency) evicts old records lazily on
+the next ``record_write``/``is_echo``. The clock is injectable (``now``). One ``threading.Lock``
+makes the watcher thread's ``is_echo`` and the reconcile thread's ``record_write`` safe to
 interleave.
 """
 
@@ -68,25 +34,13 @@ DEFAULT_TTL_SECONDS = 30.0
 
 
 class OriginTracker:
-    """Tracks recent daemon writes so the watcher can drop echoed FS events.
+    """Tracks recent daemon writes so the watcher can drop echoed filesystem events.
 
-    Public API:
-
-    - ``record_write(path: str, hash: str, *, now: float | None = None) -> None``
-      Record that the daemon just wrote ``path`` with canonical content
-      ``hash``.
-    - ``is_echo(path: str, hash: str, *, now: float | None = None) -> bool``
-      Return ``True`` iff ``(path, hash)`` matches a still-pending
-      recorded write, **consuming** that record so an identical
-      subsequent call (e.g. a genuine external write that happens to
-      reproduce the same bytes) is NOT suppressed a second time. Matching
-      requires both ``path`` and ``hash`` to be equal; a matching hash on
-      a different path, or a different hash on the same path, is never an
-      echo.
-
-    One instance is meant to be held by the watcher/reconcile wiring
-    (T5.3/T5.4) and shared between the thread that performs writes and
-    the thread that observes filesystem events.
+    ``record_write(path, hash, *, now=None)`` records that the daemon just wrote ``path`` with
+    canonical content ``hash``. ``is_echo(path, hash, *, now=None)`` is True iff ``(path, hash)``
+    matches a still-pending write, and CONSUMES it, so an identical later event (a genuine external
+    write that reproduces the same bytes) is not suppressed again. Both ``path`` and ``hash`` must
+    match. One instance is shared by the writing thread and the observing thread.
     """
 
     def __init__(

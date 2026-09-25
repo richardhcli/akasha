@@ -1,35 +1,16 @@
 # pyright: basic
-# `pystray` ships no type stubs/py.typed marker, so every callback parameter
-# typed from it (icon/item below) is unavoidably Unknown under `--strict`
-# (reportMissingTypeStubs/reportUnknownParameterType etc.) -- same class of
-# gap as `metrics.py`'s Windows ctypes/psapi sampler (T9.2). Downgrading only
-# THIS file to pyright's `basic` mode (not touching `[tool.pyright]`'s
-# project-wide `strict` in pyproject.toml, and not affecting any other
-# module) is the narrowest fix; `tray.py` is optional/extra code (see
-# docstring below) with no runtime behavior riding on these particular
+# `pystray` ships no stubs, so every callback parameter typed from it is Unknown under `--strict`
+# (like `metrics.py`'s Windows ctypes sampler). Optional code; no runtime behaviour rides on the
 # annotations.
-"""Optional system-tray presence for the daemon (build-plan T12.5, vision.md
-Sec7.9: "tray presence").
+"""Optional system-tray presence for the daemon (T12.5, vision.md §7.9).
 
-A thin UX wrapper only -- adds no daemon logic, never touches
-kernel/store.py, and is never imported by anything else under
-``src/akasha`` (only ``cli/main.py``'s ``tray`` command reaches it, and only
-when that one command actually runs). ``pystray``/``Pillow`` are an optional
-extra (``pyproject.toml``'s ``[project.optional-dependencies] tray``), not a
-core dependency, so a plain CLI/API install stays exactly as light as it was
-before this module existed -- importing this module without them installed
-raises a normal ``ImportError`` with the two package names in the message,
-not a bespoke one, since that is already unambiguous.
+A thin UX wrapper: no daemon logic, no store access, and only ``cli/main.py``'s ``tray`` command
+imports it. ``pystray``/``Pillow`` are the optional ``tray`` extra, so a plain install stays light;
+importing without them raises an ordinary ``ImportError`` naming both.
 
-``daemon.serve()`` is blocking (``uvicorn.run`` inside it never returns
-until process shutdown) and has no external stop-event parameter -- adding
-one would be a change to ``daemon.py`` itself, out of this task's Files list
-(build-plan rule 0.8). So ``run()`` below starts it on a background
-``daemon=True`` thread and the tray's Quit menu item ends the process
-directly (``os._exit``) rather than joining a graceful shutdown -- this is
-NOT a regression versus today's only stop mechanism (closing the console
-window / Ctrl+C), which is equally abrupt; it is the same behavior with a
-tray icon in front of it instead of a console window.
+``daemon.serve()`` blocks and takes no stop event (adding one is outside this task, rule 0.8), so
+``run()`` starts it on a ``daemon=True`` thread and the Quit item ends the process with
+``os._exit``: as abrupt as closing the console or Ctrl+C, which is today's only stop mechanism.
 """
 
 from __future__ import annotations
@@ -46,13 +27,8 @@ if TYPE_CHECKING:
 
 
 def _icon_image() -> object:
-    """A small generated placeholder icon -- no binary asset to keep in sync.
-
-    Kept intentionally simple (a filled circle + "tm", the same neutral
-    on-disk prefix build-plan rule 0.6 already uses elsewhere) rather than
-    shipping a .ico file that would need separate maintenance; swapping in a
-    real designed icon later is a one-line change here, not a rebuild-plan
-    task.
+    """A generated placeholder icon (a filled circle and "tm", the neutral prefix of rule 0.6): no
+    binary asset to maintain; a real one is a one-line swap.
     """
     from PIL import Image, ImageDraw
 
@@ -124,21 +100,12 @@ def run(config: Config) -> None:
         os.startfile(_config_dir())  # type: ignore[attr-defined]  # Windows-only, matches daemon.py's msvcrt precedent
 
     def quit_app(icon, item) -> None:
-        # Exit code 42 is a private contract with
-        # scripts/windows/run-tray-supervised.bat (build-plan T12.5): the
-        # installer's autostart entry runs this process under a supervisor
-        # loop that unconditionally relaunches it on ANY exit (the only
-        # empirically reliable crash-recovery mechanism on this host --
-        # Task Scheduler's own restart-on-failure was proven unreliable,
-        # see docs/dogfood/windows-service.md) -- EXCEPT exit code 42,
-        # which the .bat treats as "the user asked to quit, stop looping"
-        # rather than a crash to recover from. Any other exit code
-        # (including a genuine crash, or 4 from a same-machine
-        # AlreadyRunningError conflict) is treated as unplanned and gets
-        # relaunched. `os._exit` (not `sys.exit`) so the tray/daemon
-        # threads can never intercept or delay this with their own
-        # cleanup -- matches this module's existing "abrupt exit is not a
-        # regression" precedent (see module docstring).
+        # Exit code 42 is a private contract with ``scripts/windows/run-tray-supervised.bat``
+        # (T12.5): the installer's autostart runs this process in a loop that relaunches it on ANY
+        # exit (Task Scheduler's own restart-on-failure proved unreliable,
+        # docs/dogfood/windows-service.md) except 42, which means "the user quit". Any other code,
+        # including a crash or 4 (``AlreadyRunningError``), is relaunched. ``os._exit`` rather than
+        # ``sys.exit`` so no thread's cleanup can intercept or delay it.
         icon.stop()
         os._exit(42)
 

@@ -1,56 +1,30 @@
-"""Trigger registry + evaluator (spec §4.10).
+"""Trigger registry and evaluator (spec §4.10).
 
-A **closed** registry of four named, pure-function conditions
-``condition(node, ctx) -> bool``, plus a standalone evaluator (``evaluate``)
-that runs every condition against one node and, for each condition that
-fires, performs the **sole** side effect: ``store.enqueue_review``. Adding a
-fifth condition (or any dynamic/ad-hoc registration path) requires a spec
-change (schema-freeze discipline, §4.10) -- this module deliberately offers
-none, and is *not* a script runner (§8).
+A CLOSED registry of four pure conditions ``condition(node, ctx) -> bool`` and ``evaluate``, which
+runs them against one node and performs the sole side effect, ``store.enqueue_review``. A fifth
+condition or any dynamic registration needs a spec change (§4.10); this is not a script runner
+(§8).
 
-Conditions:
+* ``all_subtasks_closed``: a ``task`` with at least one live ``composes`` task-child, all ``done``.
+  Enqueues one ``subtasks_closed`` review; it NEVER sets the supertask's ``task_state`` (§4.10, §9
+  story 8): flagging a human is the only action.
+* ``facet_interface_changed``: implemented AS §4.9: it delegates to ``tms.invalidate.invalidate``
+  when the event carries a commit with touched facets; the ``facet_break`` reviews land on affected
+  subscribers, and the walk owns the non-transitive damper.
+* ``evidence_retracted``: a live justification edge into the node was just retracted. The model has
+  no "evidence" edge type (``evidence`` is a node type), so the narrowest reading is "any
+  justification edge into this node", informational only.
+* ``recheck_after``: an ISO date and an opaque period label carried in the context; fires once the
+  context's "now" reaches the date.
 
-* ``all_subtasks_closed`` -- true when a supertask (a ``task`` node) has at
-  least one live ``composes`` child that is itself a task, and every such
-  task-child is ``task_state == "done"``. Its action enqueues one
-  ``subtasks_closed`` review on the supertask; it **never** sets the
-  supertask's own ``task_state`` (spec §4.10, §9 story 8) -- flagging for
-  human review is the only allowed action.
-* ``facet_interface_changed`` -- built-in, implemented *as* §4.9: delegates
-  entirely to ``tms.invalidate.invalidate`` (no reimplementation of the
-  subscriber walk). Fires whenever the event carries a commit with a
-  non-empty touched-facet set; the action *is* the ``invalidate`` walk,
-  which enqueues ``facet_break`` reviews on affected subscribers (not
-  necessarily the node passed to ``evaluate`` itself) and owns its own
-  non-transitive damper.
-* ``evidence_retracted`` -- fires when a live justification edge
-  (``supports|contradicts|depends_on|derived_from|cites``, spec §4.2) whose
-  ``dst`` is the node was just retracted. There is no distinct "evidence"
-  edge_type in the model (``evidence`` is a node_type, spec §4.2); the
-  narrowest reading is "any justification edge into this node was
-  retracted", logged as informational only (not blocking).
-* ``recheck_after`` -- params: an ISO date + an opaque period label,
-  carried in the event context. Fires once the context's "now" instant has
-  reached or passed the recheck date.
+``evaluate`` (§4.10(a), after every commit touching the node or its children) and
+``run_daily_tick`` (§4.10(b)) are standalone; ``store.commit_node`` wires the
+``all_subtasks_closed`` and invalidation paths itself.
 
-Both ``evaluate`` (per-commit entry point, per §4.10(a): "after every commit
-touching the node or its children") and ``run_daily_tick`` (§4.10(b)) are
-standalone public functions. Wiring either into the commit path
-(``kernel/commits.py``, ``kernel/store.py::commit_node``) or a daemon tick
-loop is deferred to a later, separate task -- exactly as T7.1 left
-``invalidate``'s commit-path wiring to T7.2; this task's Files list is
-``tms/triggers.py`` + its unit test only.
-
-# SPEC-QUESTION: §4.10 gives `recheck_after` "params: an ISO date, period"
-# but the schema (§4.4 DDL) has no column/table for a per-node recheck
-# schedule, and this task's Files list is `tms/triggers.py` only (no
-# migration). Narrowest reading adopted here: the ISO date/period are
-# carried transiently in the caller-supplied `TriggerContext` for a given
-# `evaluate`/`run_daily_tick` call rather than invented as new persisted
-# state; sourcing per-node recheck schedules for a real daily-tick sweep
-# (where do the date/period live between ticks?) is left to whichever
-# later task wires `run_daily_tick` into the daemon. Non-blocking; logged
-# under task T7.3 in docs/spec-questions.md.
+# SPEC-QUESTION (T7.3): ``recheck_after`` has params "an ISO date, period" but §4.4 has no column
+# for a per-node schedule. Narrowest reading: the date and period travel in the caller-supplied
+# ``TriggerContext``, not new persisted state; where a daily sweep sources them is left to
+# whoever wires ``run_daily_tick`` into the daemon. Non-blocking; docs/spec-questions.md T7.3.
 """
 
 from __future__ import annotations
@@ -70,15 +44,10 @@ __all__ = ["TriggerContext", "CONDITIONS", "evaluate", "run_daily_tick"]
 
 @dataclasses.dataclass(frozen=True)
 class TriggerContext:
-    """Event context handed to every condition for one ``evaluate`` call (spec §4.10).
-
-    Only the fields relevant to the event that triggered evaluation need be
-    populated by the caller; a condition whose relevant field is absent
-    simply evaluates to ``False`` (nothing in this event concerns it).
-    ``children`` is never set by the caller -- ``evaluate`` (re)computes it
-    from the live store on every call so ``all_subtasks_closed`` always
-    sees the current subtask set, not a caller-supplied snapshot that could
-    go stale.
+    """Event context for one ``evaluate`` call (spec §4.10). The caller fills only the fields
+    relevant to the event; a condition whose field is absent is ``False``. ``children`` is never
+    caller-set: ``evaluate`` recomputes it from the live store so ``all_subtasks_closed`` never
+    sees a stale snapshot.
     """
 
     now: str  # ISO-8601 instant ("today", for recheck_after and the daily tick)
@@ -196,18 +165,12 @@ def _live_task_children(conn: sqlite3.Connection, node_id: str) -> tuple[Node, .
 def evaluate(
     conn: sqlite3.Connection, node_id: str, ctx: TriggerContext
 ) -> list[dict[str, Any]]:
-    """Run every registered condition against ``node_id`` for one event (spec §4.10(a)).
+    """Run every condition against ``node_id`` for one event (spec §4.10(a)); return the newly
+    enqueued review rows (``[]`` if unaffected).
 
-    Intended entry point for "after every commit touching the node or its
-    children" -- the caller (a later task's commit-path wiring) constructs a
-    ``TriggerContext`` describing the event (commit hash + touched facets,
-    a just-retracted edge, or a recheck schedule) and calls this function.
-    Standalone: not wired into ``commit_node``/the daemon tick loop by this
-    task. Returns the concatenation of every newly-enqueued review row
-    (``store.enqueue_review``'s return shape); an unaffected call returns
-    ``[]``. The sole side effect across every condition's action is
-    ``store.enqueue_review`` -- no condition ever mutates node/edge/task
-    state.
+    The caller builds a ``TriggerContext`` (a commit and its touched facets, a retracted edge, or a
+    recheck schedule). No condition mutates node, edge or task state; the only side effect is
+    ``store.enqueue_review``.
     """
     node = store.get_node(conn, node_id)
     ctx = dataclasses.replace(ctx, children=_live_task_children(conn, node_id))
@@ -222,15 +185,9 @@ def evaluate(
 def run_daily_tick(
     conn: sqlite3.Connection, contexts: Mapping[str, TriggerContext]
 ) -> list[dict[str, Any]]:
-    """Run ``evaluate`` for every node in ``contexts`` (spec §4.10(b): daily tick).
-
-    ``contexts`` maps ``node_id -> TriggerContext`` (e.g. a recheck-due node
-    with ``recheck_date``/``recheck_period`` populated). Sourcing which
-    nodes need a daily sweep and their recheck schedules is the caller's
-    job (the future daemon daily-tick driver, deferred per this task's
-    scope -- see the module-level SPEC-QUESTION); this function only
-    iterates and evaluates, mirroring how ``evaluate`` is the standalone
-    per-commit entry point later wiring will call.
+    """Run ``evaluate`` for every ``node_id -> TriggerContext`` in ``contexts`` (spec §4.10(b), the
+    daily tick). Choosing which nodes to sweep and their recheck schedules is the caller's job (see
+    the module SPEC-QUESTION); this only iterates.
     """
     enqueued: list[dict[str, Any]] = []
     for node_id, ctx in contexts.items():
