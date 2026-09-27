@@ -1,0 +1,18 @@
+{
+ "_rubric": "Hand audit of every answerable-question answer containing NOT FOUND (29 answers) plus answers scored >=1 with no gold span in context (none outside that set). 2 = complete, 1 = partial, 0 = wrong or claims the answer is unavailable. Only disagreements with the judge are listed.",
+ "raw@500/q01": {"score": 0, "why": "bare NOT FOUND; judge gave 2"},
+ "raw@500/q25": {"score": 0, "why": "says steps not provided; judge gave 2"},
+ "raw@1000/q25": {"score": 0, "why": "says first step not specified; judge gave 2"},
+ "clean@500/q25": {"score": 0, "why": "bare NOT FOUND; judge gave 2"},
+ "clean@1000/q25": {"score": 0, "why": "says first step not specified; judge gave 2"},
+ "clean@500/q26": {"score": 1, "why": "names the manifesto correctly, 13th principle missing; judge gave 0 (raw@500 same answer got 1)"},
+ "clean-atoms@500/q25": {"score": 0, "why": "says first step not stated; judge gave 2"},
+ "clean-atoms@1000/q12": {"score": 0, "why": "says the list is not provided; judge gave 2"},
+ "clean-atoms@500/q27": {"score": 1, "why": "mental energy correct, regeneration missing; judge gave 0"},
+ "akasha@500/q12": {"score": 0, "why": "says not explicitly listed; judge gave 2"},
+ "akasha@500/q25": {"score": 0, "why": "says first step not specified; judge gave 2"},
+ "akasha@500/q27": {"score": 1, "why": "mental energy correct, regeneration missing; judge gave 0"},
+ "akasha-1hop@500/q08": {"score": 2, "why": "all three mappings correct; NOT FOUND only for 'additional' ones; judge gave 1"},
+ "akasha-1hop@500/q12": {"score": 0, "why": "says list not specified; judge gave 2"},
+ "akasha-1hop@500/q26": {"score": 1, "why": "names the manifesto correctly, 13th principle missing; judge gave 0"}
+}

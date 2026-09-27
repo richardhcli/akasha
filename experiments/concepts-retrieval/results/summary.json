@@ -1,0 +1,387 @@
+{
+  "retrieval_only": {
+    "raw@250": {
+      "gold_span_recall": 0.7,
+      "all_spans_hit": 0.567,
+      "context_tokens": 237.333,
+      "chunks": 2.576
+    },
+    "raw@500": {
+      "gold_span_recall": 0.767,
+      "all_spans_hit": 0.633,
+      "context_tokens": 484.97,
+      "chunks": 5.242
+    },
+    "raw@1000": {
+      "gold_span_recall": 0.95,
+      "all_spans_hit": 0.9,
+      "context_tokens": 984.545,
+      "chunks": 9.485
+    },
+    "raw@2000": {
+      "gold_span_recall": 0.967,
+      "all_spans_hit": 0.933,
+      "context_tokens": 1953.394,
+      "chunks": 17.697
+    },
+    "raw@4000": {
+      "gold_span_recall": 0.983,
+      "all_spans_hit": 0.967,
+      "context_tokens": 3835.576,
+      "chunks": 32.697
+    },
+    "clean@250": {
+      "gold_span_recall": 0.733,
+      "all_spans_hit": 0.6,
+      "context_tokens": 235.424,
+      "chunks": 2.879
+    },
+    "clean@500": {
+      "gold_span_recall": 0.8,
+      "all_spans_hit": 0.667,
+      "context_tokens": 484.152,
+      "chunks": 5.818
+    },
+    "clean@1000": {
+      "gold_span_recall": 0.95,
+      "all_spans_hit": 0.9,
+      "context_tokens": 979.939,
+      "chunks": 9.879
+    },
+    "clean@2000": {
+      "gold_span_recall": 0.967,
+      "all_spans_hit": 0.933,
+      "context_tokens": 1952.788,
+      "chunks": 18.788
+    },
+    "clean@4000": {
+      "gold_span_recall": 0.983,
+      "all_spans_hit": 0.967,
+      "context_tokens": 3790.152,
+      "chunks": 32.788
+    },
+    "clean-atoms@250": {
+      "gold_span_recall": 0.7,
+      "all_spans_hit": 0.567,
+      "context_tokens": 244.364,
+      "chunks": 5.242
+    },
+    "clean-atoms@500": {
+      "gold_span_recall": 0.867,
+      "all_spans_hit": 0.767,
+      "context_tokens": 491.394,
+      "chunks": 9.758
+    },
+    "clean-atoms@1000": {
+      "gold_span_recall": 0.933,
+      "all_spans_hit": 0.9,
+      "context_tokens": 972.333,
+      "chunks": 18.0
+    },
+    "clean-atoms@2000": {
+      "gold_span_recall": 0.95,
+      "all_spans_hit": 0.9,
+      "context_tokens": 1910.303,
+      "chunks": 34.667
+    },
+    "clean-atoms@4000": {
+      "gold_span_recall": 0.983,
+      "all_spans_hit": 0.967,
+      "context_tokens": 3220.515,
+      "chunks": 53.636
+    },
+    "akasha@250": {
+      "gold_span_recall": 0.667,
+      "all_spans_hit": 0.533,
+      "context_tokens": 238.939,
+      "chunks": 4.273
+    },
+    "akasha@500": {
+      "gold_span_recall": 0.833,
+      "all_spans_hit": 0.733,
+      "context_tokens": 484.788,
+      "chunks": 8.03
+    },
+    "akasha@1000": {
+      "gold_span_recall": 0.917,
+      "all_spans_hit": 0.867,
+      "context_tokens": 972.818,
+      "chunks": 15.636
+    },
+    "akasha@2000": {
+      "gold_span_recall": 0.933,
+      "all_spans_hit": 0.9,
+      "context_tokens": 1928.364,
+      "chunks": 30.364
+    },
+    "akasha@4000": {
+      "gold_span_recall": 0.983,
+      "all_spans_hit": 0.967,
+      "context_tokens": 3540.545,
+      "chunks": 51.848
+    },
+    "akasha-1hop@250": {
+      "gold_span_recall": 0.667,
+      "all_spans_hit": 0.533,
+      "context_tokens": 239.212,
+      "chunks": 4.212
+    },
+    "akasha-1hop@500": {
+      "gold_span_recall": 0.783,
+      "all_spans_hit": 0.667,
+      "context_tokens": 481.545,
+      "chunks": 7.97
+    },
+    "akasha-1hop@1000": {
+      "gold_span_recall": 0.917,
+      "all_spans_hit": 0.867,
+      "context_tokens": 974.273,
+      "chunks": 15.576
+    },
+    "akasha-1hop@2000": {
+      "gold_span_recall": 0.933,
+      "all_spans_hit": 0.9,
+      "context_tokens": 1929.03,
+      "chunks": 30.545
+    },
+    "akasha-1hop@4000": {
+      "gold_span_recall": 0.983,
+      "all_spans_hit": 0.967,
+      "context_tokens": 3635.485,
+      "chunks": 54.182
+    }
+  },
+  "llm": {
+    "akasha-1hop@1000": {
+      "n": 33,
+      "score_mean_0to2": 1.758,
+      "judge_score_uncorrected": 1.758,
+      "correct_rate": 0.848,
+      "answerable_score": 1.733,
+      "single_score": 1.864,
+      "multi_score": 1.375,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.9,
+      "cited_source_precision": 0.972,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 83.825,
+      "prompt_tokens": 1095.697,
+      "completion_tokens": 88.152,
+      "context_tokens": 974.273,
+      "score_per_1k_prompt_tokens": 1.604
+    },
+    "akasha-1hop@500": {
+      "n": 33,
+      "score_mean_0to2": 1.515,
+      "judge_score_uncorrected": 1.515,
+      "correct_rate": 0.727,
+      "answerable_score": 1.467,
+      "single_score": 1.727,
+      "multi_score": 0.75,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.783,
+      "cited_source_precision": 0.937,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 79.986,
+      "prompt_tokens": 603.121,
+      "completion_tokens": 83.818,
+      "context_tokens": 481.545,
+      "score_per_1k_prompt_tokens": 2.512
+    },
+    "akasha@1000": {
+      "n": 33,
+      "score_mean_0to2": 1.788,
+      "judge_score_uncorrected": 1.788,
+      "correct_rate": 0.848,
+      "answerable_score": 1.767,
+      "single_score": 1.864,
+      "multi_score": 1.5,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.917,
+      "cited_source_precision": 0.969,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 80.943,
+      "prompt_tokens": 1094.242,
+      "completion_tokens": 91.909,
+      "context_tokens": 972.818,
+      "score_per_1k_prompt_tokens": 1.634
+    },
+    "akasha@500": {
+      "n": 33,
+      "score_mean_0to2": 1.636,
+      "judge_score_uncorrected": 1.727,
+      "correct_rate": 0.758,
+      "answerable_score": 1.6,
+      "single_score": 1.773,
+      "multi_score": 1.125,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.833,
+      "cited_source_precision": 0.947,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 79.84,
+      "prompt_tokens": 606.333,
+      "completion_tokens": 85.455,
+      "context_tokens": 484.788,
+      "score_per_1k_prompt_tokens": 2.698
+    },
+    "clean-atoms@1000": {
+      "n": 33,
+      "score_mean_0to2": 1.848,
+      "judge_score_uncorrected": 1.909,
+      "correct_rate": 0.909,
+      "answerable_score": 1.833,
+      "single_score": 1.909,
+      "multi_score": 1.625,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.933,
+      "cited_source_precision": 0.972,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 70.67,
+      "prompt_tokens": 1094.03,
+      "completion_tokens": 90.152,
+      "context_tokens": 972.333,
+      "score_per_1k_prompt_tokens": 1.689
+    },
+    "clean-atoms@500": {
+      "n": 33,
+      "score_mean_0to2": 1.697,
+      "judge_score_uncorrected": 1.727,
+      "correct_rate": 0.818,
+      "answerable_score": 1.667,
+      "single_score": 1.909,
+      "multi_score": 1.0,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.867,
+      "cited_source_precision": 0.944,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 67.102,
+      "prompt_tokens": 613.03,
+      "completion_tokens": 91.303,
+      "context_tokens": 491.394,
+      "score_per_1k_prompt_tokens": 2.768
+    },
+    "clean@1000": {
+      "n": 33,
+      "score_mean_0to2": 1.909,
+      "judge_score_uncorrected": 1.97,
+      "correct_rate": 0.939,
+      "answerable_score": 1.9,
+      "single_score": 2.0,
+      "multi_score": 1.625,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.95,
+      "cited_source_precision": 0.961,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 193.962,
+      "prompt_tokens": 1101.788,
+      "completion_tokens": 88.788,
+      "context_tokens": 979.939,
+      "score_per_1k_prompt_tokens": 1.733
+    },
+    "clean@500": {
+      "n": 33,
+      "score_mean_0to2": 1.667,
+      "judge_score_uncorrected": 1.697,
+      "correct_rate": 0.758,
+      "answerable_score": 1.633,
+      "single_score": 1.864,
+      "multi_score": 1.0,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.783,
+      "cited_source_precision": 0.959,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 154.647,
+      "prompt_tokens": 606.061,
+      "completion_tokens": 84.455,
+      "context_tokens": 484.152,
+      "score_per_1k_prompt_tokens": 2.751
+    },
+    "raw@1000": {
+      "n": 33,
+      "score_mean_0to2": 1.879,
+      "judge_score_uncorrected": 1.939,
+      "correct_rate": 0.909,
+      "answerable_score": 1.867,
+      "single_score": 2.0,
+      "multi_score": 1.5,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.95,
+      "cited_source_precision": 0.944,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 201.255,
+      "prompt_tokens": 1106.424,
+      "completion_tokens": 86.909,
+      "context_tokens": 984.545,
+      "score_per_1k_prompt_tokens": 1.698
+    },
+    "raw@500": {
+      "n": 33,
+      "score_mean_0to2": 1.606,
+      "judge_score_uncorrected": 1.727,
+      "correct_rate": 0.727,
+      "answerable_score": 1.567,
+      "single_score": 1.773,
+      "multi_score": 1.0,
+      "unanswerable_abstained": 1.0,
+      "cited_gold_span_recall": 0.767,
+      "cited_source_precision": 0.931,
+      "answers_with_citation": 1.0,
+      "tokens_per_cited_chunk": 167.913,
+      "prompt_tokens": 606.97,
+      "completion_tokens": 85.394,
+      "context_tokens": 484.97,
+      "score_per_1k_prompt_tokens": 2.646
+    }
+  },
+  "paired_vs_raw": {
+    "clean@500": {
+      "wins": 2,
+      "losses": 1,
+      "ties": 30,
+      "sign_test_p": 1.0
+    },
+    "clean-atoms@500": {
+      "wins": 6,
+      "losses": 3,
+      "ties": 24,
+      "sign_test_p": 0.508
+    },
+    "akasha@500": {
+      "wins": 5,
+      "losses": 3,
+      "ties": 25,
+      "sign_test_p": 0.727
+    },
+    "akasha-1hop@500": {
+      "wins": 4,
+      "losses": 5,
+      "ties": 24,
+      "sign_test_p": 1.0
+    },
+    "clean@1000": {
+      "wins": 1,
+      "losses": 0,
+      "ties": 32,
+      "sign_test_p": 1.0
+    },
+    "clean-atoms@1000": {
+      "wins": 2,
+      "losses": 3,
+      "ties": 28,
+      "sign_test_p": 1.0
+    },
+    "akasha@1000": {
+      "wins": 1,
+      "losses": 3,
+      "ties": 29,
+      "sign_test_p": 0.625
+    },
+    "akasha-1hop@1000": {
+      "wins": 1,
+      "losses": 4,
+      "ties": 28,
+      "sign_test_p": 0.375
+    }
+  },
+  "judge_corrections": 15
+}

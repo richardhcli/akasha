@@ -1,0 +1,5 @@
+extend = "../../pyproject.toml"
+
+[lint.per-file-ignores]
+# The answer/judge prompts are kept byte-identical to the ones the recorded run used.
+"scripts/run_llm.py" = ["E501"]
