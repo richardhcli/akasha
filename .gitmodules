@@ -1,0 +1,6 @@
+[submodule "experiments/kb-io-bench/third_party/MemoryAgentBench"]
+	path = experiments/kb-io-bench/third_party/MemoryAgentBench
+	url = https://github.com/HUST-AI-HYZ/MemoryAgentBench
+[submodule "experiments/kb-io-bench/third_party/basic-memory"]
+	path = experiments/kb-io-bench/third_party/basic-memory
+	url = https://github.com/basicmachines-co/basic-memory
