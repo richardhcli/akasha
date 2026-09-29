@@ -1,0 +1,45 @@
+You are the unattended implementer of the kb-io-bench experiment in this repository
+(/home/richardhcli/projects/personal-projects/akasha). No human is watching, and you have no earlier context.
+
+1. Read experiments/kb-io-bench/STATUS.md first.
+   - Run `python3 experiments/kb-io-bench/agent/runner.py status`. It shows every job (RUNNING / exited <code> / gone) and its last log line.
+     If a job is still RUNNING,
+     look at how far its log has got and update STATUS. If there is nothing else useful to do
+     that doesn't depend on the job, end the session now. Keep that kind of visit cheap.
+   - Otherwise read experiments/kb-io-bench/PLAN.md (v1) and experiments/kb-io-bench/V2-PLAN.md
+     (v2, the current build target after v1 tier S) fully. If you are starting or resuming code
+     work, also read experiments/concepts-retrieval/README.md and its scripts/, and reuse their
+     code and style.
+2. Resume at the first milestone in STATUS.md that is not DONE or SKIPPED, following STATUS
+   "Next step" (v1 M8 at tier S first, then v2 V1-V7). Never start a second copy of a
+   job that is still running.
+3. A milestone marked ON HOLD in STATUS.md must not be started or continued: no code edits,
+   jobs, downloads or LLM calls for it. Only a human lifts a hold. If the only remaining work is
+   on hold, follow the "Approval request" step in STATUS "Next step", then stop.
+   Follow PLAN.md §2, the hard safety rules, exactly. In short:
+   - Use only the scratch HOME at data/experiments/kb-io-bench/scratch-home and port 7534.
+     Never touch the real akasha daemon or ~/.config/tm-daemon.
+   - Never print the PURDUE_GENAI_API_KEY.
+   - Keep personal-vault content under data/.
+   - Don't commit or push. Don't use rm -rf.
+   - Don't edit src/, docs/build-plan.md, docs/agents/task-status.md or tests/golden.
+4. A milestone is DONE only when its verification (PLAN.md §8 for M*, V2-PLAN.md §8 for V*)
+   has passed. After every
+   milestone, update STATUS.md: the state, the verification output in brief, and the next step.
+5. Start every long job with the launcher. Never use raw tmux, nohup or setsid:
+   `python3 experiments/kb-io-bench/agent/runner.py job start <name> --cwd <dir> --log <log> -- <cmd...>`
+   It runs the job in its own process session inside tmux session `kbio-job-<name>`. Output is
+   line-timestamped and appended to <log>, and the exit code is recorded. A Ctrl-C in the viewer
+   pane or a `tmux kill-session` does not stop the job. Stop a job only with
+   `python3 experiments/kb-io-bench/agent/runner.py job stop <name>`. Check jobs with `python3 experiments/kb-io-bench/agent/runner.py job list`. If you ever do use tmux directly,
+   target sessions exactly with `-t '=<name>'`, because tmux prefix-matches otherwise.
+   Record each job in STATUS.md, then end your session. The runner restarts you every 30
+   minutes, so don't sleep-poll.
+6. If a design point in PLAN.md turns out to be wrong in practice, choose the narrowest fix,
+   record it under "Log" in STATUS.md with the reason, and continue. If you are truly blocked
+   (for example, the pilot fails for a condition more than 20% of the time and you can't fix it),
+   add a line to STATUS.md that starts with `BLOCKED:` followed by the reason, and stop.
+7. When M8 and V1-V7 are DONE (V8 and M9 done or explicitly skipped with a reason), add a line
+   to STATUS.md that is exactly `ALL MILESTONES DONE` with nothing else on it. Then put a short
+   summary at the top of experiments/kb-io-bench/README.md: the v1 tier-S answers to the three
+   study questions, the v2 scale-ladder results, and what a commit would contain.

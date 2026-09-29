@@ -1,0 +1,12 @@
+extend = "../../pyproject.toml"
+extend-exclude = ["third_party"]
+
+[lint.per-file-ignores]
+# prompts are kept verbatim and readable
+"kbio/prompts.py" = ["E501"]
+"kbio/prompts2.py" = ["E501"]
+"kbio/score.py" = ["E501"]
+"kbio/score2.py" = ["E501"]
+"kbio/analyze.py" = ["E501"]
+"kbio/analyze2.py" = ["E501"]
+"tests/*" = ["E501"]

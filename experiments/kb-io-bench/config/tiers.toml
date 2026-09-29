@@ -1,0 +1,32 @@
+# Nested corpus tiers (kbio/corpus.py). A tier = concept notes + their mapped Wikipedia pages
+# (+ optional link-expansion distractor pages). Every tier contains the one before it.
+#
+#   notes          "subset" = the 60-note concepts-retrieval subset, "all" = every concept note
+#   fill_pages     (S) add the mapped notes most linked from the subset until this many wiki pages
+#   base           tier whose notes/pages this one starts from
+#   expand_hops    link hops from the mapped pages to add as distractor pages
+#   max_pages      cap on the total wiki pages after expansion (ranked by in-links, then seeded)
+#   seed           tie-break seed for expansion sampling
+
+[tiers.S]
+sources = ["concepts", "wikipedia"]
+notes = "subset"
+fill_pages = 40
+
+[tiers.M]
+sources = ["concepts", "wikipedia"]
+notes = "all"
+
+[tiers.L]
+sources = ["concepts", "wikipedia"]
+base = "M"
+expand_hops = 1
+max_pages = 4000
+seed = 7
+
+[tiers.XL]
+sources = ["concepts", "wikipedia"]
+base = "L"
+expand_hops = 2
+max_pages = 12000
+seed = 7

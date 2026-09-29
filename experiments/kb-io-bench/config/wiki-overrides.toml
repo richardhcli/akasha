@@ -1,0 +1,45 @@
+# Hand fixes for the concept -> Wikipedia mapping (kbio/sources/wikipedia.py).
+# Key: the note's stripped concept name (or its full file stem). Value: a page title, or "skip".
+# Exact lookup only picks pages whose title *is* the concept name; these fix disambiguation
+# pages and wrong-sense exact matches, and skip notes with no encyclopedic counterpart.
+
+[overrides]
+# wrong-sense exact matches
+"java" = "Java (programming language)"
+"transformers" = "Transformer (deep learning architecture)"
+"Piracy (media)" = "Copyright infringement"
+"SpaceTime" = "Spacetime"
+"Human Mind" = "Mind"
+"result" = "skip"
+"party" = "skip"
+"Trance" = "skip"
+"Battle" = "skip"
+"Greatness" = "skip"
+"Energy (mental)" = "skip"
+# disambiguation pages with a clear sense
+"Python (language)" = "Python (programming language)"
+"bash" = "Bash (Unix shell)"
+"shell (OS)" = "Shell (computing)"
+"OS" = "Operating system"
+"PATH" = "PATH (variable)"
+"Programming" = "Computer programming"
+"docker" = "Docker (software)"
+"Conda" = "Conda (package manager)"
+"Coding" = "Computer programming"
+"masters (education)" = "Master's degree"
+"Academia" = "Academy"
+"Vectors" = "Vector (mathematics and physics)"
+"Maturity" = "Maturity (psychological)"
+"Humanity" = "Humanity (virtue)"
+"Foresight" = "Foresight (psychology)"
+"Goals (concept)" = "Goal"
+"Relationships (human)" = "Interpersonal relationship"
+"Willpower" = "Self-control"
+"conflict (concept)" = "Conflict (psychology)"
+"trust (concept)" = "Trust (social science)"
+"Leverage" = "Leverage (finance)"
+"networking" = "Computer network"
+"Hosting" = "Web hosting service"
+"grinding" = "Grinding (video games)"
+"Competence" = "Competence (human resources)"
+"prestige" = "Prestige (sociolinguistics)"
