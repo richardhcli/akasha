@@ -304,3 +304,14 @@ Milestone DoD: `docs/build-plan.md` M20. Rulings: `docs/spec-questions.md` M20-A
 | T21.7 | Break import cycles | TODO | After T21.6. |
 | T21.8 | Efficiency | DONE | 2026-09-24. Measured with `cProfile` on a 5,000-block file: one-line edit cycle 273 → 102 ms, quiet cycle 87 → 45 ms (500 blocks: 24 → 9.5 ms and 17 → 4 ms); `akasha` import 162 → 47 ms (httpx, store and API models are now lazy; `--help` 0.25 → 0.18 s). Changes: no base projection on an edit cycle, final parse reused when nothing was minted, `hub_state_for` copies only changed blocks and reads through `store.get_projection_bulk` (one JOIN, body decoded in SQLite), cached `ids.is_valid`, `"^tm-"`/`"[["` prefilters in the parser, cached EOL-anchor extraction. Minting costs 0.25 ms/block on disk, so batching transactions was not worth it. Tests: equivalence of the light read, `is_valid` vs `validate`, import weight. |
 | T21.9 | Verbosity | DONE | 2026-09-25. Source 13,086 → 11,169 lines with the code untouched: docstrings and comments condensed (AST equality, docstrings ignored, checked on every file; CLI command docstrings and route/pydantic docstrings kept because they are `--help` and OpenAPI text). One code dedupe: `_queue_violation` in `sync/reconcile.py` replaces three copies of the review-queue boilerplate. `make check` 887 passed, `make battery` 58 passed. |
+
+## M22 — AI-memory backend: retrieval, journal nodes, contradiction override
+
+| Task | Title | Status | Notes |
+|---|---|---|---|
+| T22.1 | `GET /v1/search` options | DONE | 2026-09-29. `mode=any` (OR, bm25), `limit`, `type`, `status`; defaults unchanged. `tests/integration/test_memory_m22.py`. `make check` 897 passed (incl. chromium; ruff, pyright clean), `make battery` 58 passed; OpenAPI snapshot regenerated (additive only, +137 lines). Not committed. |
+| T22.2 | Unicode query terms | DONE | 2026-09-29. `_FTS5_TERM_RE = [^\W_]+` (also fixes contradiction candidates). `test_unicode_terms_match`. |
+| T22.3 | CLI parity for search | DONE | 2026-09-29. `akasha search --any --limit --type --live`; `test_cli.py::test_search_any_limit_type_live_options`. |
+| T22.4 | `journal` node type | DONE | 2026-09-29. Ruling M22-D; no migration, no maturity exemption. `test_journal_node_type`. |
+| T22.5 | Contradiction flag and supersede override | DONE | 2026-09-29. Ruling M22-C: `contradicts` edge enqueues a `contradiction` review; `POST /v1/nodes/{id}/supersede` + `akasha supersede`; `invalidate(exclude_srcs)`. 4 tests in `test_memory_m22.py`, dry-run case row. |
+

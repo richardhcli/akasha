@@ -248,3 +248,26 @@ entry format above.
 
   Existing pause reviews are dismissed on the file's next cycle; `/sync/status` keeps `pauses` as an always-empty list. Conservative (cloud) roots keep routing repairs to review (unchanged; not covered by the ruling). **Design invariant 3 (machine never creates tracked truth):** the new node's text is the human's own line, already tracked under the old id; the daemon only assigns it an identity, exactly as it does for a human-typed `^tm-new`. **Consequence to be aware of:** a formatter storm that strips anchors *and* rewrites text hard-deletes that file's unmirrored S0 nodes (text survives as prose and in the new nodes; hub history for those nodes goes). Protected changes, by name, in T20.4: battery E13 (redefined, kept inside the silent-guess aggregate), golden `e13-pause-storm`, `tests/unit/contract/test_pause_and_diff.py`, the pause cases in `tests/golden/test_serialization.py`.
 - **Resolution:** resolved 2026-09-24 -- user ruling ("do not pause a file: always seek to resolve as fast as possible, else change the ID"); the per-violation table is the assistant's reading of it, shown to the user.
+
+## M22-A — Should agents write without human review by default?
+- **Where:** PRD §7.11 (token classes: agent tokens propose-only, write needs deliberate friction), pillar 2, design invariant 3; `docs/mvp-spec.md` §4.11 preamble; `api/deps.py::mutation_gate`.
+- **User ruling (2026-09-28, kb-io-bench M13 decision b):** "by default, human review should not be needed."
+- **Narrowest reading taken:** not implemented as a product default in M22. The M13 benchmark harness writes with the human token, disclosed as "benchmark mode: all captures pre-approved". Changing the agent-token default overturns PRD §7.11 and the spec's propose-only rule and touches the security model, so it needs its own task with explicit scope (e.g. a write-capable agent token class as the default).
+- **Resolution:** open — the ruling is recorded; the product change awaits its own task.
+
+## M22-B — Does newer-fact supersession reuse tombstone/redirect (refactor semantics)?
+- **Where:** `docs/mvp-spec.md` §4.5/§4.11; `store.supersede_node`; PRD §7.4 (redirects are defined for split/merge).
+- **Narrowest reading taken:** yes, with no schema change. Supersession = `contradicts` edge (newer → older) + tombstone + `redirects` row to the newer node. Unlike `delete_node`, the `contradicts` edges from the newer node stay on the tombstoned node (a redirect would turn them into self-loops), and the retraction's invalidation walk skips the newer node. A dedicated `supersedes` edge type would be a schema addition ("guilty until proven necessary"); not added.
+- **Resolution:** open — narrowest reading implemented (T22.5).
+
+## M22-C — Contradictions: flag for review, but a confident agent may override
+- **Where:** `docs/mvp-spec.md` §4.10, §4.11 (T10.2b: capture surfacing "enqueues no review item").
+- **User ruling (2026-09-28, M13 decision c):** "a contradiction is flagged for human review, but should the agent be absolutely confident in the new fact (eg: testbench setting), then the agent should be able to override the old fact directly."
+- **Reading taken:** an explicit `contradicts` edge enqueues one `contradiction` review on the contradicted node (a new `cause_kind`; the column is TEXT, no migration). Capture candidates (T10.2b) still enqueue nothing, which keeps review inflow bounded (PRD F9). The override is `POST /v1/nodes/{id}/supersede`, which records the contradiction, resolves its review `retracted` and tombstones the old node (M22-B). Agent tokens still get a proposal for it (M22-A).
+- **Resolution:** resolved 2026-09-28 — user ruling; implemented in T22.5.
+
+## M22-D — Prose memory as a node type
+- **Where:** PRD §7.1 (node types, schema frozen for v1), pillar 1 / F2 (prose excluded), `docs/mvp-spec.md` §4.2 and §8 non-goals ("prose management").
+- **User ruling (2026-09-28, M13 decision d):** "'prose memory' becomes a new data node (eg 'journal'). Thus, it still fits in the vision."
+- **Reading taken:** `NodeType` gains `journal`: the verbatim record of what was said or read, which claims distilled from it `cite`. It is stored and searched; it is never transcluded (F2 is about transclusion of prose, and still holds). No maturity or facet-coverage exemption was added (narrowest), so a journal climbs the ladder like any other type.
+- **Resolution:** resolved 2026-09-28 — user ruling; implemented in T22.4.

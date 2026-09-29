@@ -333,6 +333,21 @@ def test_search_round_trip(daemon):
     assert "fox" in results[0]["body"]
 
 
+def test_search_any_limit_type_live_options(daemon):
+    """T22.3: CLI parity with GET /v1/search's T22.1 options."""
+    _run(daemon, "new", "claim", "the quick brown fox jumps")
+    _run(daemon, "new", "journal", "today I saw a fox and a heron")
+    assert json.loads(_run(daemon, "search", "fox heron").output)["results"][0]["node_type"] == (
+        "journal"
+    )  # all terms: only the journal holds both
+    anyr = json.loads(_run(daemon, "search", "fox heron", "--any").output)["results"]
+    assert len(anyr) == 2
+    one = json.loads(_run(daemon, "search", "fox heron", "--any", "--limit", "1").output)
+    assert len(one["results"]) == 1
+    typed = _run(daemon, "search", "fox", "--any", "--type", "claim", "--live")
+    assert [r["node_type"] for r in json.loads(typed.output)["results"]] == ["claim"]
+
+
 def test_search_no_match_returns_empty_results(daemon):
     _run(daemon, "new", "claim", "the quick brown fox jumps")
     result = _run(daemon, "search", "zzznomatchzzz")

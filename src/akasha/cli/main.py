@@ -918,7 +918,7 @@ def render_file(ctx: typer.Context, file: str) -> None:
 def new(
     ctx: typer.Context,
     node_type: str = typer.Argument(
-        ..., help="entity|definition|claim|relation|proof|evidence|task"
+        ..., help="entity|definition|claim|relation|proof|evidence|task|journal"
     ),
     body: str = typer.Argument(..., help="node body text"),
     facet: list[str] = typer.Option([], "--facet", help="name=span, repeatable"),
@@ -999,10 +999,39 @@ def rm(
 
 
 @app.command()
-def search(ctx: typer.Context, q: str) -> None:
-    """GET /v1/search?q=."""
+def search(
+    ctx: typer.Context,
+    q: str,
+    any_term: bool = typer.Option(False, "--any", help="match any term (bm25-ranked)"),
+    limit: int | None = typer.Option(None, "--limit", min=1, help="at most N results"),
+    node_type: str | None = typer.Option(None, "--type", help="only this node type"),
+    live: bool = typer.Option(False, "--live", help="only live nodes (no tombstones)"),
+) -> None:
+    """GET /v1/search?q= (T22.3: --any, --limit, --type, --live)."""
     state = _state(ctx)
-    result = _request(state, "GET", "/v1/search", params={"q": q})
+    params: dict[str, Any] = {"q": q}
+    if any_term:
+        params["mode"] = "any"
+    if limit is not None:
+        params["limit"] = limit
+    if node_type is not None:
+        params["type"] = node_type
+    if live:
+        params["status"] = "live"
+    result = _request(state, "GET", "/v1/search", params=params)
+    _echo_ok(state, result)
+
+
+@app.command()
+def supersede(
+    ctx: typer.Context,
+    node_id: str,
+    by: str = typer.Option(..., "--by", help="the newer node that replaces NODE_ID"),
+) -> None:
+    """POST /v1/nodes/{id}/supersede (T22.5): NODE_ID is overridden by --by (tombstone +
+    redirect; the contradiction is recorded and its review closed)."""
+    state = _state(ctx)
+    result = _mutate(state, "POST", f"/v1/nodes/{node_id}/supersede", {"by": by})
     _echo_ok(state, result)
 
 

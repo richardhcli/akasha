@@ -54,7 +54,11 @@ def _already_unresolved_stale(conn: sqlite3.Connection, src: str) -> bool:
 
 
 def invalidate(
-    conn: sqlite3.Connection, node_id: str, commit: str, touched: set[str]
+    conn: sqlite3.Connection,
+    node_id: str,
+    commit: str,
+    touched: set[str],
+    exclude_srcs: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Walk live subscriber edges into ``node_id`` and flag stale subscribers (spec §4.9).
 
@@ -63,13 +67,15 @@ def invalidate(
     (composes only) satisfies ``_composes_touched_facet``. For each ``src`` it enqueues a
     ``facet_break`` review unless ``src`` already has an open one (the non-transitive damper).
     Returns the new review rows (``[]`` if unaffected). Opens no transaction; see the module
-    docstring.
+    docstring. ``exclude_srcs`` (T22.5) skips subscribers that are not dependents, e.g. the
+    superseding node in ``store.supersede_node``.
     """
     live_edges = store.find_live_edges(conn, dst=node_id)
     subs = [
         e
         for e in live_edges
         if e.mode == "track"
+        and e.src not in exclude_srcs
         and e.edge_type in _SUBSCRIBER_EDGE_TYPES
         and (
             (e.facet_binding in touched)

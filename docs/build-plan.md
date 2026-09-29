@@ -800,3 +800,38 @@ Measured hotspots: `store.py` 2 597 lines, `reconcile.py` 1 781, `cli/main.py` 1
 | T21.7 | Break the import cycles behind the 17 local imports (injected hooks) | T21.6 |
 | T21.8 | **Efficiency** (measured, no behaviour change): skip the wasted projection and re-parse in an edit cycle, cache id checksums, project files with one light read, prefilter prose lines in the parser, lazy heavy CLI imports | — |
 | T21.9 | **Verbosity**: condense internal docstrings/comments that narrate task history (AST-verified: the code, docstrings aside, must be identical); dedupe repeated review-queue and repair boilerplate | — |
+
+---
+
+## M22 — AI-memory backend: retrieval, journal nodes, contradiction override (Depends on: nothing)
+
+User request 2026-09-28 (kb-io-bench M13, `experiments/kb-io-bench/M13-PLAN.md`): make akasha able to store and serve "memory" for an external memory benchmark (MemoryAgentBench, Conflict Resolution). Storage already worked (`POST /v1/nodes`); retrieval did not. Rulings: `docs/spec-questions.md` M22-A…D.
+
+### T22.1 — `GET /v1/search` options
+- **Goal** — a natural-language question can be the query, and results can be capped and filtered.
+- **Files** — `src/akasha/kernel/store.py` (`search`, `_fts5_safe_match_query`), `src/akasha/api/routes/search.py`, `docs/mvp-spec.md` §4.5/§4.11, `docs/api-snapshot/openapi.json`, `tests/integration/test_memory_m22.py`.
+- **Steps** — `mode=all|any` (any = OR-joined terms, bm25-ranked, the query `find_contradiction_candidates` already builds), `limit`, `type`, `status`; every default keeps today's behaviour.
+- **Verify** — `uv run pytest tests/integration/test_memory_m22.py`; `make check`; `make battery`.
+- **DoD** — tests pass; the snapshot diff is additive only.
+
+### T22.2 — Unicode query terms
+- **Goal** — "pesäpallo" matches; the ASCII-only term class split it into "pes" + "pallo".
+- **Files** — `src/akasha/kernel/store.py` (`_FTS5_TERM_RE`, shared with `find_contradiction_candidates`), `tests/integration/test_memory_m22.py`.
+- **Verify / DoD** — `test_unicode_terms_match` passes; `make check`.
+
+### T22.3 — CLI parity for search
+- **Goal** — `akasha search Q [--any] [--limit N] [--type T] [--live]` (PRD §7.11 API-first parity).
+- **Files** — `src/akasha/cli/main.py`, `tests/integration/test_cli.py`, `docs/mvp-spec.md` §4.12.
+- **Verify / DoD** — `uv run pytest tests/integration/test_cli.py -k search`; `make check`.
+
+### T22.4 — `journal` node type (ruling M22-D)
+- **Goal** — prose memory is a first-class node; claims distilled from it `cite` it.
+- **Files** — `src/akasha/kernel/model.py`, `src/akasha/cli/main.py` (help text), `docs/mvp-spec.md` §4.2, `tests/integration/test_memory_m22.py`.
+- **Verify / DoD** — `test_journal_node_type`; `make check`; no migration (`node_type` is TEXT).
+
+### T22.5 — Contradiction flag and supersede override (ruling M22-C)
+- **Goal** — a `contradicts` edge flags the contradicted node for review; `POST /v1/nodes/{id}/supersede {"by"}` is the confident override.
+- **Files** — `src/akasha/kernel/store.py` (`create_edge` → `_create_edge_within_transaction`, `supersede_node`), `src/akasha/tms/invalidate.py` (`exclude_srcs`), `src/akasha/api/routes/nodes.py`, `src/akasha/cli/main.py` (`supersede`), `docs/mvp-spec.md` §4.4/§4.5/§4.10/§4.11/§4.12, `docs/api-snapshot/openapi.json`, `tests/integration/test_memory_m22.py`, `tests/integration/test_cli_dry_run.py` (the new verb's case row).
+- **Verify** — `uv run pytest tests/integration/test_memory_m22.py tests/integration/test_cli_dry_run.py`; `make check`; `make battery`.
+- **DoD** — the old node is tombstoned with a redirect, its `contradiction` review resolved `retracted`, dependents flagged stale and moved to the successor, the challenger not flagged, and the `contradicts` edge kept on the old node; agent tokens get a proposal.
+

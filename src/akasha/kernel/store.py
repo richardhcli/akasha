@@ -1187,40 +1187,62 @@ def create_edge(
     The ``Edge`` model validates ``facet_binding`` (justification types need a facet id or ``"*"``;
     ``None`` only for composes/redirects_to): ``pydantic.ValidationError``, nothing written,
     otherwise. Mints an edge id (bound 10 retries, then ``IdMintError``) and recomputes ``dst``'s
-    maturity.
+    maturity. A ``contradicts`` edge also flags ``dst`` for review (T22.5, spec §4.10).
     """
-    now = _now()
     with conn:
-        edge_id = _mint_unique_edge_id(conn)
-        # Constructing Edge runs its model_validator, which is the single
-        # source of truth for the facet_binding rule (spec §4.2); this
-        # raises before any row is written if the rule is violated.
-        edge = Edge(
-            id=edge_id,
-            src=src,
-            dst=dst,
-            edge_type=edge_type,
-            facet_binding=facet_binding,
-            provenance=provenance,  # type: ignore[arg-type]  # validated by pydantic below
-            mode=mode,  # type: ignore[arg-type]  # validated by pydantic below
-            pinned_commit=pinned_commit,
+        return _create_edge_within_transaction(
+            conn, src, dst, edge_type, facet_binding, provenance, mode, pinned_commit
         )
-        conn.execute(
-            "INSERT INTO edges (id, src, dst, edge_type, facet_binding, provenance, mode, "
-            "pinned_commit, created_at, retracted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
-            (
-                edge.id,
-                edge.src,
-                edge.dst,
-                edge.edge_type,
-                edge.facet_binding,
-                edge.provenance,
-                edge.mode,
-                edge.pinned_commit,
-                now,
-            ),
+
+
+def _create_edge_within_transaction(
+    conn: sqlite3.Connection,
+    src: str,
+    dst: str,
+    edge_type: EdgeType,
+    facet_binding: str | None,
+    provenance: str,
+    mode: str = "track",
+    pinned_commit: str | None = None,
+) -> Edge:
+    """Body of ``create_edge`` without its own transaction (for ``supersede_node``)."""
+    now = _now()
+    edge_id = _mint_unique_edge_id(conn)
+    # Constructing Edge runs its model_validator, which is the single
+    # source of truth for the facet_binding rule (spec §4.2); this
+    # raises before any row is written if the rule is violated.
+    edge = Edge(
+        id=edge_id,
+        src=src,
+        dst=dst,
+        edge_type=edge_type,
+        facet_binding=facet_binding,
+        provenance=provenance,  # type: ignore[arg-type]  # validated by pydantic below
+        mode=mode,  # type: ignore[arg-type]  # validated by pydantic below
+        pinned_commit=pinned_commit,
+    )
+    conn.execute(
+        "INSERT INTO edges (id, src, dst, edge_type, facet_binding, provenance, mode, "
+        "pinned_commit, created_at, retracted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+        (
+            edge.id,
+            edge.src,
+            edge.dst,
+            edge.edge_type,
+            edge.facet_binding,
+            edge.provenance,
+            edge.mode,
+            edge.pinned_commit,
+            now,
+        ),
+    )
+    if edge.edge_type == "contradicts":
+        # T22.5 (user ruling M22-C): an explicit contradiction flags the contradicted node
+        # (dst) for human review; mere capture candidates still enqueue nothing (T10.2b).
+        enqueue_review_within_transaction(
+            conn, edge.dst, "contradiction", cause_ref=edge.id, facet=edge.facet_binding
         )
-        _recompute_maturity(conn, edge.dst)
+    _recompute_maturity(conn, edge.dst)
     return edge
 
 
@@ -1311,37 +1333,60 @@ def neighborhood(conn: sqlite3.Connection, node_id: str, hops: int = 1) -> dict[
     }
 
 
-_FTS5_TERM_RE = re.compile(r"[A-Za-z0-9]+")
+# Unicode letter/digit runs, as FTS5's default ``unicode61`` tokenizer splits them (T22.2): an
+# ASCII-only class split "pesäpallo" into "pes" + "pallo", which never match the indexed token.
+_FTS5_TERM_RE = re.compile(r"[^\W_]+")
 
 
-def _fts5_safe_match_query(q: str) -> str | None:
-    """Tokenize ``q`` to alphanumeric terms and rebuild a syntax-safe FTS5 MATCH string.
+def _fts5_safe_match_query(q: str, mode: Literal["all", "any"] = "all") -> str | None:
+    """Tokenize ``q`` to Unicode alphanumeric terms and rebuild a syntax-safe FTS5 MATCH string.
 
     A raw query reaches FTS5's expression parser, which 500s on everyday input (a bare ``-``,
     ``"``, ``AND``/``OR``/``NOT``/``NEAR``, ``:``, parentheses; T9.7 reproduced it with
-    "already-tracked"). Alphanumeric terms are double-quoted (no escaping needed) and space-joined
-    (implicit AND). Returns ``None`` when there are no terms, since an empty MATCH is itself a
-    syntax error.
+    "already-tracked"). Terms are double-quoted (no escaping needed) and joined by a space
+    (implicit AND, ``mode="all"``) or ``OR`` (``mode="any"``, T22.1). Returns ``None`` when there
+    are no terms, since an empty MATCH is itself a syntax error.
     """
     terms = _FTS5_TERM_RE.findall(q)
     if not terms:
         return None
-    return " ".join(f'"{term}"' for term in terms)
+    return (" OR " if mode == "any" else " ").join(f'"{term}"' for term in terms)
 
 
-def search(conn: sqlite3.Connection, q: str) -> list[Node]:
-    """Full-text search over node bodies via ``nodes_fts`` (spec §4.5, §4.4), best match first.
+def search(
+    conn: sqlite3.Connection,
+    q: str,
+    *,
+    mode: Literal["all", "any"] = "all",
+    limit: int | None = None,
+    node_type: str | None = None,
+    status: str | None = None,
+) -> list[Node]:
+    """Full-text search over node bodies via ``nodes_fts`` (spec §4.5, §4.4, §4.11), best first.
 
-    Read-only; ranked by FTS5 ``rank``; returns each match's head content. ``q`` goes through
-    ``_fts5_safe_match_query``; a query with no ASCII alphanumeric terms returns ``[]`` (a known
-    limitation shared with ``find_contradiction_candidates``).
+    Read-only; ranked by FTS5 ``rank`` (bm25); returns each match's head content. ``q`` goes
+    through ``_fts5_safe_match_query``; a query with no alphanumeric terms returns ``[]``.
+    T22.1 options, all defaulting to the original behaviour: ``mode="any"`` matches nodes holding
+    any term (a natural-language question as the query), ``limit`` caps the result, and
+    ``node_type`` / ``status`` filter on the node row (tombstoned nodes keep their FTS row).
     """
-    match_query = _fts5_safe_match_query(q)
+    match_query = _fts5_safe_match_query(q, mode)
     if match_query is None:
         return []
-    rows = conn.execute(
-        "SELECT id FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank", (match_query,)
-    ).fetchall()
+    sql = "SELECT nodes_fts.id FROM nodes_fts JOIN nodes ON nodes.id = nodes_fts.id "
+    sql += "WHERE nodes_fts MATCH ?"
+    params: list[Any] = [match_query]
+    if node_type is not None:
+        sql += " AND nodes.node_type = ?"
+        params.append(node_type)
+    if status is not None:
+        sql += " AND nodes.status = ?"
+        params.append(status)
+    sql += " ORDER BY nodes_fts.rank"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
     return [get_node(conn, row[0]) for row in rows]
 
 
@@ -1495,6 +1540,69 @@ def delete_node(
             successor = redirect_to[0]
             _reassign_inbound_edges(conn, node_id, successor)
             _recompute_maturity(conn, successor)
+
+
+def supersede_node(conn: sqlite3.Connection, node_id: str, by: str) -> dict[str, Any]:
+    """Override ``node_id`` with the newer node ``by``, one transaction (T22.5, spec §4.5).
+
+    User ruling M22-C: a contradiction is flagged for human review, but an agent absolutely
+    confident in the new fact may override the old one directly. This is that override:
+    ``delete_node(node_id, redirect_to=[by])`` plus the contradiction's bookkeeping:
+
+    1. the retraction's invalidation walk flags ``node_id``'s subscribers (spec §4.9), except
+       ``by`` itself, whose ``contradicts`` edge is not a dependency;
+    2. a live ``contradicts`` edge ``by -> node_id`` (binding ``"*"``, provenance ``human``) is
+       created unless one exists, and every open ``contradiction`` review on ``node_id`` is
+       resolved ``retracted``;
+    3. ``node_id`` is tombstoned with a ``redirects`` row to ``by``; its other live inbound edges
+       move to ``by``, while the ``contradicts`` edges from ``by`` stay on ``node_id`` as the record
+       of why it was superseded (moving them would make self-loops).
+
+    Raises ``NodeNotFoundError``, or ``ValueError`` if the ids are equal or either node is not
+    live. Returns ``{id, superseded_by, contradicts_edge, reviews_resolved}``.
+    """
+    if node_id == by:
+        raise ValueError("a node cannot supersede itself")
+    now = _now()
+    with conn:
+        old, new = get_node(conn, node_id), get_node(conn, by)
+        if old.status != "live" or new.status != "live":
+            states = f"{node_id}: {old.status}, {by}: {new.status}"
+            raise ValueError(f"both nodes must be live ({states})")
+        from akasha.tms import invalidate
+
+        head_hash = conn.execute(
+            "SELECT head_hash FROM nodes WHERE id=?", (node_id,)
+        ).fetchone()[0]
+        invalidate.invalidate(
+            conn, node_id, head_hash, {f.facet_id for f in old.facets}, exclude_srcs={by}
+        )
+        existing = find_live_edges(conn, src=by, dst=node_id, edge_type="contradicts")
+        edge = existing[0] if existing else _create_edge_within_transaction(
+            conn, by, node_id, "contradicts", "*", "human"
+        )
+        resolved = [
+            resolve_review_within_transaction(conn, r["id"], "retracted")["id"]
+            for r in find_open_reviews(conn, node_id=node_id, cause_kind="contradiction")
+        ]
+        conn.execute("UPDATE nodes SET status='tombstone', updated_at=? WHERE id=?", (now, node_id))
+        conn.execute(
+            "INSERT INTO redirects (old_id, successors, created_at) VALUES (?, ?, ?)",
+            (node_id, canonical_json([by]).decode("utf-8"), now),
+        )
+        conn.execute(
+            "UPDATE edges SET dst=? WHERE dst=? AND retracted_at IS NULL "
+            "AND NOT (src=? AND edge_type='contradicts')",
+            (by, node_id, by),
+        )
+        _recompute_maturity(conn, by)
+        _recompute_maturity(conn, node_id)
+    return {
+        "id": node_id,
+        "superseded_by": by,
+        "contradicts_edge": edge.id,
+        "reviews_resolved": resolved,
+    }
 
 
 def split_node(

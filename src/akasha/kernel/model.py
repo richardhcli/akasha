@@ -11,7 +11,11 @@ from typing import Literal
 
 from pydantic import BaseModel, model_validator
 
-NodeType = Literal["entity", "definition", "claim", "relation", "proof", "evidence", "task"]
+# "journal" (T22.4, user ruling 2026-09-28, docs/spec-questions.md M22-D): prose memory, the
+# verbatim record of what was said or read; claims distilled from it `cite` it.
+NodeType = Literal[
+    "entity", "definition", "claim", "relation", "proof", "evidence", "task", "journal"
+]
 EdgeType = Literal[
     "composes", "supports", "contradicts", "depends_on", "derived_from", "cites", "redirects_to"
 ]

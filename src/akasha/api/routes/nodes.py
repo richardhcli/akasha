@@ -346,6 +346,39 @@ def merge_nodes(
     return {"redirect": redirect}
 
 
+class SupersedeBody(BaseModel):
+    by: str
+
+
+@router.post("/nodes/{node_id}/supersede")
+def supersede_node(
+    node_id: str,
+    payload: SupersedeBody,
+    request: Request,
+    response: Response,
+    conn: Any = Depends(get_conn),
+    ctx: auth.AuthContext = Depends(require_auth),
+) -> dict[str, Any]:
+    """T22.5 (user ruling M22-C): override ``node_id`` with the newer node ``by`` — the
+    contradiction is recorded and closed, ``node_id`` tombstoned with a redirect to ``by`` (see
+    ``store.supersede_node``). Agent tokens get a proposal, like every mutation."""
+    try:
+        store.get_node(conn, node_id)  # existence check -> 404 before proposalizing/mutating
+    except NodeNotFoundError as exc:
+        raise _not_found(exc) from exc
+    review = mutation_gate(conn, ctx, request, node_id=node_id, payload=payload.model_dump())
+    if review is not None:
+        return _proposal_response(response, review)
+    try:
+        result = store.supersede_node(conn, node_id, payload.by)
+    except NodeNotFoundError as exc:
+        raise _not_found(exc) from exc
+    except ValueError as exc:
+        raise ApiError(400, "E_INVALID", str(exc)) from exc
+    _reproject(request, conn, [node_id, payload.by])
+    return result
+
+
 @router.post("/nodes/{node_id}/vet")
 def vet_node(
     node_id: str,

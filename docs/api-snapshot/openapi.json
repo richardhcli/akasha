@@ -391,6 +391,19 @@
         "title": "SplitBody",
         "type": "object"
       },
+      "SupersedeBody": {
+        "properties": {
+          "by": {
+            "title": "By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "by"
+        ],
+        "title": "SupersedeBody",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -999,6 +1012,61 @@
         ]
       }
     },
+    "/v1/nodes/{node_id}/supersede": {
+      "post": {
+        "description": "T22.5 (user ruling M22-C): override ``node_id`` with the newer node ``by`` \u2014 the\ncontradiction is recorded and closed, ``node_id`` tombstoned with a redirect to ``by`` (see\n``store.supersede_node``). Agent tokens get a proposal, like every mutation.",
+        "operationId": "supersede_node_v1_nodes__node_id__supersede_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "node_id",
+            "required": true,
+            "schema": {
+              "title": "Node Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupersedeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Supersede Node V1 Nodes  Node Id  Supersede Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Supersede Node",
+        "tags": [
+          "nodes"
+        ]
+      }
+    },
     "/v1/nodes/{node_id}/vet": {
       "post": {
         "operationId": "vet_node_v1_nodes__node_id__vet_post",
@@ -1160,6 +1228,7 @@
     },
     "/v1/search": {
       "get": {
+        "description": "T22.1: ``mode=any`` (any term, bm25-ranked), ``limit``, ``type`` and ``status`` filters;\nevery option defaults to the original behaviour (all terms, no cap, no filter).",
         "operationId": "search_v1_search_get",
         "parameters": [
           {
@@ -1169,6 +1238,74 @@
             "schema": {
               "title": "Q",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "any"
+              ],
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "live",
+                    "retracted",
+                    "tombstone"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
             }
           }
         ],

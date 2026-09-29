@@ -221,6 +221,13 @@ DRY_RUN_CASES: list[DryRunCase] = [
         body_check=_assert_body_has("ids"),
     ),
     DryRunCase(
+        id="supersede",
+        argv=["supersede", "dummynode1", "--by", "dummynode2"],
+        method="POST",
+        path="/v1/nodes/dummynode1/supersede",
+        body_check=_assert_body_has("by"),
+    ),
+    DryRunCase(
         id="vet",
         argv=["vet", "dummynode1"],
         method="POST",

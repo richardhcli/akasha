@@ -9,7 +9,7 @@ proposalized).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query
 
@@ -23,8 +23,14 @@ router = APIRouter(prefix="/v1", tags=["search"])
 @router.get("/search")
 def search(
     q: str = Query(...),
+    mode: Literal["all", "any"] = Query("all"),
+    limit: int | None = Query(None, ge=1),
+    node_type: str | None = Query(None, alias="type"),
+    status: Literal["live", "retracted", "tombstone"] | None = Query(None),
     conn: Any = Depends(get_conn),
     _ctx: auth.AuthContext = Depends(require_auth),
 ) -> dict[str, Any]:
-    nodes = store.search(conn, q)
+    """T22.1: ``mode=any`` (any term, bm25-ranked), ``limit``, ``type`` and ``status`` filters;
+    every option defaults to the original behaviour (all terms, no cap, no filter)."""
+    nodes = store.search(conn, q, mode=mode, limit=limit, node_type=node_type, status=status)
     return {"results": [node.model_dump() for node in nodes]}
