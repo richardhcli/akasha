@@ -1,0 +1,222 @@
+{
+ "A_descriptive": {
+  "consistent_rate_multi": null,
+  "records": 0,
+  "stale_rate_multi": null
+ },
+ "complete": false,
+ "n_multi": 35,
+ "n_noprefix": 26,
+ "n_single": 20,
+ "n_unseen": 20,
+ "rw_records": {
+  "Ap": 0,
+  "B": 75,
+  "C": 75,
+  "Cp": 0
+ },
+ "strata": {
+  "basic-memory": {
+   "H1": {
+    "akasha_better": 0,
+    "diff": null,
+    "diff_ci95": null,
+    "n": 0,
+    "p_holm": 1.0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": null,
+    "rate_plain": null
+   },
+   "H1_noprefix": {
+    "akasha_better": 0,
+    "diff": null,
+    "diff_ci95": null,
+    "n": 0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": null,
+    "rate_plain": null
+   },
+   "H1_unseen": {
+    "akasha_better": 0,
+    "diff": null,
+    "diff_ci95": null,
+    "n": 0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": null,
+    "rate_plain": null
+   },
+   "H2": {
+    "akasha_better": 0,
+    "diff": null,
+    "diff_ci95": null,
+    "n": 0,
+    "p_holm": 1.0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": null,
+    "rate_plain": null,
+    "stale_rate_akasha": null,
+    "stale_rate_plain": null
+   },
+   "N_read": {
+    "a_better": 2,
+    "b_better": 1,
+    "diff_ci95": [
+     -0.0333,
+     0.0833
+    ],
+    "mean_diff": 0.0167,
+    "questions": 60,
+    "sign_p": 1.0,
+    "units": 60
+   },
+   "N_write": {
+    "a_better": 4,
+    "b_better": 5,
+    "diff_ci95": [
+     -0.2333,
+     0.1389
+    ],
+    "mean_diff": -0.0444,
+    "questions": 55,
+    "sign_p": 1.0,
+    "units": 15
+   },
+   "S": {
+    "akasha_better": 0,
+    "diff": null,
+    "diff_ci95": null,
+    "n": 0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": null,
+    "rate_plain": null
+   },
+   "akasha": "B",
+   "cost": {
+    "B": {
+     "tokens_per_task": 164149.4643,
+     "writer_tool_calls": 9.8929
+    },
+    "C": {
+     "tokens_per_task": null,
+     "writer_tool_calls": null
+    }
+   },
+   "plain": "C",
+   "records": {
+    "B": 28,
+    "C": 0
+   }
+  },
+  "files": {
+   "H1": {
+    "akasha_better": 0,
+    "diff": 0.0,
+    "diff_ci95": [
+     0.0,
+     0.0
+    ],
+    "n": 35,
+    "p_holm": 1.0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": 1.0,
+    "rate_plain": 1.0
+   },
+   "H1_noprefix": {
+    "akasha_better": 0,
+    "diff": 0.0,
+    "diff_ci95": [
+     0.0,
+     0.0
+    ],
+    "n": 26,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": 1.0,
+    "rate_plain": 1.0
+   },
+   "H1_unseen": {
+    "akasha_better": 0,
+    "diff": 0.0,
+    "diff_ci95": [
+     0.0,
+     0.0
+    ],
+    "n": 20,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": 1.0,
+    "rate_plain": 1.0
+   },
+   "H2": {
+    "akasha_better": 0,
+    "diff": 0.0,
+    "diff_ci95": [
+     0.0,
+     0.0
+    ],
+    "n": 35,
+    "p_holm": 1.0,
+    "p_one_sided": 1.0,
+    "plain_better": 0,
+    "rate_akasha": 1.0,
+    "rate_plain": 1.0,
+    "stale_rate_akasha": 0.0,
+    "stale_rate_plain": 0.0
+   },
+   "N_read": {
+    "a_better": 0,
+    "b_better": 0,
+    "diff_ci95": null,
+    "mean_diff": null,
+    "questions": 0,
+    "sign_p": 1.0,
+    "units": 0
+   },
+   "N_write": {
+    "a_better": 0,
+    "b_better": 0,
+    "diff_ci95": null,
+    "mean_diff": null,
+    "questions": 0,
+    "sign_p": 1.0,
+    "units": 0
+   },
+   "S": {
+    "akasha_better": 2,
+    "diff": 0.05,
+    "diff_ci95": [
+     -0.1,
+     0.2
+    ],
+    "n": 20,
+    "p_one_sided": 0.5,
+    "plain_better": 1,
+    "rate_akasha": 0.8,
+    "rate_plain": 0.75
+   },
+   "akasha": "Ap",
+   "cost": {
+    "Ap": {
+     "tokens_per_task": 49721.4182,
+     "writer_tool_calls": 9.8
+    },
+    "Cp": {
+     "tokens_per_task": 41123.4727,
+     "writer_tool_calls": 8.5818
+    }
+   },
+   "plain": "Cp",
+   "records": {
+    "Ap": 55,
+    "Cp": 55
+   }
+  }
+ },
+ "verdict": "INCOMPLETE: interim validity look only; no claim."
+}
