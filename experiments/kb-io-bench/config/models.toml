@@ -1,0 +1,28 @@
+# v2 agent models (V2-PLAN §6). Any OpenAI-compatible chat endpoint. `tool_mode`:
+#   native = OpenAI `tools`; text = kbio.textmode (catalogue in the system prompt, fenced calls);
+#   auto   = decided per model by kbio.textmode.pick_tool_mode before a run (mode is recorded).
+# Keys are read from the named environment variable only; never written here.
+
+[[model]]
+name = "gpt-oss:120b"
+base_url = "https://genai.rcac.purdue.edu/api/chat/completions"
+api_key_env = "PURDUE_GENAI_API_KEY"
+model = "gpt-oss:120b"
+max_tokens = 2000
+tool_mode = "native"  # v1: native calls work (loop v2 carries reasoning back)
+
+[[model]]
+name = "llama3.3:70b"
+base_url = "https://genai.rcac.purdue.edu/api/chat/completions"
+api_key_env = "PURDUE_GENAI_API_KEY"
+model = "llama3.3:70b"
+max_tokens = 2000
+tool_mode = "auto"  # v1: printed a tool schema as text on step 1; the probe decides
+
+[[model]]
+name = "qwen3:32b"
+base_url = "https://genai.rcac.purdue.edu/api/chat/completions"
+api_key_env = "PURDUE_GENAI_API_KEY"
+model = "qwen3:32b"
+max_tokens = 2000
+tool_mode = "auto"

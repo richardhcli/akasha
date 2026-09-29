@@ -1,0 +1,15 @@
+# v2 plain-files contender: v1's condition C' tools (list_dir / grep / read_file / write_file /
+# edit_file, pure Python) served over MCP by kbio.mcp_wrap on a markdown vault, no index.
+name = "files"
+corpus = "md"
+
+[mcp]
+command = ["{python}", "-m", "kbio.mcp_wrap", "files", "--vault", "{store}/vault"]
+
+[tools]
+read = ["list_dir", "grep", "read_file"]
+write = ["write_file", "edit_file"]
+
+# white-box export: the vault's md files, mapped back to page ids (never a tool)
+[export]
+mode = "vault"

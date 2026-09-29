@@ -1,0 +1,18 @@
+# v2 default harness (the yardstick): kbio/crud_kb, an MCP stdio server over SQLite FTS5.
+name = "crud-kb"
+# v2 driver (kbio.run2): what `ingest` takes
+corpus = "jsonl"
+
+[mcp]
+command = ["{python}", "-m", "kbio.crud_kb", "serve", "--db", "{store}/kb.db"]
+
+[ingest]
+command = ["{python}", "-m", "kbio.crud_kb", "ingest", "{kb}", "--db", "{store}/kb.db"]
+
+[tools]
+read = ["search", "read", "list"]
+write = ["create", "update", "delete"]
+
+# v2 driver: white-box export for scoring (a CLI step, never an MCP tool)
+[export]
+command = ["{python}", "-m", "kbio.crud_kb", "export", "--db", "{store}/kb.db"]

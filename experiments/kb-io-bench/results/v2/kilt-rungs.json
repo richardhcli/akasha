@@ -1,0 +1,341 @@
+{
+ "source": "http://dl.fbaipublicfiles.com/KILT/kilt_knowledgesource.json",
+ "source_md5": "d1dca62aa6ba889d2e842182e3114af5",
+ "seed": 20260927,
+ "index_pages": 5903530,
+ "eligible_pages": 5889297,
+ "core_pairs": [
+  {
+   "core": "791422",
+   "core_title": "The Hollywood Reporter",
+   "linked": "418334",
+   "linked_title": "Cinema of the United States"
+  },
+  {
+   "core": "6278177",
+   "core_title": "Praying town",
+   "linked": "24091",
+   "linked_title": "Puritans"
+  },
+  {
+   "core": "57502085",
+   "core_title": "2018–19 Big East Conference men's basketball season",
+   "linked": "57030167",
+   "linked_title": "2018–19 NCAA Division I men's basketball season"
+  },
+  {
+   "core": "34496876",
+   "core_title": "John Richardson (special effects designer)",
+   "linked": "9316",
+   "linked_title": "England"
+  },
+  {
+   "core": "12589061",
+   "core_title": "Timeline of Mary Wollstonecraft",
+   "linked": "158019",
+   "linked_title": "Kingdom of Great Britain"
+  },
+  {
+   "core": "10978472",
+   "core_title": "Justice and Witness Ministries",
+   "linked": "303434",
+   "linked_title": "United Church of Christ"
+  },
+  {
+   "core": "23887462",
+   "core_title": "Enough Stupidity in Every Wise Man",
+   "linked": "30342",
+   "linked_title": "Transliteration"
+  },
+  {
+   "core": "22054388",
+   "core_title": "Wings of Freedom Aviation Museum",
+   "linked": "133369",
+   "linked_title": "Horsham, Pennsylvania"
+  },
+  {
+   "core": "35203919",
+   "core_title": "Park Tae-joon",
+   "linked": "888903",
+   "linked_title": "POSCO"
+  },
+  {
+   "core": "72741",
+   "core_title": "Kristen Nygaard",
+   "linked": "5323",
+   "linked_title": "Computer science"
+  },
+  {
+   "core": "10617831",
+   "core_title": "International School of Azerbaijan",
+   "linked": "4566",
+   "linked_title": "Baku"
+  },
+  {
+   "core": "43771009",
+   "core_title": "Downtown Kollam",
+   "linked": "160463",
+   "linked_title": "Central business district"
+  },
+  {
+   "core": "201949",
+   "core_title": "Mia Farrow",
+   "linked": "142724",
+   "linked_title": "Golden Globe Awards"
+  },
+  {
+   "core": "2968767",
+   "core_title": "Mark Austin (journalist)",
+   "linked": "216355",
+   "linked_title": "Sky News"
+  },
+  {
+   "core": "222583",
+   "core_title": "Adiós",
+   "linked": "3206362",
+   "linked_title": "Adios (Böhse Onkelz album)"
+  },
+  {
+   "core": "41336733",
+   "core_title": "The Country Kid",
+   "linked": "521313",
+   "linked_title": "William Beaudine"
+  },
+  {
+   "core": "24119106",
+   "core_title": "Carlo Pelanda",
+   "linked": "5795003",
+   "linked_title": "Tolmezzo"
+  },
+  {
+   "core": "11406739",
+   "core_title": "Mesopredator release hypothesis",
+   "linked": "9630",
+   "linked_title": "Ecology"
+  },
+  {
+   "core": "58628400",
+   "core_title": "Terrell A. Morgan",
+   "linked": "22760983",
+   "linked_title": "Linguistics"
+  },
+  {
+   "core": "22054624",
+   "core_title": "Étienne Loulié",
+   "linked": "74342",
+   "linked_title": "Sainte-Chapelle"
+  },
+  {
+   "core": "3944674",
+   "core_title": "Cornwall Railway",
+   "linked": "93810",
+   "linked_title": "Broad-gauge railway"
+  },
+  {
+   "core": "37254856",
+   "core_title": "Hemilability",
+   "linked": "5914",
+   "linked_title": "Catalysis"
+  },
+  {
+   "core": "14999425",
+   "core_title": "Russwood Park",
+   "linked": "185604",
+   "linked_title": "Stadium"
+  },
+  {
+   "core": "34480828",
+   "core_title": "Yvonne Mwale",
+   "linked": "15613",
+   "linked_title": "Jazz"
+  },
+  {
+   "core": "45594779",
+   "core_title": "Jeananne Goossen",
+   "linked": "7954643",
+   "linked_title": "McGill University"
+  },
+  {
+   "core": "548585",
+   "core_title": "Tolmin",
+   "linked": "11884",
+   "linked_title": "German language"
+  },
+  {
+   "core": "3368353",
+   "core_title": "Freedom on the Wallaby",
+   "linked": "156799",
+   "linked_title": "Henry Lawson"
+  },
+  {
+   "core": "72351",
+   "core_title": "Deventer",
+   "linked": "4149190",
+   "linked_title": "Salland"
+  },
+  {
+   "core": "1779619",
+   "core_title": "Toine Manders",
+   "linked": "21148",
+   "linked_title": "Netherlands"
+  },
+  {
+   "core": "12369803",
+   "core_title": "Wayne Hatswell",
+   "linked": "59908",
+   "linked_title": "Swindon"
+  },
+  {
+   "core": "26428680",
+   "core_title": "Ernest Failloubaz",
+   "linked": "1586474",
+   "linked_title": "Avenches"
+  },
+  {
+   "core": "1539909",
+   "core_title": "Conrotatory and disrotatory",
+   "linked": "1256620",
+   "linked_title": "Electrocyclic reaction"
+  },
+  {
+   "core": "50229560",
+   "core_title": "April 2016 North American storm complex",
+   "linked": "27190981",
+   "linked_title": "Cold-core low"
+  },
+  {
+   "core": "31248774",
+   "core_title": "Teck Railway",
+   "linked": "217450",
+   "linked_title": "States of Germany"
+  },
+  {
+   "core": "683979",
+   "core_title": "Lost Patrol (video game)",
+   "linked": "2255337",
+   "linked_title": "Action role-playing game"
+  },
+  {
+   "core": "39468057",
+   "core_title": "American Psycho (musical)",
+   "linked": "20572",
+   "linked_title": "Musical theatre"
+  },
+  {
+   "core": "44301184",
+   "core_title": "The Girl in the Green Sweater",
+   "linked": "55045526",
+   "linked_title": "Daniel Paisner"
+  },
+  {
+   "core": "844301",
+   "core_title": "Politics of Flanders",
+   "linked": "10878",
+   "linked_title": "Flanders"
+  },
+  {
+   "core": "1858650",
+   "core_title": "Kon Kan",
+   "linked": "19851291",
+   "linked_title": "Canadians"
+  },
+  {
+   "core": "8825333",
+   "core_title": "Jennifer Vanderbes",
+   "linked": "645042",
+   "linked_title": "New York City"
+  },
+  {
+   "core": "96956",
+   "core_title": "Rio Blanco County, Colorado",
+   "linked": "18618239",
+   "linked_title": "U.S. state"
+  },
+  {
+   "core": "55860996",
+   "core_title": "Hayden Groves",
+   "linked": "279684",
+   "linked_title": "Chef"
+  },
+  {
+   "core": "21894167",
+   "core_title": "Rubén Tejada",
+   "linked": "22997",
+   "linked_title": "Panama"
+  },
+  {
+   "core": "5112664",
+   "core_title": "Frederick Corbet Davison",
+   "linked": "378232",
+   "linked_title": "University of Georgia"
+  },
+  {
+   "core": "4143506",
+   "core_title": "Superboy-Prime",
+   "linked": "9105",
+   "linked_title": "DC Comics"
+  },
+  {
+   "core": "14477002",
+   "core_title": "1983 Pittsburgh Steelers season",
+   "linked": "21211",
+   "linked_title": "National Football League"
+  },
+  {
+   "core": "33538036",
+   "core_title": "Herbert Gelernter",
+   "linked": "251208",
+   "linked_title": "Stony Brook University"
+  },
+  {
+   "core": "22905816",
+   "core_title": "Beverly Hills Public Library",
+   "linked": "182010",
+   "linked_title": "Public library"
+  },
+  {
+   "core": "39264419",
+   "core_title": "Patna Municipal Corporation",
+   "linked": "18691354",
+   "linked_title": "Patna"
+  },
+  {
+   "core": "30389060",
+   "core_title": "The Daily Voice (U.S. hyperlocal news)",
+   "linked": "15647675",
+   "linked_title": "Community journalism"
+  }
+ ],
+ "rungs": {
+  "1e2": {
+   "pages": 100,
+   "sha256_ids": "bfdd7a5b9e6260c44cba99d4b29fad1040c6b6803e608b99af2725336629adf1",
+   "bytes_src": 4669881
+  },
+  "1e3": {
+   "pages": 1000,
+   "sha256_ids": "d7f73b043c4b8005e1284a839d7cbfe149833156cd1a45cbe509f1c083638e4c",
+   "bytes_src": 10854378
+  },
+  "1e4": {
+   "pages": 10000,
+   "sha256_ids": "749fc6be6c777e8d2fa4946fd87622009deb26e7cdec0424672861c98350ec53",
+   "bytes_src": 64569437
+  },
+  "1e5": {
+   "pages": 100000,
+   "sha256_ids": "31c3bd68e8f5e96b31b159f4c30e7fcd6303891d72615f6833590c8315002648",
+   "bytes_src": 629689429
+  },
+  "1e6": {
+   "pages": 1000000,
+   "sha256_ids": "19467eb0e1ffc3d1e7a54b433a0e892e638fda865bf3334ce62d8239a763a5d6",
+   "bytes_src": 6321095740
+  },
+  "all": {
+   "pages": 5889297,
+   "sha256_ids": "f8ac8135d8a853ba184d380b3bfab6d95a8fbc58257aa8780b14ee79b5e19958",
+   "bytes_src": 37309530094
+  }
+ }
+}
